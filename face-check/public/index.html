@@ -1,0 +1,72 @@
+﻿<!doctype html>
+<html lang="ru">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>Mood Logger</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <h2>Mood Logger</h2>
+
+    <div class="controls">
+      <div class="rtsp-row">
+        <input id="rtspName" type="text" placeholder="Имя камеры" />
+        <input id="rtspUrl" type="text" placeholder="rtsp://user:pass@host:554/stream" />
+        <button id="addRtsp">Добавить камеру</button>
+      </div>
+      <div class="rtsp-row">
+        <select id="rtspSelect">
+          <option value="">Выбрать камеру</option>
+        </select>
+        <button id="connectRtsp">Подключить RTSP</button>
+        <button id="deleteRtsp">Удалить камеру</button>
+        <button id="useWebcam">Веб-камера (для тестов)</button>
+        <button id="clearLogs">Очистить логи</button>
+        <button id="observationToggle">Начать наблюдение</button>
+      </div>
+    </div>
+
+    <div class="row"> 
+      <div>
+        <div id="loadingStatus" class="status hidden" style="margin-bottom:8px;">Загрузка камеры...</div>
+        <div id="mediaWrap" class="hidden">
+          <div class="video-stack">
+            <video id="video" autoplay muted playsinline></video>
+            <canvas id="overlay"></canvas>
+          </div>
+          <canvas id="stream" class="hidden"></canvas>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="muted" style="margin-top:10px;">Люди в кадре</div>
+        <div id="names">--</div>
+        <div class="muted" style="margin-top:10px;">Примерные кадры в секунду</div>
+        <div id="fps">-</div>
+      </div>
+    </div>
+
+    <div class="card" style="margin-top:16px;">
+      <div class="muted">Изменения</div>
+      <div id="logs"></div>
+    </div>
+
+    <div id="observationResults" class="card hidden" style="margin-top:16px;">
+      <div class="muted">Результаты последнего наблюдения</div>
+      <div class="results">
+        <div id="observationDuration">Длительность: --</div>
+        <div id="observationTopMood">Самая частая эмоция за наблюдение: --</div>
+        <select id="observationPeopleSelect" class="hidden" style="margin-top:8px;">
+          <option value="__all__">Все люди</option>
+        </select>
+        <div id="observationPeople">Люди: --</div>
+      </div>
+      <button id="clearObservation" style="margin-top:10px;">Очистить результаты</button>
+    </div>
+
+    <script defer src="https://unpkg.com/face-api.js@0.22.2/dist/face-api.min.js"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/rtsp-relay@1.9.0/browser/index.js"></script>
+    <script type="module" src="./app.js"></script>
+  </body>
+</html>
