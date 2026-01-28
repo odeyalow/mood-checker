@@ -4,7 +4,6 @@ import { use } from "react";
 import {
   Card,
   Col,
-  List,
   Progress,
   Row,
   Space,
@@ -78,7 +77,7 @@ export default function DashboardPage({
                   title="Негатив"
                   value={18}
                   suffix="%"
-                  valueStyle={{ color: "#dc2626" }}
+                  styles={{ content: { color: "#dc2626" } }}
                 />
                 <Text type="secondary">-3% с прошлой недели</Text>
               </Card>
@@ -110,21 +109,32 @@ export default function DashboardPage({
 
         <Col xs={24} lg={8}>
           <Card title="Последние распознавания" className="soft-card">
-            <List
-              dataSource={recentEvents}
-              renderItem={(item) => (
-                <List.Item>
-                  <List.Item.Meta
-                    avatar={<Avatar>{item.name[0]}</Avatar>}
-                    title={item.name}
-                    description={item.time}
-                  />
+            <Space orientation="vertical" size={16} style={{ width: "100%" }}>
+              {recentEvents.map((item) => (
+                <div
+                  key={item.name}
+                  style={{
+                    display: "flex",
+                    alignItems: "center",
+                    justifyContent: "space-between",
+                    gap: 12,
+                  }}
+                >
+                  <Space>
+                    <Avatar>{item.name[0]}</Avatar>
+                    <div>
+                      <Text strong>{item.name}</Text>
+                      <div>
+                        <Text type="secondary">{item.time}</Text>
+                      </div>
+                    </div>
+                  </Space>
                   <Tag color={item.mood === "Негатив" ? "red" : "blue"}>
                     {item.mood}
                   </Tag>
-                </List.Item>
-              )}
-            />
+                </div>
+              ))}
+            </Space>
           </Card>
 
           <Card
@@ -132,18 +142,27 @@ export default function DashboardPage({
             style={{ marginTop: 16 }}
             className="soft-card"
           >
-            <List
-              dataSource={alerts}
-              renderItem={(item) => (
-                <List.Item>
-                  <Space orientation="vertical" size={2}>
+            <Space orientation="vertical" size={12} style={{ width: "100%" }}>
+              {alerts.map((item) => (
+                <div
+                  key={`${item.room}-${item.time}`}
+                  style={{
+                    display: "flex",
+                    alignItems: "center",
+                    justifyContent: "space-between",
+                    gap: 12,
+                  }}
+                >
+                  <div>
                     <Text strong>{item.room}</Text>
-                    <Text type="secondary">{item.time}</Text>
-                  </Space>
+                    <div>
+                      <Text type="secondary">{item.time}</Text>
+                    </div>
+                  </div>
                   <Tag color="red">{item.mood}</Tag>
-                </List.Item>
-              )}
-            />
+                </div>
+              ))}
+            </Space>
           </Card>
 
           <Card
