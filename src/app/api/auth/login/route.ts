@@ -1,5 +1,4 @@
 import { NextResponse } from "next/server";
-import { cookies } from "next/headers";
 import { prisma } from "@/lib/prisma";
 import { signAuthToken, verifyPassword } from "@/lib/auth";
 
@@ -30,8 +29,8 @@ export async function POST(request: Request) {
   const isHttps =
     forwardedProto === "https" || new URL(request.url).protocol === "https:";
   const forceSecureCookie = process.env.AUTH_COOKIE_SECURE === "true";
-  const cookieStore = await cookies();
-  cookieStore.set("mc_auth", token, {
+  const response = NextResponse.json({ ok: true, login: user.login });
+  response.cookies.set("mc_auth", token, {
     httpOnly: true,
     sameSite: "lax",
     secure: forceSecureCookie || isHttps,
@@ -39,5 +38,5 @@ export async function POST(request: Request) {
     maxAge: 60 * 60 * 24 * 30,
   });
 
-  return NextResponse.json({ ok: true, login: user.login });
+  return response;
 }
