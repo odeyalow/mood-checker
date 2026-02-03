@@ -44,11 +44,5 @@ export async function POST(request: Request) {
     },
   });
 
-  console.log("[api/recognitions] saved", {
-    name: item.name,
-    mood: item.mood,
-    detectedAt: item.detectedAt.toISOString(),
-  });
-
   return NextResponse.json({ item }, { status: 201 });
 }

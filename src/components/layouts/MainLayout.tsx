@@ -6,6 +6,7 @@ import {
   DashboardOutlined,
   VideoCameraOutlined,
   TrophyOutlined,
+  CalendarOutlined,
   LogoutOutlined,
 } from "@ant-design/icons";
 import { usePathname, useRouter } from "next/navigation";
@@ -36,6 +37,11 @@ const menuItems = [
     icon: <TrophyOutlined />,
     label: "Топ негативных",
   },
+  {
+    key: "by-date",
+    icon: <CalendarOutlined />,
+    label: "По дате",
+  },
 ];
 
 export default function MainLayout({
@@ -54,6 +60,8 @@ export default function MainLayout({
 
   const selectedKey = pathname?.includes("/students/")
     ? "top"
+    : pathname?.includes("/by-date")
+      ? "by-date"
     : pathname?.includes("/cameras")
       ? "cameras"
       : "dashboard";
@@ -65,6 +73,8 @@ export default function MainLayout({
         <Link href={`/${locale}/dashboard`}>{item.label}</Link>
       ) : item.key === "cameras" ? (
         <Link href={`/${locale}/cameras`}>{item.label}</Link>
+      ) : item.key === "by-date" ? (
+        <Link href={`/${locale}/by-date`}>{item.label}</Link>
       ) : (
         <Link href={`/${locale}/students/top`}>{item.label}</Link>
       ),

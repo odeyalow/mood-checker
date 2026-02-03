@@ -1,6 +1,7 @@
 let modelsPromise: Promise<void> | null = null;
 let matcherPromise: Promise<any | null> | null = null;
 let recognitionReady = false;
+const FACE_MATCH_DISTANCE = 0.55;
 
 function waitForGlobal(key: "faceapi" | "loadPlayer", timeoutMs = 15000) {
   return new Promise<void>((resolve, reject) => {
@@ -24,6 +25,7 @@ export async function ensureFaceApiReady() {
   if (!modelsPromise) {
     modelsPromise = (async () => {
       const faceapi = (window as any).faceapi;
+      await faceapi.nets.ssdMobilenetv1.loadFromUri("/models");
       await faceapi.nets.tinyFaceDetector.loadFromUri("/models");
       await faceapi.nets.faceExpressionNet.loadFromUri("/models");
       try {
@@ -67,7 +69,7 @@ async function loadKnownFaces() {
       const detection = await faceapi
         .detectSingleFace(
           img,
-          new faceapi.TinyFaceDetectorOptions({ inputSize: 320, scoreThreshold: 0.4 })
+          new faceapi.SsdMobilenetv1Options({ minConfidence: 0.35 })
         )
         .withFaceLandmarks()
         .withFaceDescriptor();
@@ -79,7 +81,7 @@ async function loadKnownFaces() {
   }
 
   if (!labeledDescriptors.length) return null;
-  return new faceapi.FaceMatcher(labeledDescriptors, 0.7);
+  return new faceapi.FaceMatcher(labeledDescriptors, FACE_MATCH_DISTANCE);
 }
 
 export async function getFaceMatcher() {
