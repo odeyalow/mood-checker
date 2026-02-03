@@ -20,6 +20,14 @@ type CameraConfig = {
   type?: "rtsp" | "webcam";
 };
 
+type RecognitionPayload = {
+  name: string;
+  mood: string;
+  detectedAt: string;
+};
+
+const PERSON_ABSENCE_GRACE_MS = 2_000;
+
 const MOOD_LABELS: Record<string, string> = {
   neutral: "Нейтральный",
   happy: "Счастливый",
@@ -68,6 +76,10 @@ export default function CameraTile({ camera }: { camera: CameraConfig }) {
   const overlayRef = useRef<HTMLCanvasElement | null>(null);
   const playerRef = useRef<any>(null);
   const webcamStreamRef = useRef<MediaStream | null>(null);
+  const lastSeenRef = useRef<Map<string, number>>(new Map());
+  const lastSentRef = useRef<Map<string, { mood: string }>>(
+    new Map()
+  );
   const [status, setStatus] = useState("loading");
   const [fps, setFps] = useState(0);
   const [detected, setDetected] = useState<{ name: string; mood: string }[]>(
@@ -94,6 +106,27 @@ export default function CameraTile({ camera }: { camera: CameraConfig }) {
       if (webcamStreamRef.current) {
         webcamStreamRef.current.getTracks().forEach((track) => track.stop());
         webcamStreamRef.current = null;
+      }
+      lastSeenRef.current.clear();
+      lastSentRef.current.clear();
+    };
+
+    const sendRecognition = async (payload: RecognitionPayload) => {
+      try {
+        const response = await fetch("/api/recognitions", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+        });
+        console.log("[recognition] sent", payload);
+        if (!response.ok) {
+          console.error("[recognition] save failed", {
+            status: response.status,
+            payload,
+          });
+        }
+      } catch (error) {
+        console.error("[recognition] request failed", { payload, error });
       }
     };
 
@@ -226,8 +259,48 @@ export default function CameraTile({ camera }: { camera: CameraConfig }) {
             Array.from(people.entries()).map(([name, mood]) => ({ name, mood }))
           );
         }
+
+        const nowTs = Date.now();
+        for (const [name, mood] of people.entries()) {
+          if (name === "Unknown") continue;
+          const lastSeenAt = lastSeenRef.current.get(name);
+          const wasVisibleRecently =
+            typeof lastSeenAt === "number" &&
+            nowTs - lastSeenAt <= PERSON_ABSENCE_GRACE_MS;
+          const lastSent = lastSentRef.current.get(name);
+          const moodChanged = lastSent ? lastSent.mood !== mood : true;
+          const shouldSend = !wasVisibleRecently || moodChanged;
+          if (!shouldSend) continue;
+
+          const payload: RecognitionPayload = {
+            name,
+            mood,
+            detectedAt: new Date(nowTs).toISOString(),
+          };
+          lastSentRef.current.set(name, { mood });
+          void sendRecognition(payload);
+        }
+        for (const name of people.keys()) {
+          if (name !== "Unknown") {
+            lastSeenRef.current.set(name, nowTs);
+          }
+        }
+
+        for (const [name, seenAt] of lastSeenRef.current.entries()) {
+          if (nowTs - seenAt > PERSON_ABSENCE_GRACE_MS) {
+            lastSeenRef.current.delete(name);
+            lastSentRef.current.delete(name);
+          }
+        }
       } else if (active) {
         setDetected([]);
+        const nowTs = Date.now();
+        for (const [name, seenAt] of lastSeenRef.current.entries()) {
+          if (nowTs - seenAt > PERSON_ABSENCE_GRACE_MS) {
+            lastSeenRef.current.delete(name);
+            lastSentRef.current.delete(name);
+          }
+        }
       }
 
       loopTimer = window.setTimeout(loop, 140);
@@ -311,4 +384,3 @@ export default function CameraTile({ camera }: { camera: CameraConfig }) {
     </Card>
   );
 }
-

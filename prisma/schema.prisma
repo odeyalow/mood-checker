@@ -1,0 +1,34 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id           String   @id @default(cuid())
+  login        String   @unique
+  passwordHash String
+  createdAt    DateTime @default(now())
+}
+
+model Recognition {
+  id         String   @id @default(cuid())
+  name       String
+  mood       String
+  detectedAt DateTime @default(now())
+}
+
+model EmotionSnapshot {
+  id            String   @id @default(cuid())
+  bucketStart   DateTime @unique
+  totalStudents Int
+  positiveCount Int
+  neutralCount  Int
+  negativeCount Int
+  students      Json
+  recognitions  Json
+  createdAt     DateTime @default(now())
+}

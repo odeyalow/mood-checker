@@ -1,7 +1,8 @@
 "use client";
 
-import { use } from "react";
+import { use, useEffect, useState } from "react";
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 import { Button, Form, Input, Typography, Divider, Space } from "antd";
 import {
   EyeInvisibleOutlined,
@@ -20,6 +21,58 @@ export default function LoginPage({
   params: Promise<{ locale: string }>;
 }) {
   const { locale } = use(params);
+  const router = useRouter();
+  const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [checking, setChecking] = useState(true);
+
+  useEffect(() => {
+    let active = true;
+    async function checkAuth() {
+      try {
+        const response = await fetch("/api/auth/me", { cache: "no-store" });
+        if (response.ok) {
+          if (active) {
+            router.replace(`/${locale}/dashboard`);
+          }
+          return;
+        }
+      } catch {
+        // ignore
+      } finally {
+        if (active) {
+          setChecking(false);
+        }
+      }
+    }
+    checkAuth();
+    return () => {
+      active = false;
+    };
+  }, [locale, router]);
+
+  async function handleSubmit(values: { login: string; password: string }) {
+    setSubmitting(true);
+    setError(null);
+    try {
+      const response = await fetch("/api/auth/login", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(values),
+      });
+
+      if (!response.ok) {
+        setError("Неверный логин или пароль.");
+        return;
+      }
+
+      router.push(`/${locale}/dashboard`);
+    } catch {
+      setError("Ошибка соединения. Повторите попытку.");
+    } finally {
+      setSubmitting(false);
+    }
+  }
   return (
     <div className="auth-split">
       <section className="auth-hero">
@@ -63,11 +116,19 @@ export default function LoginPage({
           </Title>
         </Space>
 
-        <Form layout="vertical">
-          <Form.Item label="Логин">
+        <Form layout="vertical" onFinish={handleSubmit}>
+          <Form.Item
+            label="Логин"
+            name="login"
+            rules={[{ required: true, message: "Введите логин" }]}
+          >
             <Input prefix={<UserOutlined />} placeholder="Введите логин" />
           </Form.Item>
-          <Form.Item label="Пароль">
+          <Form.Item
+            label="Пароль"
+            name="password"
+            rules={[{ required: true, message: "Введите пароль" }]}
+          >
             <Input.Password
               prefix={<LockOutlined />}
               placeholder="Введите пароль"
@@ -76,7 +137,18 @@ export default function LoginPage({
               }
             />
           </Form.Item>
-          <Button type="primary" icon={<LoginOutlined />} block>
+          {error ? (
+            <Text type="danger" style={{ display: "block", marginBottom: 8 }}>
+              {error}
+            </Text>
+          ) : null}
+          <Button
+            type="primary"
+            icon={<LoginOutlined />}
+            block
+            htmlType="submit"
+            loading={submitting || checking}
+          >
             Войти
           </Button>
         </Form>
@@ -84,8 +156,7 @@ export default function LoginPage({
         <Divider />
         <Space style={{ justifyContent: "space-between", width: "100%" }}>
           <LocaleSelect size="large" value={locale === "kz" ? "kz" : "ru"} />
-          <Link href={`/${locale}/dashboard`}>Перейти в демо</Link>
-        </Space>
+=        </Space>
       </section>
     </div>
   );

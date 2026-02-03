@@ -1,20 +1,24 @@
-"use client";
+﻿"use client";
 
 import Link from "next/link";
-import { Layout, Menu, Typography, Input, Select, Button, Space } from "antd";
+import { Layout, Menu, Typography, Select, Button, Space } from "antd";
 import {
   DashboardOutlined,
   VideoCameraOutlined,
   TrophyOutlined,
-  UserOutlined,
-  SearchOutlined,
   LogoutOutlined,
 } from "@ant-design/icons";
-import { usePathname } from "next/navigation";
+import { usePathname, useRouter } from "next/navigation";
+import { useState } from "react";
 import LocaleSelect from "@/components/ui/LocaleSelect";
 
 const { Header, Sider, Content } = Layout;
 const { Title, Text } = Typography;
+
+type StudentOption = {
+  value: string;
+  label: string;
+};
 
 const menuItems = [
   {
@@ -32,11 +36,6 @@ const menuItems = [
     icon: <TrophyOutlined />,
     label: "Топ негативных",
   },
-  {
-    key: "student",
-    icon: <UserOutlined />,
-    label: "Студент",
-  },
 ];
 
 export default function MainLayout({
@@ -49,24 +48,55 @@ export default function MainLayout({
   locale: string;
 }>) {
   const pathname = usePathname();
-  const selectedKey =
-    pathname?.includes("/students/top")
-      ? "top"
-      : pathname?.includes("/students/")
-        ? "student"
-        : "dashboard";
+  const router = useRouter();
+  const [searchLoading, setSearchLoading] = useState(false);
+  const [studentOptions, setStudentOptions] = useState<StudentOption[]>([]);
+
+  const selectedKey = pathname?.includes("/students/")
+    ? "top"
+    : pathname?.includes("/cameras")
+      ? "cameras"
+      : "dashboard";
 
   const localizedMenuItems = menuItems.map((item) => ({
     ...item,
     label:
-      item.key === "dashboard" || item.key === "cameras" ? (
+      item.key === "dashboard" ? (
         <Link href={`/${locale}/dashboard`}>{item.label}</Link>
-      ) : item.key === "top" ? (
-        <Link href={`/${locale}/students/top`}>{item.label}</Link>
+      ) : item.key === "cameras" ? (
+        <Link href={`/${locale}/cameras`}>{item.label}</Link>
       ) : (
-        <Link href={`/${locale}/students/123`}>{item.label}</Link>
+        <Link href={`/${locale}/students/top`}>{item.label}</Link>
       ),
   }));
+
+  async function handleStudentSearch(value: string) {
+    const q = value.trim();
+    if (!q) {
+      setStudentOptions([]);
+      return;
+    }
+
+    setSearchLoading(true);
+    try {
+      const response = await fetch(`/api/students?q=${encodeURIComponent(q)}&limit=8`, {
+        cache: "no-store",
+      });
+      if (!response.ok) return;
+
+      const data = await response.json();
+      if (!Array.isArray(data.items)) return;
+
+      setStudentOptions(
+        data.items.map((item: { id: string; name: string }) => ({
+          value: item.id,
+          label: item.name,
+        }))
+      );
+    } finally {
+      setSearchLoading(false);
+    }
+  }
 
   return (
     <Layout style={{ minHeight: "100vh" }}>
@@ -92,7 +122,14 @@ export default function MainLayout({
           style={{ background: "transparent", border: "none" }}
         />
         <div style={{ marginTop: "auto", padding: "24px 12px" }}>
-          <Button icon={<LogoutOutlined />} block>
+          <Button
+            icon={<LogoutOutlined />}
+            block
+            onClick={async () => {
+              await fetch("/api/auth/logout", { method: "POST" });
+              router.push(`/${locale}/login`);
+            }}
+          >
             Выйти
           </Button>
         </div>
@@ -117,19 +154,17 @@ export default function MainLayout({
             <Text type="secondary">Обновлено: сегодня</Text>
           </div>
           <Space size="middle" wrap>
-            <Input
-              placeholder="Поиск студента"
-              prefix={<SearchOutlined />}
-              style={{ width: 220 }}
-            />
             <Select
-              defaultValue="7d"
-              options={[
-                { label: "Сегодня", value: "1d" },
-                { label: "7 дней", value: "7d" },
-                { label: "30 дней", value: "30d" },
-              ]}
-              style={{ width: 140 }}
+              showSearch
+              placeholder="Поиск студента по БД"
+              filterOption={false}
+              onSearch={handleStudentSearch}
+              onSelect={(id) => router.push(`/${locale}/students/${id}`)}
+              options={studentOptions}
+              loading={searchLoading}
+              style={{ width: 240 }}
+              allowClear
+              notFoundContent={searchLoading ? "Поиск..." : "Ничего не найдено"}
             />
             <LocaleSelect value={locale === "kz" ? "kz" : "ru"} />
           </Space>

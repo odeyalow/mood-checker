@@ -1,10 +1,9 @@
-"use client";
+﻿"use client";
 
-import { use } from "react";
+import { use, useEffect, useState } from "react";
 import {
   Card,
   Col,
-  Progress,
   Row,
   Space,
   Statistic,
@@ -12,36 +11,56 @@ import {
   Typography,
   Avatar,
 } from "antd";
-import { ArrowDownOutlined, ArrowUpOutlined } from "@ant-design/icons";
 import MainLayout from "@/components/layouts/MainLayout";
-import CameraGrid from "@/components/face/CameraGrid";
-import FaceScripts from "@/components/face/FaceScripts";
+import EmotionTimelineChart from "@/components/dashboard/EmotionTimelineChart";
 
-const { Title, Text } = Typography;
+const { Text } = Typography;
 
-const recentEvents = [
-  {
-    name: "Алия Т.",
-    mood: "Негатив",
-    time: "2 мин назад",
-  },
-  {
-    name: "Ержан К.",
-    mood: "Нейтрально",
-    time: "7 мин назад",
-  },
-  {
-    name: "Мария Л.",
-    mood: "Позитив",
-    time: "11 мин назад",
-  },
-];
+type Recognition = {
+  id: string;
+  name: string;
+  mood: string;
+  detectedAt: string;
+};
 
-const alerts = [
-  { room: "Аудитория 410", mood: "Тревога", time: "09:42" },
-  { room: "Библиотека", mood: "Раздражение", time: "09:15" },
-  { room: "Аудитория 203", mood: "Скука", time: "08:58" },
-];
+type DashboardStats = {
+  connectedCameras: number;
+  recognitionsLast24h: number;
+  negativePercent: number;
+  negativeDeltaVsPrevDay: number;
+  riskZoneCount: number;
+};
+
+type EmotionPoint = {
+  bucketStart: string;
+  totalStudents: number;
+  positiveCount: number;
+  neutralCount: number;
+  negativeCount: number;
+};
+
+function formatDetectedAt(value: string) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return value;
+  return date.toLocaleTimeString("ru-RU", {
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+}
+
+function moodColor(mood: string) {
+  const normalized = mood.toLowerCase();
+  if (normalized.includes("нег")) return "red";
+  if (normalized.includes("поз") || normalized.includes("рад")) return "green";
+  if (normalized.includes("трев")) return "orange";
+  return "blue";
+}
+
+function deltaText(delta: number) {
+  if (delta > 0) return `+${delta}% к прошлому дню`;
+  if (delta < 0) return `${delta}% к прошлому дню`;
+  return "Без изменений к прошлому дню";
+}
 
 export default function DashboardPage({
   params,
@@ -49,70 +68,121 @@ export default function DashboardPage({
   params: Promise<{ locale: string }>;
 }) {
   const { locale } = use(params);
+  const [recentEvents, setRecentEvents] = useState<Recognition[]>([]);
+  const [stats, setStats] = useState<DashboardStats | null>(null);
+  const [emotionPoints, setEmotionPoints] = useState<EmotionPoint[]>([]);
+  const [loadError, setLoadError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let active = true;
+
+    async function loadDashboardData() {
+      try {
+        const [recentResponse, statsResponse, dynamicsResponse] = await Promise.all([
+          fetch("/api/recognitions?limit=3", { cache: "no-store" }),
+          fetch("/api/dashboard-stats", { cache: "no-store" }),
+          fetch("/api/emotion-dynamics", { cache: "no-store" }),
+        ]);
+
+        if (!recentResponse.ok || !statsResponse.ok || !dynamicsResponse.ok) {
+          if (active) {
+            const status = !recentResponse.ok
+              ? recentResponse.status
+              : !statsResponse.ok
+                ? statsResponse.status
+                : dynamicsResponse.status;
+            setLoadError(`Ошибка загрузки (${status})`);
+          }
+          return;
+        }
+
+        const [recentData, statsData, dynamicsData] = await Promise.all([
+          recentResponse.json(),
+          statsResponse.json(),
+          dynamicsResponse.json(),
+        ]);
+
+        if (active) {
+          if (Array.isArray(recentData.items)) {
+            setRecentEvents(recentData.items);
+          }
+          if (Array.isArray(dynamicsData.points)) {
+            setEmotionPoints(dynamicsData.points);
+          }
+          setStats(statsData);
+          setLoadError(null);
+        }
+      } catch {
+        if (active) {
+          setLoadError("Ошибка соединения");
+        }
+      }
+    }
+
+    loadDashboardData();
+    const timer = setInterval(loadDashboardData, 60_000);
+    return () => {
+      active = false;
+      clearInterval(timer);
+    };
+  }, []);
+
   return (
     <MainLayout title="Главный дэшборд" locale={locale}>
-      <FaceScripts />
       <Row gutter={[16, 16]}>
         <Col xs={24} lg={16}>
           <Row gutter={[16, 16]}>
             <Col xs={24} md={12} lg={6}>
               <Card className="soft-card">
-                <Statistic title="Активные камеры" value={12} />
-                <Text type="secondary">+2 за неделю</Text>
+                <Statistic title="Активные камеры" value={stats?.connectedCameras ?? 0} />
               </Card>
             </Col>
             <Col xs={24} md={12} lg={6}>
               <Card className="soft-card">
-                <Statistic
-                  title="Распознаваний"
-                  value={128}
-                  prefix={<ArrowUpOutlined />}
-                />
-                <Text type="secondary">Сегодня</Text>
+                <Statistic title="Распознаваний" value={stats?.recognitionsLast24h ?? 0} />
+                <Text type="secondary">За 24 часа</Text>
               </Card>
             </Col>
             <Col xs={24} md={12} lg={6}>
               <Card className="soft-card">
                 <Statistic
                   title="Негатив"
-                  value={18}
+                  value={stats?.negativePercent ?? 0}
                   suffix="%"
                   styles={{ content: { color: "#dc2626" } }}
                 />
-                <Text type="secondary">-3% с прошлой недели</Text>
+                <Text type="secondary">{deltaText(stats?.negativeDeltaVsPrevDay ?? 0)}</Text>
               </Card>
             </Col>
             <Col xs={24} md={12} lg={6}>
               <Card className="soft-card">
-                <Statistic
-                  title="Зона риска"
-                  value={7}
-                  prefix={<ArrowDownOutlined />}
-                />
-                <Text type="secondary">Студентов</Text>
+                <Statistic title="Зона риска" value={stats?.riskZoneCount ?? 0} />
+                <Text type="secondary">За 24 часа</Text>
               </Card>
             </Col>
           </Row>
-
-          <Card title="Камеры" style={{ marginTop: 16 }} className="soft-card">
-            <CameraGrid />
-          </Card>
 
           <Card
             title="Динамика эмоций"
             style={{ marginTop: 16 }}
             className="soft-card"
           >
-            <div className="chart-placeholder">График распределения эмоций</div>
+            <EmotionTimelineChart points={emotionPoints} />
+            <div style={{ marginTop: 8 }}>
+              <Text type="secondary">
+                Обновляется раз в минуту, окно 24 часа.
+              </Text>
+            </div>
           </Card>
         </Col>
 
         <Col xs={24} lg={8}>
           <Card title="Последние распознавания" className="soft-card">
             <Space orientation="vertical" size={16} style={{ width: "100%" }}>
+              {loadError ? <Text type="danger">{loadError}</Text> : null}
               {recentEvents.map((item) => (
                 <div
-                  key={item.name}
+                  key={item.id}
                   style={{
                     display: "flex",
                     alignItems: "center",
@@ -125,64 +195,13 @@ export default function DashboardPage({
                     <div>
                       <Text strong>{item.name}</Text>
                       <div>
-                        <Text type="secondary">{item.time}</Text>
+                        <Text type="secondary">{formatDetectedAt(item.detectedAt)}</Text>
                       </div>
                     </div>
                   </Space>
-                  <Tag color={item.mood === "Негатив" ? "red" : "blue"}>
-                    {item.mood}
-                  </Tag>
+                  <Tag color={moodColor(item.mood)}>{item.mood}</Tag>
                 </div>
               ))}
-            </Space>
-          </Card>
-
-          <Card
-            title="Негативные события"
-            style={{ marginTop: 16 }}
-            className="soft-card"
-          >
-            <Space orientation="vertical" size={12} style={{ width: "100%" }}>
-              {alerts.map((item) => (
-                <div
-                  key={`${item.room}-${item.time}`}
-                  style={{
-                    display: "flex",
-                    alignItems: "center",
-                    justifyContent: "space-between",
-                    gap: 12,
-                  }}
-                >
-                  <div>
-                    <Text strong>{item.room}</Text>
-                    <div>
-                      <Text type="secondary">{item.time}</Text>
-                    </div>
-                  </div>
-                  <Tag color="red">{item.mood}</Tag>
-                </div>
-              ))}
-            </Space>
-          </Card>
-
-          <Card
-            title="Распределение настроений"
-            style={{ marginTop: 16 }}
-            className="soft-card"
-          >
-            <Space orientation="vertical" size={12} style={{ width: "100%" }}>
-              <div>
-                <Text>Позитив</Text>
-                <Progress percent={42} showInfo={false} />
-              </div>
-              <div>
-                <Text>Нейтрально</Text>
-                <Progress percent={36} showInfo={false} />
-              </div>
-              <div>
-                <Text>Негатив</Text>
-                <Progress percent={22} showInfo={false} status="exception" />
-              </div>
             </Space>
           </Card>
         </Col>
