@@ -26,11 +26,15 @@ export async function POST(request: Request) {
   }
 
   const token = await signAuthToken({ sub: user.id, login: user.login });
+  const forwardedProto = request.headers.get("x-forwarded-proto");
+  const isHttps =
+    forwardedProto === "https" || new URL(request.url).protocol === "https:";
+  const forceSecureCookie = process.env.AUTH_COOKIE_SECURE === "true";
   const cookieStore = await cookies();
   cookieStore.set("mc_auth", token, {
     httpOnly: true,
     sameSite: "lax",
-    secure: process.env.NODE_ENV === "production",
+    secure: forceSecureCookie || isHttps,
     path: "/",
     maxAge: 60 * 60 * 24 * 30,
   });
