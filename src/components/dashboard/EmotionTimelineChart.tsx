@@ -7,12 +7,15 @@ type EmotionPoint = {
   negativeCount: number;
 };
 
-function buildPolyline(
-  values: number[],
-  maxValue: number,
-  width: number,
-  height: number
-) {
+type AppLocale = "ru" | "kz" | "en";
+
+const CHART_L10N = {
+  ru: { positive: "Позитив", neutral: "Нейтрально", negative: "Негатив" },
+  kz: { positive: "Позитив", neutral: "Нейтрал", negative: "Негатив" },
+  en: { positive: "Positive", neutral: "Neutral", negative: "Negative" },
+} as const;
+
+function buildPolyline(values: number[], maxValue: number, width: number, height: number) {
   if (values.length === 0) return "";
   if (maxValue <= 0) maxValue = 1;
   const stepX = values.length > 1 ? width / (values.length - 1) : width;
@@ -26,7 +29,13 @@ function buildPolyline(
     .join(" ");
 }
 
-export default function EmotionTimelineChart({ points }: { points: EmotionPoint[] }) {
+export default function EmotionTimelineChart({
+  points,
+  locale = "ru",
+}: {
+  points: EmotionPoint[];
+  locale?: AppLocale;
+}) {
   const width = 860;
   const height = 220;
   const positive = points.map((p) => p.positiveCount);
@@ -34,14 +43,17 @@ export default function EmotionTimelineChart({ points }: { points: EmotionPoint[
   const negative = points.map((p) => p.negativeCount);
   const maxValue = Math.max(1, ...positive, ...neutral, ...negative);
 
+  const t = CHART_L10N[locale];
+  const dateLocale = locale === "kz" ? "kk-KZ" : locale === "en" ? "en-US" : "ru-RU";
+
   const startLabel = points[0]
-    ? new Date(points[0].bucketStart).toLocaleTimeString("ru-RU", {
+    ? new Date(points[0].bucketStart).toLocaleTimeString(dateLocale, {
         hour: "2-digit",
         minute: "2-digit",
       })
     : "--:--";
   const endLabel = points[points.length - 1]
-    ? new Date(points[points.length - 1].bucketStart).toLocaleTimeString("ru-RU", {
+    ? new Date(points[points.length - 1].bucketStart).toLocaleTimeString(dateLocale, {
         hour: "2-digit",
         minute: "2-digit",
       })
@@ -75,9 +87,9 @@ export default function EmotionTimelineChart({ points }: { points: EmotionPoint[
         <span style={{ color: "#6b7280" }}>{endLabel}</span>
       </div>
       <div style={{ display: "flex", gap: 16, marginTop: 8, flexWrap: "wrap" }}>
-        <span style={{ color: "#22c55e" }}>Позитив</span>
-        <span style={{ color: "#3b82f6" }}>Нейтрально</span>
-        <span style={{ color: "#ef4444" }}>Негатив</span>
+        <span style={{ color: "#22c55e" }}>{t.positive}</span>
+        <span style={{ color: "#3b82f6" }}>{t.neutral}</span>
+        <span style={{ color: "#ef4444" }}>{t.negative}</span>
       </div>
     </div>
   );

@@ -20,6 +20,36 @@ type CameraConfig = {
   type?: "rtsp" | "webcam";
 };
 
+type CameraTileMode = "full" | "preview";
+type AppLocale = "ru" | "kz" | "en";
+
+const L10N = {
+  ru: {
+    online: "Онлайн",
+    error: "Ошибка",
+    loading: "Загрузка",
+    preview: "Превью",
+    recognition: "Распознавание",
+    noPeople: "Никого нет",
+  },
+  kz: {
+    online: "Онлайн",
+    error: "Қате",
+    loading: "Жүктеу",
+    preview: "Алдын ала қарау",
+    recognition: "Тану",
+    noPeople: "Ешкім жоқ",
+  },
+  en: {
+    online: "Online",
+    error: "Error",
+    loading: "Loading",
+    preview: "Preview",
+    recognition: "Recognition",
+    noPeople: "No people",
+  },
+} as const;
+
 type RecognitionPayload = {
   name: string;
   mood: string;
@@ -27,16 +57,18 @@ type RecognitionPayload = {
 };
 
 const PERSON_ABSENCE_GRACE_MS = 2_000;
-const EMOTION_STABILITY_FRAMES = 2;
+const EMOTION_STABILITY_FRAMES = 3;
+const EMOTION_CONFIDENCE_THRESHOLD = 0.52;
+const DETECTION_SCORE_THRESHOLD = 0.55;
 
 const MOOD_LABELS: Record<string, string> = {
-  neutral: "Нейтральный",
-  happy: "Счастливый",
-  sad: "Грустный",
-  angry: "Злой",
-  fearful: "Испуганный",
-  disgusted: "Отвращение",
-  surprised: "Удивлен",
+  neutral: "Neutral",
+  happy: "Happy",
+  sad: "Sad",
+  angry: "Angry",
+  fearful: "Fearful",
+  disgusted: "Disgusted",
+  surprised: "Surprised",
 };
 
 function bestExpression(expressions: Record<string, number>) {
@@ -48,55 +80,83 @@ function bestExpression(expressions: Record<string, number>) {
       bestKey = key;
     }
   }
-  if (!MOOD_LABELS[bestKey] || bestVal < 0.45) bestKey = "neutral";
+  if (!MOOD_LABELS[bestKey] || bestVal < EMOTION_CONFIDENCE_THRESHOLD) bestKey = "neutral";
   return bestKey;
 }
 
 function moodTagColor(label: string) {
   switch (label) {
-    case "Злой":
+    case "Angry":
       return "red";
-    case "Грустный":
+    case "Sad":
       return "geekblue";
-    case "Испуганный":
+    case "Fearful":
       return "volcano";
-    case "Отвращение":
+    case "Disgusted":
       return "magenta";
-    case "Удивлен":
+    case "Surprised":
       return "gold";
-    case "Счастливый":
+    case "Happy":
       return "green";
     default:
       return "blue";
   }
 }
 
-export default function CameraTile({ camera }: { camera: CameraConfig }) {
+export default function CameraTile({
+  camera,
+  mode = "full",
+  locale = "ru",
+}: {
+  camera: CameraConfig;
+  mode?: CameraTileMode;
+  locale?: AppLocale;
+}) {
+  const t = L10N[locale];
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const streamRef = useRef<HTMLCanvasElement | null>(null);
   const overlayRef = useRef<HTMLCanvasElement | null>(null);
   const playerRef = useRef<any>(null);
   const webcamStreamRef = useRef<MediaStream | null>(null);
   const lastSeenRef = useRef<Map<string, number>>(new Map());
-  const lastSentRef = useRef<Map<string, { mood: string }>>(
-    new Map()
-  );
-  const stableMoodRef = useRef<Map<string, { mood: string; count: number }>>(
-    new Map()
-  );
+  const lastSentRef = useRef<Map<string, { mood: string }>>(new Map());
+  const stableMoodRef = useRef<Map<string, { mood: string; count: number }>>(new Map());
+  const moodHistoryRef = useRef<Map<string, string[]>>(new Map());
+
   const [status, setStatus] = useState("loading");
   const [fps, setFps] = useState(0);
-  const [detected, setDetected] = useState<{ name: string; mood: string }[]>(
-    []
-  );
+  const [detected, setDetected] = useState<{ name: string; mood: string }[]>([]);
 
+  const recognitionEnabled = mode === "full";
   const isRtsp = camera.type !== "webcam" && Boolean(camera.rtspUrl);
 
   const statusTag = useMemo(() => {
-    if (status === "ready") return <Badge status="success" text="Онлайн" />;
-    if (status === "error") return <Badge status="error" text="Ошибка" />;
-    return <Badge status="processing" text="Загрузка" />;
-  }, [status]);
+    if (status === "ready") return <Badge status="success" text={t.online} />;
+    if (status === "error") return <Badge status="error" text={t.error} />;
+    return <Badge status="processing" text={t.loading} />;
+  }, [status, t.error, t.loading, t.online]);
+
+  const rememberMood = (name: string, mood: string) => {
+    const history = moodHistoryRef.current.get(name) ?? [];
+    history.push(mood);
+    if (history.length > EMOTION_STABILITY_FRAMES + 1) history.shift();
+    moodHistoryRef.current.set(name, history);
+
+    const counts = history.reduce<Record<string, number>>((acc, value) => {
+      acc[value] = (acc[value] ?? 0) + 1;
+      return acc;
+    }, {});
+
+    let bestMood = mood;
+    let bestCount = 0;
+    for (const [key, value] of Object.entries(counts)) {
+      if (value > bestCount) {
+        bestMood = key;
+        bestCount = value;
+      }
+    }
+    return bestMood;
+  };
 
   useEffect(() => {
     let active = true;
@@ -114,6 +174,7 @@ export default function CameraTile({ camera }: { camera: CameraConfig }) {
       lastSeenRef.current.clear();
       lastSentRef.current.clear();
       stableMoodRef.current.clear();
+      moodHistoryRef.current.clear();
     };
 
     const sendRecognition = async (payload: RecognitionPayload) => {
@@ -132,9 +193,7 @@ export default function CameraTile({ camera }: { camera: CameraConfig }) {
       const canvas = overlayRef.current;
       if (!canvas) return false;
       const width =
-        source instanceof HTMLVideoElement
-          ? source.videoWidth
-          : source.width || source.clientWidth;
+        source instanceof HTMLVideoElement ? source.videoWidth : source.width || source.clientWidth;
       const height =
         source instanceof HTMLVideoElement
           ? source.videoHeight
@@ -147,9 +206,7 @@ export default function CameraTile({ camera }: { camera: CameraConfig }) {
       return true;
     };
 
-    const getDetectionSource = (
-      source: HTMLVideoElement | HTMLCanvasElement
-    ) => {
+    const getDetectionSource = (source: HTMLVideoElement | HTMLCanvasElement) => {
       if (source instanceof HTMLVideoElement) return source;
       if (!source.width || !source.height) return null;
       return source;
@@ -175,15 +232,33 @@ export default function CameraTile({ camera }: { camera: CameraConfig }) {
       if (!streamCanvas || !camera.rtspUrl) return;
       await ensureRtspPlayerReady();
       const wsProto = location.protocol === "https:" ? "wss://" : "ws://";
-      const wsUrl = `${wsProto}${location.host}/api/stream?url=${encodeURIComponent(
-        camera.rtspUrl
-      )}`;
-      playerRef.current = await (window as any).loadPlayer({
-        url: wsUrl,
-        canvas: streamCanvas,
-        audio: false,
-        disableGl: true,
-      });
+      let lastError: unknown = null;
+
+      for (let attempt = 0; attempt < 3; attempt += 1) {
+        try {
+          if (playerRef.current?.destroy) {
+            playerRef.current.destroy();
+            playerRef.current = null;
+          }
+
+          const wsUrl =
+            `${wsProto}${location.host}/api/stream?url=${encodeURIComponent(camera.rtspUrl)}` +
+            `&client=${encodeURIComponent(`${camera.id}-${Date.now()}-${attempt}`)}`;
+
+          playerRef.current = await (window as any).loadPlayer({
+            url: wsUrl,
+            canvas: streamCanvas,
+            audio: false,
+            disableGl: true,
+          });
+          return;
+        } catch (error) {
+          lastError = error;
+          await new Promise((resolve) => window.setTimeout(resolve, 300));
+        }
+      }
+
+      throw lastError ?? new Error("rtsp_player_failed");
     };
 
     const loop = async () => {
@@ -221,18 +296,21 @@ export default function CameraTile({ camera }: { camera: CameraConfig }) {
       let detection = faceapi.detectAllFaces(
         detectionSource,
         new faceapi.SsdMobilenetv1Options({
-          minConfidence: 0.4,
+          minConfidence: DETECTION_SCORE_THRESHOLD,
         })
       );
       if (isRecognitionReady()) {
         detection = detection.withFaceLandmarks().withFaceDescriptors();
       }
-      const results = await detection.withFaceExpressions();
+      const results = (await detection.withFaceExpressions()).filter(
+        (item: { detection?: { score?: number } }) =>
+          (item.detection?.score ?? 0) >= DETECTION_SCORE_THRESHOLD
+      );
 
       const ctx = overlay.getContext("2d");
       if (ctx) ctx.clearRect(0, 0, overlay.width, overlay.height);
 
-      if (results && results.length > 0) {
+      if (results.length > 0) {
         const resized = faceapi.resizeResults(results, {
           width: overlay.width,
           height: overlay.height,
@@ -249,7 +327,8 @@ export default function CameraTile({ camera }: { camera: CameraConfig }) {
               label = match.label;
             }
           }
-          const nextMood = MOOD_LABELS[moodKey] || moodKey;
+
+          const nextMood = rememberMood(label, MOOD_LABELS[moodKey] || moodKey);
           const stableState = stableMoodRef.current.get(label);
           if (!stableState || stableState.mood !== nextMood) {
             stableMoodRef.current.set(label, { mood: nextMood, count: 1 });
@@ -260,10 +339,9 @@ export default function CameraTile({ camera }: { camera: CameraConfig }) {
           stableMoodRef.current.set(label, { mood: nextMood, count: nextCount });
           people.set(label, stableState.mood);
         }
+
         if (active) {
-          setDetected(
-            Array.from(people.entries()).map(([name, mood]) => ({ name, mood }))
-          );
+          setDetected(Array.from(people.entries()).map(([name, mood]) => ({ name, mood })));
         }
 
         const nowTs = Date.now();
@@ -273,25 +351,21 @@ export default function CameraTile({ camera }: { camera: CameraConfig }) {
           if (!stableState || stableState.count < EMOTION_STABILITY_FRAMES) continue;
           const lastSeenAt = lastSeenRef.current.get(name);
           const wasVisibleRecently =
-            typeof lastSeenAt === "number" &&
-            nowTs - lastSeenAt <= PERSON_ABSENCE_GRACE_MS;
+            typeof lastSeenAt === "number" && nowTs - lastSeenAt <= PERSON_ABSENCE_GRACE_MS;
           const lastSent = lastSentRef.current.get(name);
           const moodChanged = lastSent ? lastSent.mood !== mood : true;
-          const shouldSend = !wasVisibleRecently || moodChanged;
-          if (!shouldSend) continue;
+          if (wasVisibleRecently && !moodChanged) continue;
 
-          const payload: RecognitionPayload = {
+          lastSentRef.current.set(name, { mood });
+          void sendRecognition({
             name,
             mood,
             detectedAt: new Date(nowTs).toISOString(),
-          };
-          lastSentRef.current.set(name, { mood });
-          void sendRecognition(payload);
+          });
         }
+
         for (const name of people.keys()) {
-          if (name !== "Unknown") {
-            lastSeenRef.current.set(name, nowTs);
-          }
+          if (name !== "Unknown") lastSeenRef.current.set(name, nowTs);
         }
 
         for (const [name, seenAt] of lastSeenRef.current.entries()) {
@@ -299,6 +373,7 @@ export default function CameraTile({ camera }: { camera: CameraConfig }) {
             lastSeenRef.current.delete(name);
             lastSentRef.current.delete(name);
             stableMoodRef.current.delete(name);
+            moodHistoryRef.current.delete(name);
           }
         }
       } else if (active) {
@@ -309,6 +384,7 @@ export default function CameraTile({ camera }: { camera: CameraConfig }) {
             lastSeenRef.current.delete(name);
             lastSentRef.current.delete(name);
             stableMoodRef.current.delete(name);
+            moodHistoryRef.current.delete(name);
           }
         }
       }
@@ -319,7 +395,6 @@ export default function CameraTile({ camera }: { camera: CameraConfig }) {
     const init = async () => {
       try {
         setStatus("loading");
-        await ensureFaceApiReady();
         if (isRtsp) {
           if (videoRef.current) videoRef.current.style.display = "none";
           if (streamRef.current) streamRef.current.style.display = "block";
@@ -329,35 +404,42 @@ export default function CameraTile({ camera }: { camera: CameraConfig }) {
           if (streamRef.current) streamRef.current.style.display = "none";
           await startWebcam();
         }
-        if (active) {
-          setStatus("ready");
-          loop();
+
+        if (!active) return;
+        setStatus("ready");
+
+        if (recognitionEnabled) {
+          await ensureFaceApiReady();
+          if (active) void loop();
+        } else {
+          setDetected([]);
         }
-      } catch (_err) {
+      } catch {
         if (active) setStatus("error");
       }
     };
 
-    init();
+    void init();
     return () => {
       active = false;
       cleanup();
     };
-  }, [camera.rtspUrl, camera.type, isRtsp]);
+  }, [camera.rtspUrl, camera.type, isRtsp, recognitionEnabled]);
 
   return (
     <Card className="camera-card" size="small">
-      <Space orientation="vertical" size={8} style={{ width: "100%" }}>
+      <Space direction="vertical" size={8} style={{ width: "100%" }}>
         <div className="camera-media">
           <video ref={videoRef} className="camera-video" muted playsInline />
           <canvas ref={streamRef} className="camera-video" />
           <canvas ref={overlayRef} className="camera-overlay" />
           {status !== "ready" && (
             <div className="camera-status">
-              <VideoCameraOutlined /> {status === "error" ? "Ошибка" : "Загрузка"}
+              <VideoCameraOutlined /> {status === "error" ? t.error : t.loading}
             </div>
           )}
         </div>
+
         <Space align="center" style={{ width: "100%", justifyContent: "space-between" }}>
           <div>
             <Text strong>{camera.name}</Text>
@@ -367,29 +449,30 @@ export default function CameraTile({ camera }: { camera: CameraConfig }) {
           </div>
           {statusTag}
         </Space>
+
         <Space wrap>
-          <Tag color="blue">FPS: {fps}</Tag>
-          <Tag color={isRtsp ? "geekblue" : "gold"}>
-            {isRtsp ? "RTSP" : "Webcam"}
-          </Tag>
+          {recognitionEnabled ? <Tag color="blue">FPS: {fps}</Tag> : null}
+          <Tag color={isRtsp ? "geekblue" : "gold"}>{isRtsp ? "RTSP" : "Webcam"}</Tag>
+          {!recognitionEnabled ? <Tag color="cyan">{t.preview}</Tag> : null}
         </Space>
-        <div>
-          <Text type="secondary">Распознавание</Text>
-          {detected.length === 0 ? (
-            <div className="camera-empty">Никого нет</div>
-          ) : (
-            <div className="camera-people">
-              {detected.map((item) => (
-                <div key={`${camera.id}-${item.name}`} className="camera-person">
-                  <Text strong>{item.name}</Text>
-                  <Tag color={moodTagColor(item.mood)}>
-                    {item.mood}
-                  </Tag>
-                </div>
-              ))}
-            </div>
-          )}
-        </div>
+
+        {recognitionEnabled ? (
+          <div>
+            <Text type="secondary">{t.recognition}</Text>
+            {detected.length === 0 ? (
+              <div className="camera-empty">{t.noPeople}</div>
+            ) : (
+              <div className="camera-people">
+                {detected.map((item) => (
+                  <div key={`${camera.id}-${item.name}`} className="camera-person">
+                    <Text strong>{item.name}</Text>
+                    <Tag color={moodTagColor(item.mood)}>{item.mood}</Tag>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        ) : null}
       </Space>
     </Card>
   );

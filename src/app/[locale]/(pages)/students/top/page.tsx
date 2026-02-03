@@ -5,6 +5,48 @@ import { use, useEffect, useState } from "react";
 import { Card, Table, Tag, Typography, Space, Progress } from "antd";
 import { TrophyOutlined } from "@ant-design/icons";
 import MainLayout from "@/components/layouts/MainLayout";
+import { classifyMood } from "@/lib/mood";
+
+type AppLocale = "ru" | "kz" | "en";
+
+const L10N = {
+  ru: {
+    title: "Топ негативных",
+    boardTitle: "Лидерборд по риску за 24 часа",
+    boardHint: "Риск = негативные эмоции + превышение нейтральных над позитивными.",
+    rank: "Ранг",
+    student: "Студент",
+    risk: "Риск",
+    lastMood: "Последняя эмоция",
+    lastDetectedAt: "Последняя фиксация",
+    loadError: "Ошибка загрузки",
+    connectionError: "Ошибка соединения",
+  },
+  kz: {
+    title: "Негатив топ",
+    boardTitle: "24 сағаттағы тәуекел лидерборды",
+    boardHint: "Тәуекел = негатив эмоция + нейтралдың позитивтен артуы.",
+    rank: "Орын",
+    student: "Студент",
+    risk: "Тәуекел",
+    lastMood: "Соңғы эмоция",
+    lastDetectedAt: "Соңғы фиксация",
+    loadError: "Жүктеу қатесі",
+    connectionError: "Байланыс қатесі",
+  },
+  en: {
+    title: "Top Negative",
+    boardTitle: "Risk leaderboard for last 24 hours",
+    boardHint: "Risk = negative emotions + neutral exceeding positive.",
+    rank: "Rank",
+    student: "Student",
+    risk: "Risk",
+    lastMood: "Last Mood",
+    lastDetectedAt: "Last Detection",
+    loadError: "Load error",
+    connectionError: "Connection error",
+  },
+} as const;
 
 type LeaderboardItem = {
   rank: number;
@@ -22,10 +64,10 @@ type LeaderboardItem = {
 
 const { Title, Text } = Typography;
 
-function formatDateTime(value: string) {
+function formatDateTime(value: string, locale: AppLocale) {
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return value;
-  return date.toLocaleString("ru-RU", {
+  return date.toLocaleString(locale === "kz" ? "kk-KZ" : locale === "en" ? "en-US" : "ru-RU", {
     day: "2-digit",
     month: "2-digit",
     hour: "2-digit",
@@ -34,13 +76,9 @@ function formatDateTime(value: string) {
 }
 
 function moodColor(mood: string) {
-  const normalized = mood.toLowerCase();
-  if (normalized.includes("нег") || normalized.includes("зл") || normalized.includes("грус")) {
-    return "red";
-  }
-  if (normalized.includes("поз") || normalized.includes("рад") || normalized.includes("счаст")) {
-    return "green";
-  }
+  const kind = classifyMood(mood);
+  if (kind === "negative") return "red";
+  if (kind === "positive") return "green";
   return "blue";
 }
 
@@ -50,6 +88,8 @@ export default function TopNegativePage({
   params: Promise<{ locale: string }>;
 }) {
   const { locale } = use(params);
+  const safeLocale: AppLocale = locale === "kz" || locale === "en" ? locale : "ru";
+  const t = L10N[safeLocale];
   const [items, setItems] = useState<LeaderboardItem[]>([]);
   const [loadError, setLoadError] = useState<string | null>(null);
 
@@ -62,7 +102,7 @@ export default function TopNegativePage({
           cache: "no-store",
         });
         if (!response.ok) {
-          if (active) setLoadError(`Ошибка загрузки (${response.status})`);
+          if (active) setLoadError(`${t.loadError} (${response.status})`);
           return;
         }
 
@@ -72,7 +112,7 @@ export default function TopNegativePage({
           setLoadError(null);
         }
       } catch {
-        if (active) setLoadError("Ошибка соединения");
+        if (active) setLoadError(t.connectionError);
       }
     }
 
@@ -85,16 +125,14 @@ export default function TopNegativePage({
   }, []);
 
   return (
-    <MainLayout title="Топ негативных" locale={locale}>
+    <MainLayout title={t.title} locale={safeLocale}>
       <Card className="soft-card">
-        <Space orientation="vertical" size={16} style={{ width: "100%" }}>
+        <Space direction="vertical" size={16} style={{ width: "100%" }}>
           <div>
             <Title level={4} style={{ marginBottom: 4 }}>
-              <TrophyOutlined /> Лидерборд по риску за 24 часа
+              <TrophyOutlined /> {t.boardTitle}
             </Title>
-            <Text type="secondary">
-              Риск = негативные эмоции + превышение нейтральных над позитивными.
-            </Text>
+            <Text type="secondary">{t.boardHint}</Text>
           </div>
 
           {loadError ? <Text type="danger">{loadError}</Text> : null}
@@ -105,33 +143,33 @@ export default function TopNegativePage({
             pagination={{ pageSize: 20 }}
             columns={[
               {
-                title: "Ранг",
+                title: t.rank,
                 dataIndex: "rank",
                 width: 80,
               },
               {
-                title: "Студент",
+                title: t.student,
                 dataIndex: "name",
                 render: (_value: string, row: LeaderboardItem) => (
-                  <Link href={`/${locale}/students/${row.id}`}>{row.name}</Link>
+                  <Link href={`/${safeLocale}/students/${row.id}`}>{row.name}</Link>
                 ),
               },
               {
-                title: "Риск",
+                title: t.risk,
                 dataIndex: "riskPercent",
                 render: (value: number) => (
                   <Progress percent={value} showInfo={false} status="exception" />
                 ),
               },
               {
-                title: "Последняя эмоция",
+                title: t.lastMood,
                 dataIndex: "lastMood",
                 render: (value: string) => <Tag color={moodColor(value)}>{value}</Tag>,
               },
               {
-                title: "Последняя фиксация",
+                title: t.lastDetectedAt,
                 dataIndex: "lastDetectedAt",
-                render: (value: string) => formatDateTime(value),
+                render: (value: string) => formatDateTime(value, safeLocale),
               },
             ]}
           />
