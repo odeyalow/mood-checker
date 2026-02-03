@@ -27,6 +27,7 @@ type RecognitionPayload = {
 };
 
 const PERSON_ABSENCE_GRACE_MS = 2_000;
+const EMOTION_STABILITY_FRAMES = 2;
 
 const MOOD_LABELS: Record<string, string> = {
   neutral: "Нейтральный",
@@ -47,7 +48,7 @@ function bestExpression(expressions: Record<string, number>) {
       bestKey = key;
     }
   }
-  if (!MOOD_LABELS[bestKey]) bestKey = "neutral";
+  if (!MOOD_LABELS[bestKey] || bestVal < 0.45) bestKey = "neutral";
   return bestKey;
 }
 
@@ -80,6 +81,9 @@ export default function CameraTile({ camera }: { camera: CameraConfig }) {
   const lastSentRef = useRef<Map<string, { mood: string }>>(
     new Map()
   );
+  const stableMoodRef = useRef<Map<string, { mood: string; count: number }>>(
+    new Map()
+  );
   const [status, setStatus] = useState("loading");
   const [fps, setFps] = useState(0);
   const [detected, setDetected] = useState<{ name: string; mood: string }[]>(
@@ -109,24 +113,18 @@ export default function CameraTile({ camera }: { camera: CameraConfig }) {
       }
       lastSeenRef.current.clear();
       lastSentRef.current.clear();
+      stableMoodRef.current.clear();
     };
 
     const sendRecognition = async (payload: RecognitionPayload) => {
       try {
-        const response = await fetch("/api/recognitions", {
+        await fetch("/api/recognitions", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify(payload),
         });
-        console.log("[recognition] sent", payload);
-        if (!response.ok) {
-          console.error("[recognition] save failed", {
-            status: response.status,
-            payload,
-          });
-        }
-      } catch (error) {
-        console.error("[recognition] request failed", { payload, error });
+      } catch {
+        // ignore
       }
     };
 
@@ -222,9 +220,8 @@ export default function CameraTile({ camera }: { camera: CameraConfig }) {
       const faceMatcher = await getFaceMatcher();
       let detection = faceapi.detectAllFaces(
         detectionSource,
-        new faceapi.TinyFaceDetectorOptions({
-          inputSize: 320,
-          scoreThreshold: 0.4,
+        new faceapi.SsdMobilenetv1Options({
+          minConfidence: 0.4,
         })
       );
       if (isRecognitionReady()) {
@@ -252,7 +249,16 @@ export default function CameraTile({ camera }: { camera: CameraConfig }) {
               label = match.label;
             }
           }
-          people.set(label, MOOD_LABELS[moodKey] || moodKey);
+          const nextMood = MOOD_LABELS[moodKey] || moodKey;
+          const stableState = stableMoodRef.current.get(label);
+          if (!stableState || stableState.mood !== nextMood) {
+            stableMoodRef.current.set(label, { mood: nextMood, count: 1 });
+            people.set(label, nextMood);
+            continue;
+          }
+          const nextCount = Math.min(stableState.count + 1, EMOTION_STABILITY_FRAMES);
+          stableMoodRef.current.set(label, { mood: nextMood, count: nextCount });
+          people.set(label, stableState.mood);
         }
         if (active) {
           setDetected(
@@ -263,6 +269,8 @@ export default function CameraTile({ camera }: { camera: CameraConfig }) {
         const nowTs = Date.now();
         for (const [name, mood] of people.entries()) {
           if (name === "Unknown") continue;
+          const stableState = stableMoodRef.current.get(name);
+          if (!stableState || stableState.count < EMOTION_STABILITY_FRAMES) continue;
           const lastSeenAt = lastSeenRef.current.get(name);
           const wasVisibleRecently =
             typeof lastSeenAt === "number" &&
@@ -290,6 +298,7 @@ export default function CameraTile({ camera }: { camera: CameraConfig }) {
           if (nowTs - seenAt > PERSON_ABSENCE_GRACE_MS) {
             lastSeenRef.current.delete(name);
             lastSentRef.current.delete(name);
+            stableMoodRef.current.delete(name);
           }
         }
       } else if (active) {
@@ -299,6 +308,7 @@ export default function CameraTile({ camera }: { camera: CameraConfig }) {
           if (nowTs - seenAt > PERSON_ABSENCE_GRACE_MS) {
             lastSeenRef.current.delete(name);
             lastSentRef.current.delete(name);
+            stableMoodRef.current.delete(name);
           }
         }
       }
