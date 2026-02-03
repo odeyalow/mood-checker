@@ -1,4 +1,4 @@
-﻿"use client";
+"use client";
 
 import Link from "next/link";
 import { Layout, Menu, Typography, Select, Button, Space } from "antd";
@@ -16,33 +16,57 @@ import LocaleSelect from "@/components/ui/LocaleSelect";
 const { Header, Sider, Content } = Layout;
 const { Title, Text } = Typography;
 
+type AppLocale = "ru" | "kz" | "en";
+
 type StudentOption = {
   value: string;
   label: string;
 };
 
-const menuItems = [
-  {
-    key: "dashboard",
-    icon: <DashboardOutlined />,
-    label: "Дэшборд",
+const L10N = {
+  ru: {
+    menu: {
+      dashboard: "Дэшборд",
+      cameras: "Камеры",
+      top: "Топ негативных",
+      byDate: "По дате",
+    },
+    brandSub: "Campus Insight",
+    logout: "Выйти",
+    updatedToday: "Обновлено: сегодня",
+    searchPlaceholder: "Поиск студента",
+    searching: "Поиск...",
+    nothingFound: "Ничего не найдено",
   },
-  {
-    key: "cameras",
-    icon: <VideoCameraOutlined />,
-    label: "Камеры",
+  kz: {
+    menu: {
+      dashboard: "Басқару панелі",
+      cameras: "Камералар",
+      top: "Негатив топ",
+      byDate: "Күні бойынша",
+    },
+    brandSub: "Campus Insight",
+    logout: "Шығу",
+    updatedToday: "Жаңартылды: бүгін",
+    searchPlaceholder: "Студентті іздеу",
+    searching: "Ізделуде...",
+    nothingFound: "Ештеңе табылмады",
   },
-  {
-    key: "top",
-    icon: <TrophyOutlined />,
-    label: "Топ негативных",
+  en: {
+    menu: {
+      dashboard: "Dashboard",
+      cameras: "Cameras",
+      top: "Top Negative",
+      byDate: "By Date",
+    },
+    brandSub: "Campus Insight",
+    logout: "Log out",
+    updatedToday: "Updated: today",
+    searchPlaceholder: "Search student",
+    searching: "Searching...",
+    nothingFound: "Nothing found",
   },
-  {
-    key: "by-date",
-    icon: <CalendarOutlined />,
-    label: "По дате",
-  },
-];
+} as const;
 
 export default function MainLayout({
   children,
@@ -53,6 +77,9 @@ export default function MainLayout({
   title: string;
   locale: string;
 }>) {
+  const safeLocale: AppLocale = locale === "kz" || locale === "en" ? locale : "ru";
+  const t = L10N[safeLocale];
+
   const pathname = usePathname();
   const router = useRouter();
   const [searchLoading, setSearchLoading] = useState(false);
@@ -62,23 +89,32 @@ export default function MainLayout({
     ? "top"
     : pathname?.includes("/by-date")
       ? "by-date"
-    : pathname?.includes("/cameras")
-      ? "cameras"
-      : "dashboard";
+      : pathname?.includes("/cameras")
+        ? "cameras"
+        : "dashboard";
 
-  const localizedMenuItems = menuItems.map((item) => ({
-    ...item,
-    label:
-      item.key === "dashboard" ? (
-        <Link href={`/${locale}/dashboard`}>{item.label}</Link>
-      ) : item.key === "cameras" ? (
-        <Link href={`/${locale}/cameras`}>{item.label}</Link>
-      ) : item.key === "by-date" ? (
-        <Link href={`/${locale}/by-date`}>{item.label}</Link>
-      ) : (
-        <Link href={`/${locale}/students/top`}>{item.label}</Link>
-      ),
-  }));
+  const localizedMenuItems = [
+    {
+      key: "dashboard",
+      icon: <DashboardOutlined />,
+      label: <Link href={`/${safeLocale}/dashboard`}>{t.menu.dashboard}</Link>,
+    },
+    {
+      key: "cameras",
+      icon: <VideoCameraOutlined />,
+      label: <Link href={`/${safeLocale}/cameras`}>{t.menu.cameras}</Link>,
+    },
+    {
+      key: "top",
+      icon: <TrophyOutlined />,
+      label: <Link href={`/${safeLocale}/students/top`}>{t.menu.top}</Link>,
+    },
+    {
+      key: "by-date",
+      icon: <CalendarOutlined />,
+      label: <Link href={`/${safeLocale}/by-date`}>{t.menu.byDate}</Link>,
+    },
+  ];
 
   async function handleStudentSearch(value: string) {
     const q = value.trim();
@@ -123,7 +159,7 @@ export default function MainLayout({
           <Title level={4} style={{ margin: 0 }}>
             Mood Checker
           </Title>
-          <Text type="secondary">Campus Insight</Text>
+          <Text type="secondary">{t.brandSub}</Text>
         </div>
         <Menu
           mode="inline"
@@ -137,10 +173,10 @@ export default function MainLayout({
             block
             onClick={async () => {
               await fetch("/api/auth/logout", { method: "POST" });
-              router.push(`/${locale}/login`);
+              router.push(`/${safeLocale}/login`);
             }}
           >
-            Выйти
+            {t.logout}
           </Button>
         </div>
       </Sider>
@@ -161,22 +197,22 @@ export default function MainLayout({
             <Title level={3} style={{ margin: 0 }}>
               {title}
             </Title>
-            <Text type="secondary">Обновлено: сегодня</Text>
+            <Text type="secondary">{t.updatedToday}</Text>
           </div>
           <Space size="middle" wrap>
             <Select
               showSearch
-              placeholder="Поиск студента по БД"
+              placeholder={t.searchPlaceholder}
               filterOption={false}
               onSearch={handleStudentSearch}
-              onSelect={(id) => router.push(`/${locale}/students/${id}`)}
+              onSelect={(id) => router.push(`/${safeLocale}/students/${id}`)}
               options={studentOptions}
               loading={searchLoading}
               style={{ width: 240 }}
               allowClear
-              notFoundContent={searchLoading ? "Поиск..." : "Ничего не найдено"}
+              notFoundContent={searchLoading ? t.searching : t.nothingFound}
             />
-            <LocaleSelect value={locale === "kz" ? "kz" : "ru"} />
+            <LocaleSelect value={safeLocale} />
           </Space>
         </Header>
         <Content style={{ padding: "12px 24px 32px" }}>{children}</Content>

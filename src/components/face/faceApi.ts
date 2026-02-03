@@ -1,7 +1,19 @@
 let modelsPromise: Promise<void> | null = null;
 let matcherPromise: Promise<any | null> | null = null;
 let recognitionReady = false;
-const FACE_MATCH_DISTANCE = 0.55;
+const FACE_MATCH_DISTANCE = 0.48;
+
+function mirrorImage(source: HTMLImageElement) {
+  const canvas = document.createElement("canvas");
+  canvas.width = source.naturalWidth || source.width;
+  canvas.height = source.naturalHeight || source.height;
+  const ctx = canvas.getContext("2d");
+  if (!ctx) return source;
+  ctx.translate(canvas.width, 0);
+  ctx.scale(-1, 1);
+  ctx.drawImage(source, 0, 0);
+  return canvas;
+}
 
 function waitForGlobal(key: "faceapi" | "loadPlayer", timeoutMs = 15000) {
   return new Promise<void>((resolve, reject) => {
@@ -66,14 +78,17 @@ async function loadKnownFaces() {
     const descriptors = [];
     for (const url of urls) {
       const img = await faceapi.fetchImage(url);
-      const detection = await faceapi
-        .detectSingleFace(
-          img,
-          new faceapi.SsdMobilenetv1Options({ minConfidence: 0.35 })
-        )
-        .withFaceLandmarks()
-        .withFaceDescriptor();
-      if (detection) descriptors.push(detection.descriptor);
+      const samples = [img, mirrorImage(img)];
+      for (const sample of samples) {
+        const detection = await faceapi
+          .detectSingleFace(
+            sample,
+            new faceapi.SsdMobilenetv1Options({ minConfidence: 0.45 })
+          )
+          .withFaceLandmarks()
+          .withFaceDescriptor();
+        if (detection) descriptors.push(detection.descriptor);
+      }
     }
     if (descriptors.length) {
       labeledDescriptors.push(new faceapi.LabeledFaceDescriptors(label, descriptors));

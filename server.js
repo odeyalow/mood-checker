@@ -10,20 +10,40 @@ const port = Number.parseInt(process.env.PORT || "3000", 10);
 const app = next({ dev, port });
 const handle = app.getRequestHandler();
 
-const proxyHandlers = new Map();
+function isIgnorableWsError(error) {
+  const code =
+    error && typeof error === "object" && "code" in error
+      ? String(error.code || "")
+      : "";
+  const message =
+    error && typeof error === "object" && "message" in error
+      ? String(error.message || "")
+      : "";
 
-function getProxyHandler(proxy, url) {
-  if (!proxyHandlers.has(url)) {
-    proxyHandlers.set(
-      url,
-      proxy({
-        url,
-        transport: "tcp",
-        verbose: false,
-      })
-    );
+  return (
+    Boolean(error) &&
+    typeof error === "object" &&
+    ((code.startsWith("WS_ERR_") && code.length > "WS_ERR_".length) ||
+      message.includes("Invalid WebSocket frame"))
+  );
+}
+
+const handleFatalError = (error) => {
+  if (isIgnorableWsError(error)) {
+    console.warn("[ws] Ignored invalid close code frame.");
+    return;
   }
-  return proxyHandlers.get(url);
+  console.error("Uncaught exception:", error);
+  process.exit(1);
+};
+
+if (
+  typeof process.setUncaughtExceptionCaptureCallback === "function" &&
+  !process.hasUncaughtExceptionCaptureCallback()
+) {
+  process.setUncaughtExceptionCaptureCallback(handleFatalError);
+} else {
+  process.on("uncaughtException", handleFatalError);
 }
 
 app
@@ -34,6 +54,11 @@ app
     const { proxy } = rtspRelay(expressApp, server);
 
     expressApp.ws("/api/stream", (ws, req) => {
+      ws.on("error", (error) => {
+        if (isIgnorableWsError(error)) return;
+        console.error("[ws] Stream socket error:", error);
+      });
+
       const rawUrl = req.query?.url;
       const url = Array.isArray(rawUrl) ? rawUrl[0] : rawUrl;
 
@@ -42,8 +67,17 @@ app
         return;
       }
 
-      const handler = getProxyHandler(proxy, url);
-      handler(ws);
+      try {
+        const handler = proxy({
+          url,
+          transport: "tcp",
+          verbose: false,
+        });
+        handler(ws);
+      } catch (error) {
+        console.error("[ws] Failed to attach stream handler:", error);
+        ws.close(1011, "stream_handler_error");
+      }
     });
 
     expressApp.use((req, res) => handle(req, res));

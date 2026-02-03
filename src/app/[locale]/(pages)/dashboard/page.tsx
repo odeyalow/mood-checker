@@ -1,20 +1,62 @@
-﻿"use client";
+"use client";
 
 import { use, useEffect, useState } from "react";
-import {
-  Card,
-  Col,
-  Row,
-  Space,
-  Statistic,
-  Tag,
-  Typography,
-  Avatar,
-} from "antd";
+import { Card, Col, Row, Space, Statistic, Tag, Typography, Avatar } from "antd";
 import MainLayout from "@/components/layouts/MainLayout";
 import EmotionTimelineChart from "@/components/dashboard/EmotionTimelineChart";
+import { classifyMood } from "@/lib/mood";
 
 const { Text } = Typography;
+
+type AppLocale = "ru" | "kz" | "en";
+
+const L10N = {
+  ru: {
+    title: "Главный дэшборд",
+    activeCameras: "Активные камеры",
+    recognitions: "Распознаваний",
+    in24h: "За 24 часа",
+    negative: "Негатив",
+    riskZone: "Зона риска",
+    emotionDynamics: "Динамика эмоций",
+    dynamicsHint: "Обновляется раз в минуту, окно 24 часа.",
+    recentRecognitions: "Последние распознавания",
+    loadError: "Ошибка загрузки",
+    connectionError: "Ошибка соединения",
+    noChange: "Без изменений к прошлому дню",
+    prevDay: "к прошлому дню",
+  },
+  kz: {
+    title: "Басқару панелі",
+    activeCameras: "Белсенді камералар",
+    recognitions: "Тану саны",
+    in24h: "24 сағат ішінде",
+    negative: "Негатив",
+    riskZone: "Тәуекел аймағы",
+    emotionDynamics: "Эмоция динамикасы",
+    dynamicsHint: "Әр минут сайын жаңарады, терезе 24 сағат.",
+    recentRecognitions: "Соңғы танулар",
+    loadError: "Жүктеу қатесі",
+    connectionError: "Байланыс қатесі",
+    noChange: "Өткен күнмен салыстырғанда өзгеріс жоқ",
+    prevDay: "өткен күнмен салыстырғанда",
+  },
+  en: {
+    title: "Main Dashboard",
+    activeCameras: "Active Cameras",
+    recognitions: "Recognitions",
+    in24h: "In 24 hours",
+    negative: "Negative",
+    riskZone: "Risk Zone",
+    emotionDynamics: "Emotion Dynamics",
+    dynamicsHint: "Updated every minute, window is 24 hours.",
+    recentRecognitions: "Recent Recognitions",
+    loadError: "Load error",
+    connectionError: "Connection error",
+    noChange: "No change vs previous day",
+    prevDay: "vs previous day",
+  },
+} as const;
 
 type Recognition = {
   id: string;
@@ -39,27 +81,27 @@ type EmotionPoint = {
   negativeCount: number;
 };
 
-function formatDetectedAt(value: string) {
+function formatDetectedAt(value: string, locale: AppLocale) {
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return value;
-  return date.toLocaleTimeString("ru-RU", {
+  return date.toLocaleTimeString(locale === "kz" ? "kk-KZ" : locale === "en" ? "en-US" : "ru-RU", {
     hour: "2-digit",
     minute: "2-digit",
   });
 }
 
 function moodColor(mood: string) {
-  const normalized = mood.toLowerCase();
-  if (normalized.includes("нег")) return "red";
-  if (normalized.includes("поз") || normalized.includes("рад")) return "green";
-  if (normalized.includes("трев")) return "orange";
+  const kind = classifyMood(mood);
+  if (kind === "negative") return "red";
+  if (kind === "positive") return "green";
   return "blue";
 }
 
-function deltaText(delta: number) {
-  if (delta > 0) return `+${delta}% к прошлому дню`;
-  if (delta < 0) return `${delta}% к прошлому дню`;
-  return "Без изменений к прошлому дню";
+function deltaText(delta: number, locale: AppLocale) {
+  const t = L10N[locale];
+  if (delta > 0) return `+${delta}% ${t.prevDay}`;
+  if (delta < 0) return `${delta}% ${t.prevDay}`;
+  return t.noChange;
 }
 
 export default function DashboardPage({
@@ -68,6 +110,9 @@ export default function DashboardPage({
   params: Promise<{ locale: string }>;
 }) {
   const { locale } = use(params);
+  const safeLocale: AppLocale = locale === "kz" || locale === "en" ? locale : "ru";
+  const t = L10N[safeLocale];
+
   const [recentEvents, setRecentEvents] = useState<Recognition[]>([]);
   const [stats, setStats] = useState<DashboardStats | null>(null);
   const [emotionPoints, setEmotionPoints] = useState<EmotionPoint[]>([]);
@@ -91,7 +136,7 @@ export default function DashboardPage({
               : !statsResponse.ok
                 ? statsResponse.status
                 : dynamicsResponse.status;
-            setLoadError(`Ошибка загрузки (${status})`);
+            setLoadError(`${t.loadError} (${status})`);
           }
           return;
         }
@@ -103,82 +148,70 @@ export default function DashboardPage({
         ]);
 
         if (active) {
-          if (Array.isArray(recentData.items)) {
-            setRecentEvents(recentData.items);
-          }
-          if (Array.isArray(dynamicsData.points)) {
-            setEmotionPoints(dynamicsData.points);
-          }
+          if (Array.isArray(recentData.items)) setRecentEvents(recentData.items);
+          if (Array.isArray(dynamicsData.points)) setEmotionPoints(dynamicsData.points);
           setStats(statsData);
           setLoadError(null);
         }
       } catch {
-        if (active) {
-          setLoadError("Ошибка соединения");
-        }
+        if (active) setLoadError(t.connectionError);
       }
     }
 
-    loadDashboardData();
+    void loadDashboardData();
     const timer = setInterval(loadDashboardData, 60_000);
     return () => {
       active = false;
       clearInterval(timer);
     };
-  }, []);
+  }, [t.connectionError, t.loadError]);
 
   return (
-    <MainLayout title="Главный дэшборд" locale={locale}>
+    <MainLayout title={t.title} locale={safeLocale}>
       <Row gutter={[16, 16]}>
         <Col xs={24} lg={16}>
           <Row gutter={[16, 16]}>
             <Col xs={24} md={12} lg={6}>
               <Card className="soft-card">
-                <Statistic title="Активные камеры" value={stats?.connectedCameras ?? 0} />
+                <Statistic title={t.activeCameras} value={stats?.connectedCameras ?? 0} />
               </Card>
             </Col>
             <Col xs={24} md={12} lg={6}>
               <Card className="soft-card">
-                <Statistic title="Распознаваний" value={stats?.recognitionsLast24h ?? 0} />
-                <Text type="secondary">За 24 часа</Text>
+                <Statistic title={t.recognitions} value={stats?.recognitionsLast24h ?? 0} />
+                <Text type="secondary">{t.in24h}</Text>
               </Card>
             </Col>
             <Col xs={24} md={12} lg={6}>
               <Card className="soft-card">
                 <Statistic
-                  title="Негатив"
+                  title={t.negative}
                   value={stats?.negativePercent ?? 0}
                   suffix="%"
                   styles={{ content: { color: "#dc2626" } }}
                 />
-                <Text type="secondary">{deltaText(stats?.negativeDeltaVsPrevDay ?? 0)}</Text>
+                <Text type="secondary">{deltaText(stats?.negativeDeltaVsPrevDay ?? 0, safeLocale)}</Text>
               </Card>
             </Col>
             <Col xs={24} md={12} lg={6}>
               <Card className="soft-card">
-                <Statistic title="Зона риска" value={stats?.riskZoneCount ?? 0} />
-                <Text type="secondary">За 24 часа</Text>
+                <Statistic title={t.riskZone} value={stats?.riskZoneCount ?? 0} />
+                <Text type="secondary">{t.in24h}</Text>
               </Card>
             </Col>
           </Row>
 
-          <Card
-            title="Динамика эмоций"
-            style={{ marginTop: 16 }}
-            className="soft-card"
-          >
-            <EmotionTimelineChart points={emotionPoints} />
+          <Card title={t.emotionDynamics} style={{ marginTop: 16 }} className="soft-card">
+            <EmotionTimelineChart points={emotionPoints} locale={safeLocale} />
             <div style={{ marginTop: 8 }}>
-              <Text type="secondary">
-                Обновляется раз в минуту, окно 24 часа.
-              </Text>
+              <Text type="secondary">{t.dynamicsHint}</Text>
             </div>
           </Card>
         </Col>
 
         <Col xs={24} lg={8}>
-          <Card title="Последние распознавания" className="soft-card">
-            <Space orientation="vertical" size={16} style={{ width: "100%" }}>
+          <Card title={t.recentRecognitions} className="soft-card">
+            <Space direction="vertical" size={16} style={{ width: "100%" }}>
               {loadError ? <Text type="danger">{loadError}</Text> : null}
               {recentEvents.map((item) => (
                 <div
@@ -195,7 +228,7 @@ export default function DashboardPage({
                     <div>
                       <Text strong>{item.name}</Text>
                       <div>
-                        <Text type="secondary">{formatDetectedAt(item.detectedAt)}</Text>
+                        <Text type="secondary">{formatDetectedAt(item.detectedAt, safeLocale)}</Text>
                       </div>
                     </div>
                   </Space>
