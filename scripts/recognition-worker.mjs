@@ -109,11 +109,12 @@ async function runSession(config) {
     console.error("[worker] Page error:", error?.message || error);
   });
 
-  const loginUrl = new URL(localePath(config.locale, "login"), config.baseUrl).toString();
   const camerasUrl = new URL(
     localePath(config.locale, "cameras"),
     config.baseUrl
   ).toString();
+  const loginApiUrl = new URL("/api/auth/login", config.baseUrl).toString();
+  const authMeUrl = new URL("/api/auth/me", config.baseUrl).toString();
 
   console.log("[worker] Opening cameras page...");
   await page.goto(camerasUrl, { waitUntil: "domcontentloaded" });
@@ -121,21 +122,48 @@ async function runSession(config) {
 
   const isOnLoginPage = page.url().includes(`/${config.locale}/login`);
   if (isOnLoginPage) {
-    console.log("[worker] Login required, submitting credentials...");
+    console.log("[worker] Login required, trying API login...");
+    const loginResponse = await context.request.post(loginApiUrl, {
+      data: {
+        login: config.login,
+        password: config.password,
+      },
+      timeout: config.requestTimeoutMs,
+    });
+
+    if (!loginResponse.ok()) {
+      throw new Error(`API login failed (${loginResponse.status()})`);
+    }
+
+    const authCheck = await context.request.get(authMeUrl, {
+      timeout: config.requestTimeoutMs,
+    });
+    if (!authCheck.ok()) {
+      throw new Error(`Auth check failed after API login (${authCheck.status()})`);
+    }
+
+    // Fallback for deployments where API login is blocked by proxy/cookies.
     try {
-      await fillFirstVisible(page, ['input[name="login"]', "#login"], config.login);
-      await fillFirstVisible(page, ['input[name="password"]', "#password"], config.password);
-      await Promise.all([
-        page.waitForURL(new RegExp(`/${config.locale}/(dashboard|cameras)`)),
-        page.click('button[type="submit"]'),
-      ]);
+      await page.goto(camerasUrl, { waitUntil: "domcontentloaded" });
     } catch (error) {
-      const title = await page.title();
-      throw new Error(
-        `Login form interaction failed at ${page.url()} (title: ${title}): ${
-          error instanceof Error ? error.message : String(error)
-        }`
-      );
+      throw new Error(`Failed to open cameras after API login: ${String(error)}`);
+    }
+
+    if (page.url().includes(`/${config.locale}/login`)) {
+      console.log("[worker] API login did not switch session, trying form login fallback...");
+      try {
+        await fillFirstVisible(page, ['input[name="login"]', "#login"], config.login);
+        await fillFirstVisible(page, ['input[name="password"]', "#password"], config.password);
+        await page.click('button[type="submit"]');
+        await page.waitForTimeout(1500);
+      } catch (error) {
+        const title = await page.title();
+        throw new Error(
+          `Login form interaction failed at ${page.url()} (title: ${title}): ${
+            error instanceof Error ? error.message : String(error)
+          }`
+        );
+      }
     }
   }
 
