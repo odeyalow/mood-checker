@@ -72,16 +72,6 @@ app
           url,
           transport: "tcp",
           verbose: false,
-          additionalFlags: [
-            "-fflags",
-            "nobuffer",
-            "-flags",
-            "low_delay",
-            "-analyzeduration",
-            "0",
-            "-probesize",
-            "32",
-          ],
         });
         handler(ws);
       } catch (error) {
