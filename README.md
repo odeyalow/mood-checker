@@ -1,36 +1,50 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+## Mood Checker
 
-## Getting Started
+Next.js app with camera stream preview and face recognition events.
 
-First, run the development server:
+## Run app
 
 ```bash
-npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
+npm install
+npm run build
+npm run start
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+## Recognition worker (without open browser tab)
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+1. Install dependencies and browser runtime:
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+```bash
+npm install
+npx playwright install chromium
+```
 
-## Learn More
+2. Create worker env file:
 
-To learn more about Next.js, take a look at the following resources:
+```bash
+cp .env.worker.example .env.worker
+```
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+3. Set valid credentials in `.env.worker` (`WORKER_LOGIN`, `WORKER_PASSWORD`).
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+4. Start worker:
 
-## Deploy on Vercel
+```bash
+npm run worker:recognition
+```
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+The worker opens `/${locale}/cameras` in headless Chromium, keeps recognition running, and auto-restarts on crash.
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+## PM2 (app + worker together)
+
+```bash
+npm run pm2:start
+```
+
+Useful commands:
+
+```bash
+npm run pm2:logs
+npm run pm2:restart
+npm run pm2:stop
+```

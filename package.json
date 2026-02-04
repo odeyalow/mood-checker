@@ -6,6 +6,12 @@
     "dev": "node server.js --dev",
     "build": "next build",
     "start": "node server.js",
+    "worker:recognition": "node scripts/recognition-worker.mjs",
+    "pm2:start": "pm2 start ecosystem.config.cjs --env production",
+    "pm2:restart": "pm2 restart ecosystem.config.cjs --env production",
+    "pm2:stop": "pm2 stop mood-checker-app mood-checker-worker",
+    "pm2:delete": "pm2 delete mood-checker-app mood-checker-worker",
+    "pm2:logs": "pm2 logs mood-checker-app mood-checker-worker",
     "lint": "eslint",
     "db:migrate": "prisma migrate dev",
     "db:push": "prisma db push",
@@ -22,7 +28,8 @@
     "next": "^16.1.4",
     "react": "^19.2.3",
     "react-dom": "^19.2.3",
-    "rtsp-relay": "^1.9.0"
+    "rtsp-relay": "^1.9.0",
+    "playwright": "^1.55.0"
   },
   "devDependencies": {
     "@tailwindcss/postcss": "^4",
