@@ -74,6 +74,17 @@ function localePath(locale, section) {
   return `/${encodeURIComponent(locale)}/${section}`;
 }
 
+async function fillFirstVisible(page, selectors, value) {
+  for (const selector of selectors) {
+    const locator = page.locator(selector).first();
+    if ((await locator.count()) > 0) {
+      await locator.fill(value);
+      return selector;
+    }
+  }
+  throw new Error(`Input not found. Tried selectors: ${selectors.join(", ")}`);
+}
+
 async function runSession(config) {
   const { chromium } = await import("playwright");
   const browser = await chromium.launch({
@@ -104,16 +115,30 @@ async function runSession(config) {
     config.baseUrl
   ).toString();
 
-  console.log("[worker] Opening login page...");
-  await page.goto(loginUrl, { waitUntil: "domcontentloaded" });
-  await page.fill('input[name="login"]', config.login);
-  await page.fill('input[name="password"]', config.password);
-  await Promise.all([
-    page.waitForURL(new RegExp(`/${config.locale}/(dashboard|cameras)`)),
-    page.click('button[type="submit"]'),
-  ]);
-
   console.log("[worker] Opening cameras page...");
+  await page.goto(camerasUrl, { waitUntil: "domcontentloaded" });
+  await page.waitForLoadState("networkidle");
+
+  const isOnLoginPage = page.url().includes(`/${config.locale}/login`);
+  if (isOnLoginPage) {
+    console.log("[worker] Login required, submitting credentials...");
+    try {
+      await fillFirstVisible(page, ['input[name="login"]', "#login"], config.login);
+      await fillFirstVisible(page, ['input[name="password"]', "#password"], config.password);
+      await Promise.all([
+        page.waitForURL(new RegExp(`/${config.locale}/(dashboard|cameras)`)),
+        page.click('button[type="submit"]'),
+      ]);
+    } catch (error) {
+      const title = await page.title();
+      throw new Error(
+        `Login form interaction failed at ${page.url()} (title: ${title}): ${
+          error instanceof Error ? error.message : String(error)
+        }`
+      );
+    }
+  }
+
   await page.goto(camerasUrl, { waitUntil: "domcontentloaded" });
   await page.waitForSelector(".camera-card");
   console.log("[worker] Recognition worker is active.");
