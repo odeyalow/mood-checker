@@ -80,6 +80,7 @@ type EmotionPoint = {
   neutralCount: number;
   negativeCount: number;
 };
+const DASHBOARD_POLL_INTERVAL_MS = 10_000;
 
 function formatDetectedAt(value: string, locale: AppLocale) {
   const date = new Date(value);
@@ -159,7 +160,7 @@ export default function DashboardPage({
     }
 
     void loadDashboardData();
-    const timer = setInterval(loadDashboardData, 60_000);
+    const timer = setInterval(loadDashboardData, DASHBOARD_POLL_INTERVAL_MS);
     return () => {
       active = false;
       clearInterval(timer);

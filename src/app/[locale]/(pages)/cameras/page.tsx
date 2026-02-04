@@ -9,6 +9,7 @@ import { classifyMood } from "@/lib/mood";
 
 const { Text } = Typography;
 const MAX_RECENT_FIXATIONS = 15;
+const RECENT_POLL_INTERVAL_MS = 10_000;
 
 type AppLocale = "ru" | "kz" | "en";
 
@@ -96,7 +97,7 @@ export default function CamerasPage({
     }
 
     void loadRecent();
-    const timer = setInterval(loadRecent, 60_000);
+    const timer = setInterval(loadRecent, RECENT_POLL_INTERVAL_MS);
     return () => {
       active = false;
       clearInterval(timer);

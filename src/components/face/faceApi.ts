@@ -1,7 +1,7 @@
 let modelsPromise: Promise<void> | null = null;
 let matcherPromise: Promise<any | null> | null = null;
 let recognitionReady = false;
-const FACE_MATCH_DISTANCE = 0.48;
+const FACE_MATCH_DISTANCE = 0.52;
 
 function mirrorImage(source: HTMLImageElement) {
   const canvas = document.createElement("canvas");
@@ -37,15 +37,20 @@ export async function ensureFaceApiReady() {
   if (!modelsPromise) {
     modelsPromise = (async () => {
       const faceapi = (window as any).faceapi;
-      await faceapi.nets.ssdMobilenetv1.loadFromUri("/models");
       await faceapi.nets.tinyFaceDetector.loadFromUri("/models");
       await faceapi.nets.faceExpressionNet.loadFromUri("/models");
       try {
-        await faceapi.nets.faceLandmark68Net.loadFromUri("/models");
+        await faceapi.nets.faceLandmark68TinyNet.loadFromUri("/models");
         await faceapi.nets.faceRecognitionNet.loadFromUri("/models");
         recognitionReady = true;
       } catch (_err) {
-        recognitionReady = false;
+        try {
+          await faceapi.nets.faceLandmark68Net.loadFromUri("/models");
+          await faceapi.nets.faceRecognitionNet.loadFromUri("/models");
+          recognitionReady = true;
+        } catch (_fallbackErr) {
+          recognitionReady = false;
+        }
       }
     })();
   }
@@ -59,6 +64,10 @@ export function isRecognitionReady() {
 async function loadKnownFaces() {
   if (!recognitionReady) return null;
   const faceapi = (window as any).faceapi;
+  const detectorOptions = new faceapi.TinyFaceDetectorOptions({
+    inputSize: 416,
+    scoreThreshold: 0.45,
+  });
   const res = await fetch("/known/images.json");
   if (!res.ok) return null;
   const images = await res.json();
@@ -81,11 +90,8 @@ async function loadKnownFaces() {
       const samples = [img, mirrorImage(img)];
       for (const sample of samples) {
         const detection = await faceapi
-          .detectSingleFace(
-            sample,
-            new faceapi.SsdMobilenetv1Options({ minConfidence: 0.45 })
-          )
-          .withFaceLandmarks()
+          .detectSingleFace(sample, detectorOptions)
+          .withFaceLandmarks(true)
           .withFaceDescriptor();
         if (detection) descriptors.push(detection.descriptor);
       }

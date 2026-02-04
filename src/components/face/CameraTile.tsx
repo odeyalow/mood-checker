@@ -58,8 +58,9 @@ type RecognitionPayload = {
 
 const PERSON_ABSENCE_GRACE_MS = 2_000;
 const EMOTION_STABILITY_FRAMES = 3;
-const EMOTION_CONFIDENCE_THRESHOLD = 0.52;
-const DETECTION_SCORE_THRESHOLD = 0.55;
+const EMOTION_CONFIDENCE_THRESHOLD = 0.48;
+const DETECTION_SCORE_THRESHOLD = 0.45;
+const DETECTION_INTERVAL_MS = 90;
 
 const MOOD_LABELS: Record<string, string> = {
   neutral: "Neutral",
@@ -122,6 +123,8 @@ export default function CameraTile({
   const lastSentRef = useRef<Map<string, { mood: string }>>(new Map());
   const stableMoodRef = useRef<Map<string, { mood: string; count: number }>>(new Map());
   const moodHistoryRef = useRef<Map<string, string[]>>(new Map());
+  const detectBusyRef = useRef(false);
+  const detectLastTsRef = useRef(0);
 
   const [status, setStatus] = useState("loading");
   const [fps, setFps] = useState(0);
@@ -284,112 +287,123 @@ export default function CameraTile({
         return;
       }
 
+      const nowTs = performance.now();
+      if (detectBusyRef.current || nowTs - detectLastTsRef.current < DETECTION_INTERVAL_MS) {
+        loopTimer = window.setTimeout(loop, 30);
+        return;
+      }
+      detectBusyRef.current = true;
+      detectLastTsRef.current = nowTs;
+
       frames += 1;
-      const now = performance.now();
-      if (now - lastTs >= 1000) {
+      if (nowTs - lastTs >= 1000) {
         if (active) setFps(frames);
         frames = 0;
-        lastTs = now;
+        lastTs = nowTs;
       }
 
-      const faceMatcher = await getFaceMatcher();
-      let detection = faceapi.detectAllFaces(
-        detectionSource,
-        new faceapi.SsdMobilenetv1Options({
-          minConfidence: DETECTION_SCORE_THRESHOLD,
-        })
-      );
-      if (isRecognitionReady()) {
-        detection = detection.withFaceLandmarks().withFaceDescriptors();
-      }
-      const results = (await detection.withFaceExpressions()).filter(
-        (item: { detection?: { score?: number } }) =>
-          (item.detection?.score ?? 0) >= DETECTION_SCORE_THRESHOLD
-      );
-
-      const ctx = overlay.getContext("2d");
-      if (ctx) ctx.clearRect(0, 0, overlay.width, overlay.height);
-
-      if (results.length > 0) {
-        const resized = faceapi.resizeResults(results, {
-          width: overlay.width,
-          height: overlay.height,
+      let results: any[] = [];
+      try {
+        const faceMatcher = await getFaceMatcher();
+        const detectorOptions = new faceapi.TinyFaceDetectorOptions({
+          inputSize: isRtsp ? 320 : 416,
+          scoreThreshold: DETECTION_SCORE_THRESHOLD,
         });
-        faceapi.draw.drawDetections(overlay, resized);
+        let detection = faceapi.detectAllFaces(detectionSource, detectorOptions);
+        if (isRecognitionReady()) {
+          detection = detection.withFaceLandmarks(true).withFaceDescriptors();
+        }
+        results = (await detection.withFaceExpressions()).filter(
+          (item: { detection?: { score?: number } }) =>
+            (item.detection?.score ?? 0) >= DETECTION_SCORE_THRESHOLD
+        );
 
-        const people = new Map<string, string>();
-        for (const result of results) {
-          const moodKey = result.expressions ? bestExpression(result.expressions) : "neutral";
-          let label = "Unknown";
-          if (faceMatcher && result.descriptor) {
-            const match = faceMatcher.findBestMatch(result.descriptor);
-            if (match.label && match.label !== "unknown") {
-              label = match.label;
+        const ctx = overlay.getContext("2d");
+        if (ctx) ctx.clearRect(0, 0, overlay.width, overlay.height);
+
+        if (results.length > 0) {
+          const resized = faceapi.resizeResults(results, {
+            width: overlay.width,
+            height: overlay.height,
+          });
+          faceapi.draw.drawDetections(overlay, resized);
+
+          const people = new Map<string, string>();
+          for (const result of results) {
+            const moodKey = result.expressions ? bestExpression(result.expressions) : "neutral";
+            let label = "Unknown";
+            if (faceMatcher && result.descriptor) {
+              const match = faceMatcher.findBestMatch(result.descriptor);
+              if (match.label && match.label !== "unknown") {
+                label = match.label;
+              }
+            }
+
+            const nextMood = rememberMood(label, MOOD_LABELS[moodKey] || moodKey);
+            const stableState = stableMoodRef.current.get(label);
+            if (!stableState || stableState.mood !== nextMood) {
+              stableMoodRef.current.set(label, { mood: nextMood, count: 1 });
+              people.set(label, nextMood);
+              continue;
+            }
+            const nextCount = Math.min(stableState.count + 1, EMOTION_STABILITY_FRAMES);
+            stableMoodRef.current.set(label, { mood: nextMood, count: nextCount });
+            people.set(label, stableState.mood);
+          }
+
+          if (active) {
+            setDetected(Array.from(people.entries()).map(([name, mood]) => ({ name, mood })));
+          }
+
+          const sendTs = Date.now();
+          for (const [name, mood] of people.entries()) {
+            if (name === "Unknown") continue;
+            const stableState = stableMoodRef.current.get(name);
+            if (!stableState || stableState.count < EMOTION_STABILITY_FRAMES) continue;
+            const lastSeenAt = lastSeenRef.current.get(name);
+            const wasVisibleRecently =
+              typeof lastSeenAt === "number" && sendTs - lastSeenAt <= PERSON_ABSENCE_GRACE_MS;
+            const lastSent = lastSentRef.current.get(name);
+            const moodChanged = lastSent ? lastSent.mood !== mood : true;
+            if (wasVisibleRecently && !moodChanged) continue;
+
+            lastSentRef.current.set(name, { mood });
+            void sendRecognition({
+              name,
+              mood,
+              detectedAt: new Date(sendTs).toISOString(),
+            });
+          }
+
+          for (const name of people.keys()) {
+            if (name !== "Unknown") lastSeenRef.current.set(name, sendTs);
+          }
+
+          for (const [name, seenAt] of lastSeenRef.current.entries()) {
+            if (sendTs - seenAt > PERSON_ABSENCE_GRACE_MS) {
+              lastSeenRef.current.delete(name);
+              lastSentRef.current.delete(name);
+              stableMoodRef.current.delete(name);
+              moodHistoryRef.current.delete(name);
             }
           }
-
-          const nextMood = rememberMood(label, MOOD_LABELS[moodKey] || moodKey);
-          const stableState = stableMoodRef.current.get(label);
-          if (!stableState || stableState.mood !== nextMood) {
-            stableMoodRef.current.set(label, { mood: nextMood, count: 1 });
-            people.set(label, nextMood);
-            continue;
-          }
-          const nextCount = Math.min(stableState.count + 1, EMOTION_STABILITY_FRAMES);
-          stableMoodRef.current.set(label, { mood: nextMood, count: nextCount });
-          people.set(label, stableState.mood);
-        }
-
-        if (active) {
-          setDetected(Array.from(people.entries()).map(([name, mood]) => ({ name, mood })));
-        }
-
-        const nowTs = Date.now();
-        for (const [name, mood] of people.entries()) {
-          if (name === "Unknown") continue;
-          const stableState = stableMoodRef.current.get(name);
-          if (!stableState || stableState.count < EMOTION_STABILITY_FRAMES) continue;
-          const lastSeenAt = lastSeenRef.current.get(name);
-          const wasVisibleRecently =
-            typeof lastSeenAt === "number" && nowTs - lastSeenAt <= PERSON_ABSENCE_GRACE_MS;
-          const lastSent = lastSentRef.current.get(name);
-          const moodChanged = lastSent ? lastSent.mood !== mood : true;
-          if (wasVisibleRecently && !moodChanged) continue;
-
-          lastSentRef.current.set(name, { mood });
-          void sendRecognition({
-            name,
-            mood,
-            detectedAt: new Date(nowTs).toISOString(),
-          });
-        }
-
-        for (const name of people.keys()) {
-          if (name !== "Unknown") lastSeenRef.current.set(name, nowTs);
-        }
-
-        for (const [name, seenAt] of lastSeenRef.current.entries()) {
-          if (nowTs - seenAt > PERSON_ABSENCE_GRACE_MS) {
-            lastSeenRef.current.delete(name);
-            lastSentRef.current.delete(name);
-            stableMoodRef.current.delete(name);
-            moodHistoryRef.current.delete(name);
+        } else if (active) {
+          setDetected([]);
+          const clearTs = Date.now();
+          for (const [name, seenAt] of lastSeenRef.current.entries()) {
+            if (clearTs - seenAt > PERSON_ABSENCE_GRACE_MS) {
+              lastSeenRef.current.delete(name);
+              lastSentRef.current.delete(name);
+              stableMoodRef.current.delete(name);
+              moodHistoryRef.current.delete(name);
+            }
           }
         }
-      } else if (active) {
-        setDetected([]);
-        const nowTs = Date.now();
-        for (const [name, seenAt] of lastSeenRef.current.entries()) {
-          if (nowTs - seenAt > PERSON_ABSENCE_GRACE_MS) {
-            lastSeenRef.current.delete(name);
-            lastSentRef.current.delete(name);
-            stableMoodRef.current.delete(name);
-            moodHistoryRef.current.delete(name);
-          }
-        }
+      } finally {
+        detectBusyRef.current = false;
       }
 
-      loopTimer = window.setTimeout(loop, 140);
+      loopTimer = window.setTimeout(loop, 30);
     };
 
     const init = async () => {
