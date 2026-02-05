@@ -113,7 +113,7 @@ def load_settings(project_root: Path) -> Settings:
         cooldown_seconds=env_int("WORKER_COOLDOWN_SECONDS", 3),
         frame_stride=env_int("WORKER_FRAME_STRIDE", 2),
         max_width=env_int("WORKER_MAX_WIDTH", 960),
-        send_unknown=env_bool("WORKER_SEND_UNKNOWN", True),
+        send_unknown=env_bool("WORKER_SEND_UNKNOWN", False),
         heartbeat_seconds=env_int("WORKER_HEARTBEAT_SECONDS", 20),
         http_timeout_seconds=env_int("WORKER_HTTP_TIMEOUT_SECONDS", 5),
         det_size=env_int("WORKER_DET_SIZE", 640),
