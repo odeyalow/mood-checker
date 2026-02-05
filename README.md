@@ -53,6 +53,36 @@ Run manually:
 python worker/py-recognition-worker.py
 ```
 
+Check which known photos are loadable:
+
+```bash
+npm run worker:check-known
+```
+
+## Server quick start (after git pull)
+
+```bash
+cd /opt/mood-checker
+npm install
+npm run build
+. .venv/bin/activate
+pip install insightface onnxruntime opencv-python-headless requests
+cp -n .env.worker.example .env.worker
+PYTHON_BIN=/opt/mood-checker/.venv/bin/python npm run pm2:start:all
+npm run pm2:save
+```
+
+Verify:
+
+```bash
+pm2 logs mood-checker-pyworker --lines 80
+```
+
+Look for:
+- `known embeddings loaded: N`
+- `heartbeat: cameras_ready=4/4`
+- `sent name=...`
+
 ## PM2 (app + worker together)
 
 ```bash

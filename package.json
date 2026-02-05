@@ -8,6 +8,7 @@
     "start": "node server.js",
     "worker:recognition": "node scripts/recognition-worker.mjs",
     "worker:py": "python worker/py-recognition-worker.py",
+    "worker:check-known": "python worker/check-known.py",
     "pm2:start": "pm2 start ecosystem.config.cjs --only mood-checker-app --env production",
     "pm2:start:all": "pm2 start ecosystem.config.cjs --only mood-checker-app,mood-checker-pyworker --env production",
     "pm2:start:worker": "pm2 start ecosystem.config.cjs --only mood-checker-worker --env production",

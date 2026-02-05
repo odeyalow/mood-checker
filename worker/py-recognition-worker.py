@@ -109,9 +109,9 @@ def load_settings(project_root: Path) -> Settings:
         known_dir=project_root / "public" / "known",
         known_json=project_root / "public" / "known" / "images.json",
         cameras_ts=project_root / "src" / "lib" / "cameras.ts",
-        similarity_threshold=env_float("WORKER_SIMILARITY_THRESHOLD", 0.45),
-        cooldown_seconds=env_int("WORKER_COOLDOWN_SECONDS", 10),
-        frame_stride=env_int("WORKER_FRAME_STRIDE", 4),
+        similarity_threshold=env_float("WORKER_SIMILARITY_THRESHOLD", 0.30),
+        cooldown_seconds=env_int("WORKER_COOLDOWN_SECONDS", 3),
+        frame_stride=env_int("WORKER_FRAME_STRIDE", 2),
         max_width=env_int("WORKER_MAX_WIDTH", 960),
         send_unknown=env_bool("WORKER_SEND_UNKNOWN", True),
         heartbeat_seconds=env_int("WORKER_HEARTBEAT_SECONDS", 20),
@@ -163,12 +163,15 @@ def load_known_embeddings(settings: Settings, app: FaceAnalysis) -> Dict[str, np
     for file_path in list_known_files(settings):
         image = load_image(file_path)
         if image is None:
+            log(f"known skipped (decode failed): {file_path.name}")
             continue
         faces = app.get(image)
         if not faces:
+            log(f"known skipped (no face): {file_path.name}")
             continue
         name = file_path.stem
         known[name] = faces[0].normed_embedding
+        log(f"known loaded: {file_path.name}")
     log(f"known embeddings loaded: {len(known)}")
     return known
 
