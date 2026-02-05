@@ -61,6 +61,7 @@ const EMOTION_STABILITY_FRAMES = 3;
 const EMOTION_CONFIDENCE_THRESHOLD = 0.48;
 const DETECTION_SCORE_THRESHOLD = 0.45;
 const DETECTION_INTERVAL_MS = 90;
+const RECOGNITION_RESEND_MS = 15_000;
 
 const MOOD_LABELS: Record<string, string> = {
   neutral: "Neutral",
@@ -120,7 +121,7 @@ export default function CameraTile({
   const playerRef = useRef<any>(null);
   const webcamStreamRef = useRef<MediaStream | null>(null);
   const lastSeenRef = useRef<Map<string, number>>(new Map());
-  const lastSentRef = useRef<Map<string, { mood: string }>>(new Map());
+  const lastSentRef = useRef<Map<string, { mood: string; sentAt: number }>>(new Map());
   const stableMoodRef = useRef<Map<string, { mood: string; count: number }>>(new Map());
   const moodHistoryRef = useRef<Map<string, string[]>>(new Map());
   const detectBusyRef = useRef(false);
@@ -363,11 +364,12 @@ export default function CameraTile({
             const lastSeenAt = lastSeenRef.current.get(name);
             const wasVisibleRecently =
               typeof lastSeenAt === "number" && sendTs - lastSeenAt <= PERSON_ABSENCE_GRACE_MS;
-            const lastSent = lastSentRef.current.get(name);
-            const moodChanged = lastSent ? lastSent.mood !== mood : true;
-            if (wasVisibleRecently && !moodChanged) continue;
+          const lastSent = lastSentRef.current.get(name);
+          const moodChanged = lastSent ? lastSent.mood !== mood : true;
+          const resendDue = lastSent ? sendTs - lastSent.sentAt >= RECOGNITION_RESEND_MS : true;
+          if (wasVisibleRecently && !moodChanged && !resendDue) continue;
 
-            lastSentRef.current.set(name, { mood });
+            lastSentRef.current.set(name, { mood, sentAt: sendTs });
             void sendRecognition({
               name,
               mood,
