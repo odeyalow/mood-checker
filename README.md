@@ -37,6 +37,22 @@ npm run worker:recognition
 
 The worker opens `/${locale}/cameras` in headless Chromium, keeps recognition running, and auto-restarts on crash.
 
+## Python recognition worker (recommended for server)
+
+The Python worker reads RTSP streams directly and sends recognition events to `/api/recognitions`, so it does not depend on an open browser tab.
+
+Requirements in your Python venv:
+- `insightface`
+- `onnxruntime`
+- `opencv-python-headless`
+- `requests`
+
+Run manually:
+
+```bash
+python worker/py-recognition-worker.py
+```
+
 ## PM2 (app + worker together)
 
 ```bash
@@ -51,5 +67,7 @@ npm run pm2:restart
 npm run pm2:stop
 npm run pm2:start       # app only
 npm run pm2:start:worker
+npm run pm2:start:pyworker
+npm run pm2:restart:pyworker
 npm run pm2:save
 ```
