@@ -2,6 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import process from "node:process";
 import { setTimeout as sleep } from "node:timers/promises";
+import { SignJWT } from "jose";
 
 function parseBoolean(value, fallback = false) {
   if (value == null) return fallback;
@@ -46,6 +47,9 @@ function createConfig() {
     locale: process.env.WORKER_LOCALE ?? "ru",
     login: process.env.WORKER_LOGIN ?? "",
     password: process.env.WORKER_PASSWORD ?? "",
+    authSecret: process.env.WORKER_AUTH_SECRET ?? "",
+    authCookieName: process.env.WORKER_AUTH_COOKIE_NAME ?? "mc_auth",
+    startupWaitMs: parseNumber(process.env.WORKER_STARTUP_WAIT_MS, 60_000),
     headless: parseBoolean(process.env.WORKER_HEADLESS, true),
     healthcheckIntervalMs: parseNumber(
       process.env.WORKER_HEALTHCHECK_INTERVAL_MS,
@@ -62,11 +66,10 @@ function createConfig() {
 }
 
 function ensureConfig(config) {
-  if (!config.login) {
-    throw new Error("WORKER_LOGIN is required");
-  }
-  if (!config.password) {
-    throw new Error("WORKER_PASSWORD is required");
+  const hasCredentials = Boolean(config.login && config.password);
+  const hasSecret = Boolean(config.authSecret);
+  if (!hasCredentials && !hasSecret) {
+    throw new Error("Set WORKER_AUTH_SECRET or WORKER_LOGIN+WORKER_PASSWORD");
   }
 }
 
@@ -85,7 +88,35 @@ async function fillFirstVisible(page, selectors, value) {
   throw new Error(`Input not found. Tried selectors: ${selectors.join(", ")}`);
 }
 
+async function waitForServerReady(config) {
+  const startedAt = Date.now();
+  while (Date.now() - startedAt < config.startupWaitMs) {
+    try {
+      const response = await fetch(new URL("/", config.baseUrl), {
+        method: "GET",
+      });
+      if (response.status < 500) return;
+    } catch {
+      // retry
+    }
+    await sleep(1000);
+  }
+  throw new Error(`Server is not reachable at ${config.baseUrl}`);
+}
+
+async function createWorkerToken(config) {
+  if (!config.authSecret) return null;
+  const secretKey = new TextEncoder().encode(config.authSecret);
+  return new SignJWT({ login: config.login || "worker" })
+    .setProtectedHeader({ alg: "HS256" })
+    .setSubject("worker")
+    .setIssuedAt()
+    .setExpirationTime("30d")
+    .sign(secretKey);
+}
+
 async function runSession(config) {
+  await waitForServerReady(config);
   const { chromium } = await import("playwright");
   const browser = await chromium.launch({
     headless: config.headless,
@@ -115,13 +146,28 @@ async function runSession(config) {
   ).toString();
   const loginApiUrl = new URL("/api/auth/login", config.baseUrl).toString();
   const authMeUrl = new URL("/api/auth/me", config.baseUrl).toString();
+  const authToken = await createWorkerToken(config);
+  const base = new URL(config.baseUrl);
+
+  if (authToken) {
+    await context.addCookies([
+      {
+        name: config.authCookieName,
+        value: authToken,
+        domain: base.hostname,
+        path: "/",
+        httpOnly: true,
+        secure: base.protocol === "https:",
+      },
+    ]);
+  }
 
   console.log("[worker] Opening cameras page...");
   await page.goto(camerasUrl, { waitUntil: "domcontentloaded" });
   await page.waitForLoadState("networkidle");
 
   const isOnLoginPage = page.url().includes(`/${config.locale}/login`);
-  if (isOnLoginPage) {
+  if (isOnLoginPage && config.login && config.password) {
     console.log("[worker] Login required, trying API login...");
     const loginResponse = await context.request.post(loginApiUrl, {
       data: {
@@ -165,6 +211,12 @@ async function runSession(config) {
         );
       }
     }
+  }
+
+  if (page.url().includes(`/${config.locale}/login`)) {
+    throw new Error(
+      "Worker stayed on login page. Check WORKER_AUTH_SECRET or WORKER_LOGIN/WORKER_PASSWORD."
+    );
   }
 
   await page.goto(camerasUrl, { waitUntil: "domcontentloaded" });

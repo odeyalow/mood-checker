@@ -25,7 +25,9 @@ npx playwright install chromium
 cp .env.worker.example .env.worker
 ```
 
-3. Set valid credentials in `.env.worker` (`WORKER_LOGIN`, `WORKER_PASSWORD`).
+3. Set `.env.worker`:
+   - Preferred: `WORKER_AUTH_SECRET` (same value as app `AUTH_SECRET`).
+   - Optional fallback: `WORKER_LOGIN` + `WORKER_PASSWORD`.
 
 4. Start worker:
 
