@@ -40,7 +40,7 @@ The worker opens `/${locale}/cameras` in headless Chromium, keeps recognition ru
 ## PM2 (app + worker together)
 
 ```bash
-npm run pm2:start
+npm run pm2:start:all
 ```
 
 Useful commands:
@@ -49,4 +49,7 @@ Useful commands:
 npm run pm2:logs
 npm run pm2:restart
 npm run pm2:stop
+npm run pm2:start       # app only
+npm run pm2:start:worker
+npm run pm2:save
 ```
