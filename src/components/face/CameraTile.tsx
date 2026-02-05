@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Badge, Card, Space, Tag, Typography } from "antd";
 import { VideoCameraOutlined } from "@ant-design/icons";
+import { useSearchParams } from "next/navigation";
 import {
   ensureFaceApiReady,
   ensureRtspPlayerReady,
@@ -114,6 +115,7 @@ export default function CameraTile({
   mode?: CameraTileMode;
   locale?: AppLocale;
 }) {
+  const searchParams = useSearchParams();
   const t = L10N[locale];
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const streamRef = useRef<HTMLCanvasElement | null>(null);
@@ -132,6 +134,7 @@ export default function CameraTile({
   const [detected, setDetected] = useState<{ name: string; mood: string }[]>([]);
 
   const recognitionEnabled = mode === "full";
+  const workerMode = searchParams.get("worker") === "1";
   const isRtsp = camera.type !== "webcam" && Boolean(camera.rtspUrl);
 
   const statusTag = useMemo(() => {
@@ -358,7 +361,7 @@ export default function CameraTile({
 
           const sendTs = Date.now();
           for (const [name, mood] of people.entries()) {
-            if (name === "Unknown") continue;
+          if (name === "Unknown" && !workerMode) continue;
             const stableState = stableMoodRef.current.get(name);
             if (!stableState || stableState.count < EMOTION_STABILITY_FRAMES) continue;
             const lastSeenAt = lastSeenRef.current.get(name);

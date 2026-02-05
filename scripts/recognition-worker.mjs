@@ -140,10 +140,9 @@ async function runSession(config) {
     console.error("[worker] Page error:", error?.message || error);
   });
 
-  const camerasUrl = new URL(
-    localePath(config.locale, "cameras"),
-    config.baseUrl
-  ).toString();
+  const cameras = new URL(localePath(config.locale, "cameras"), config.baseUrl);
+  cameras.searchParams.set("worker", "1");
+  const camerasUrl = cameras.toString();
   const loginApiUrl = new URL("/api/auth/login", config.baseUrl).toString();
   const authMeUrl = new URL("/api/auth/me", config.baseUrl).toString();
   const authToken = await createWorkerToken(config);
