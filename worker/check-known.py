@@ -3,7 +3,9 @@ from pathlib import Path
 
 import cv2
 import numpy as np
-from insightface.app import FaceAnalysis
+import torch
+from facenet_pytorch import MTCNN
+from PIL import Image
 
 
 def main() -> int:
@@ -13,14 +15,20 @@ def main() -> int:
         [p for p in known_dir.iterdir() if p.suffix.lower() in (".jpg", ".jpeg", ".png", ".webp")]
     )
 
-    app = FaceAnalysis(name="buffalo_l", providers=["CPUExecutionProvider"])
-    app.prepare(ctx_id=0, det_size=(640, 640))
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    mtcnn = MTCNN(keep_all=True, device=device)
 
     loaded = 0
     for path in files:
         raw = np.fromfile(str(path), dtype=np.uint8)
         image = cv2.imdecode(raw, cv2.IMREAD_COLOR) if raw.size else None
-        faces = 0 if image is None else len(app.get(image))
+        if image is None:
+            faces = 0
+        else:
+            rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+            pil = Image.fromarray(rgb)
+            boxes, _ = mtcnn.detect(pil)
+            faces = 0 if boxes is None else len(boxes)
         print(f"{path.name}: faces={faces}")
         if faces > 0:
             loaded += 1

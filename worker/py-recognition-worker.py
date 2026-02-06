@@ -13,7 +13,9 @@ from typing import Dict, List, Optional, Tuple
 import cv2
 import numpy as np
 import requests
-from insightface.app import FaceAnalysis
+import torch
+from facenet_pytorch import InceptionResnetV1, MTCNN
+from PIL import Image
 
 
 def load_env_file(path: Path) -> None:
@@ -162,22 +164,94 @@ def load_image(path: Path) -> Optional[np.ndarray]:
         return None
 
 
-def load_known_embeddings(settings: Settings, app: FaceAnalysis) -> Dict[str, np.ndarray]:
+class FaceNetRecognizer:
+    def __init__(self) -> None:
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.mtcnn = MTCNN(keep_all=True, device=self.device)
+        self.resnet = InceptionResnetV1(pretrained="vggface2").eval().to(self.device)
+
+    def _image_to_pil(self, image: np.ndarray) -> Image.Image:
+        rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+        return Image.fromarray(rgb)
+
+    def detect_faces(self, image: np.ndarray) -> Tuple[List[np.ndarray], List[Tuple[float, float, float, float]]]:
+        pil = self._image_to_pil(image)
+        boxes, _ = self.mtcnn.detect(pil)
+        if boxes is None or len(boxes) == 0:
+            return [], []
+        faces = self.mtcnn.extract(pil, boxes, save_path=None)
+        if faces is None:
+            return [], []
+        embeddings: List[np.ndarray] = []
+        bboxes: List[Tuple[float, float, float, float]] = []
+        with torch.no_grad():
+            for idx in range(faces.shape[0]):
+                face = faces[idx].unsqueeze(0).to(self.device)
+                emb = self.resnet(face).cpu().numpy().flatten()
+                norm = np.linalg.norm(emb)
+                if norm == 0:
+                    continue
+                embeddings.append(emb / norm)
+                x1, y1, x2, y2 = boxes[idx].tolist()
+                bboxes.append((x1, y1, x2, y2))
+        return embeddings, bboxes
+
+
+def bbox_iou(a: Tuple[float, float, float, float], b: Tuple[float, float, float, float]) -> float:
+    ax1, ay1, ax2, ay2 = a
+    bx1, by1, bx2, by2 = b
+    inter_x1 = max(ax1, bx1)
+    inter_y1 = max(ay1, by1)
+    inter_x2 = min(ax2, bx2)
+    inter_y2 = min(ay2, by2)
+    inter_w = max(0.0, inter_x2 - inter_x1)
+    inter_h = max(0.0, inter_y2 - inter_y1)
+    inter = inter_w * inter_h
+    if inter == 0:
+        return 0.0
+    area_a = max(0.0, ax2 - ax1) * max(0.0, ay2 - ay1)
+    area_b = max(0.0, bx2 - bx1) * max(0.0, by2 - by1)
+    union = area_a + area_b - inter
+    return inter / union if union > 0 else 0.0
+
+
+def crop_face(frame: np.ndarray, box: Tuple[float, float, float, float]) -> Optional[np.ndarray]:
+    h, w = frame.shape[:2]
+    x1, y1, x2, y2 = box
+    x1_i = max(0, int(x1))
+    y1_i = max(0, int(y1))
+    x2_i = min(w, int(x2))
+    y2_i = min(h, int(y2))
+    if x2_i <= x1_i or y2_i <= y1_i:
+        return None
+    return frame[y1_i:y2_i, x1_i:x2_i]
+
+
+def blur_score(face: np.ndarray) -> float:
+    gray = cv2.cvtColor(face, cv2.COLOR_BGR2GRAY)
+    return float(cv2.Laplacian(gray, cv2.CV_64F).var())
+
+
+def load_known_embeddings(settings: Settings, recognizer: FaceNetRecognizer) -> Dict[str, np.ndarray]:
     buckets: Dict[str, List[np.ndarray]] = {}
     for file_path in list_known_files(settings):
         image = load_image(file_path)
         if image is None:
             log(f"known skipped (decode failed): {file_path.name}")
             continue
-        faces = app.get(image)
-        if not faces:
+        embeddings, boxes = recognizer.detect_faces(image)
+        if not embeddings:
             log(f"known skipped (no face): {file_path.name}")
             continue
-        best_face = max(
-            faces, key=lambda face: float((face.bbox[2] - face.bbox[0]) * (face.bbox[3] - face.bbox[1]))
-        )
+        best_idx = 0
+        best_area = -1.0
+        for idx, (x1, y1, x2, y2) in enumerate(boxes):
+            area = float((x2 - x1) * (y2 - y1))
+            if area > best_area:
+                best_area = area
+                best_idx = idx
         name = canonical_name(file_path.stem)
-        buckets.setdefault(name, []).append(best_face.normed_embedding)
+        buckets.setdefault(name, []).append(embeddings[best_idx])
         log(f"known loaded: {file_path.name}")
     known: Dict[str, np.ndarray] = {}
     for name, embeddings in buckets.items():
@@ -285,10 +359,8 @@ def main() -> int:
         log("no RTSP cameras configured")
         return 1
 
-    app = FaceAnalysis(name=settings.model_name, providers=["CPUExecutionProvider"])
-    app.prepare(ctx_id=0, det_size=(settings.det_size, settings.det_size))
-
-    known = load_known_embeddings(settings, app)
+    recognizer = FaceNetRecognizer()
+    known = load_known_embeddings(settings, recognizer)
     cam_states = [CameraState(cam_id, url) for cam_id, url in cameras]
     last_sent_at: Dict[str, float] = {}
     session = requests.Session()
@@ -308,6 +380,14 @@ def main() -> int:
 
     last_heartbeat = 0.0
     min_margin = 0.04
+    min_face_size = 70
+    min_blur = 40.0
+    track_iou_threshold = 0.3
+    track_ttl = 1.5
+    max_track_embeddings = 5
+    next_track_id = 1
+    tracks: Dict[int, Dict[str, object]] = {}
+
     while not should_stop:
         ready = 0
         for camera in cam_states:
@@ -319,19 +399,81 @@ def main() -> int:
                 continue
 
             frame = resize_for_inference(frame, settings.max_width)
-            faces = app.get(frame)
-            if not faces:
+            embeddings, boxes = recognizer.detect_faces(frame)
+            if not embeddings:
                 continue
 
-            for face in faces:
-                name, score, second_score = best_match(face.normed_embedding, known)
+            now = time.time()
+
+            # assign to tracks
+            assigned: Dict[int, int] = {}
+            for idx, box in enumerate(boxes):
+                best_track = -1
+                best_iou = 0.0
+                for track_id, track in tracks.items():
+                    if track["cam_id"] != camera.cam_id:
+                        continue
+                    iou = bbox_iou(box, track["bbox"])
+                    if iou > best_iou:
+                        best_iou = iou
+                        best_track = track_id
+                if best_track >= 0 and best_iou >= track_iou_threshold:
+                    assigned[idx] = best_track
+                else:
+                    track_id = next_track_id
+                    next_track_id += 1
+                    tracks[track_id] = {
+                        "cam_id": camera.cam_id,
+                        "bbox": box,
+                        "last_seen": now,
+                        "embeddings": [],
+                        "best_name": "unknown",
+                        "best_score": -1.0,
+                    }
+                    assigned[idx] = track_id
+
+            # update tracks with new embeddings
+            for idx, face_embedding in enumerate(embeddings):
+                box = boxes[idx]
+                track = tracks[assigned[idx]]
+                track["bbox"] = box
+                track["last_seen"] = now
+
+                face_crop = crop_face(frame, box)
+                if face_crop is None:
+                    continue
+                h, w = face_crop.shape[:2]
+                if min(h, w) < min_face_size:
+                    continue
+                if blur_score(face_crop) < min_blur:
+                    continue
+
+                embeddings_list: List[np.ndarray] = track["embeddings"]  # type: ignore[assignment]
+                embeddings_list.append(face_embedding)
+                if len(embeddings_list) > max_track_embeddings:
+                    embeddings_list.pop(0)
+                track["embeddings"] = embeddings_list
+
+                # compute average embedding for more stable matching
+                if len(embeddings_list) == 1:
+                    avg_embedding = embeddings_list[0]
+                else:
+                    mean = np.mean(np.stack(embeddings_list), axis=0)
+                    norm = np.linalg.norm(mean)
+                    avg_embedding = mean / norm if norm > 0 else embeddings_list[-1]
+
+                name, score, second_score = best_match(avg_embedding, known)
                 is_known = score >= settings.similarity_threshold and (score - second_score) >= min_margin
                 label = name if is_known else "unknown"
                 if label == "unknown" and not settings.send_unknown:
                     continue
 
+                # allow very strong single-frame hits to reduce latency
+                enough_frames = len(embeddings_list) >= 2 or score >= (settings.similarity_threshold + 0.10)
+                if not enough_frames:
+                    continue
+
                 key = f"{camera.cam_id}:{label}"
-                now = time.time()
                 if now - last_sent_at.get(key, 0.0) < settings.cooldown_seconds:
                     continue
                 last_sent_at[key] = now
@@ -341,6 +483,11 @@ def main() -> int:
                     log(f"[{camera.cam_id}] sent name={label} score={score:.3f}")
                 except Exception as exc:
                     log(f"send failed error={exc}")
+
+            # cleanup old tracks
+            stale = [tid for tid, t in tracks.items() if now - float(t["last_seen"]) > track_ttl]
+            for tid in stale:
+                del tracks[tid]
 
         now = time.time()
         if now - last_heartbeat >= settings.heartbeat_seconds:
