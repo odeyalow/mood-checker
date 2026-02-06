@@ -70,6 +70,10 @@ def decode_mojibake(filename: str) -> str:
         return filename
 
 
+def canonical_name(stem: str) -> str:
+    return re.sub(r"[_-]\d+$", "", stem, flags=re.IGNORECASE)
+
+
 def parse_cameras_from_ts(path: Path) -> List[Tuple[str, str]]:
     if not path.exists():
         return []
@@ -159,7 +163,7 @@ def load_image(path: Path) -> Optional[np.ndarray]:
 
 
 def load_known_embeddings(settings: Settings, app: FaceAnalysis) -> Dict[str, np.ndarray]:
-    known: Dict[str, np.ndarray] = {}
+    buckets: Dict[str, List[np.ndarray]] = {}
     for file_path in list_known_files(settings):
         image = load_image(file_path)
         if image is None:
@@ -169,9 +173,19 @@ def load_known_embeddings(settings: Settings, app: FaceAnalysis) -> Dict[str, np
         if not faces:
             log(f"known skipped (no face): {file_path.name}")
             continue
-        name = file_path.stem
-        known[name] = faces[0].normed_embedding
+        best_face = max(
+            faces, key=lambda face: float((face.bbox[2] - face.bbox[0]) * (face.bbox[3] - face.bbox[1]))
+        )
+        name = canonical_name(file_path.stem)
+        buckets.setdefault(name, []).append(best_face.normed_embedding)
         log(f"known loaded: {file_path.name}")
+    known: Dict[str, np.ndarray] = {}
+    for name, embeddings in buckets.items():
+        mean = np.mean(np.stack(embeddings), axis=0)
+        norm = np.linalg.norm(mean)
+        if norm == 0:
+            continue
+        known[name] = mean / norm
     log(f"known embeddings loaded: {len(known)}")
     return known
 
@@ -189,17 +203,21 @@ def parse_rtsp_cameras(settings: Settings) -> List[Tuple[str, str]]:
     return parse_cameras_from_ts(settings.cameras_ts)
 
 
-def best_match(face_embedding: np.ndarray, known: Dict[str, np.ndarray]) -> Tuple[str, float]:
+def best_match(face_embedding: np.ndarray, known: Dict[str, np.ndarray]) -> Tuple[str, float, float]:
     if not known:
-        return ("unknown", 0.0)
+        return ("unknown", 0.0, -1.0)
     best_name = "unknown"
     best_score = -1.0
+    second_score = -1.0
     for name, embedding in known.items():
         score = float(np.dot(face_embedding, embedding))
         if score > best_score:
+            second_score = best_score
             best_score = score
             best_name = name
-    return best_name, best_score
+        elif score > second_score:
+            second_score = score
+    return best_name, best_score, second_score
 
 
 class CameraState:
@@ -289,6 +307,7 @@ def main() -> int:
         camera.connect()
 
     last_heartbeat = 0.0
+    min_margin = 0.04
     while not should_stop:
         ready = 0
         for camera in cam_states:
@@ -305,8 +324,8 @@ def main() -> int:
                 continue
 
             for face in faces:
-                name, score = best_match(face.normed_embedding, known)
-                is_known = score >= settings.similarity_threshold
+                name, score, second_score = best_match(face.normed_embedding, known)
+                is_known = score >= settings.similarity_threshold and (score - second_score) >= min_margin
                 label = name if is_known else "unknown"
                 if label == "unknown" and not settings.send_unknown:
                     continue
