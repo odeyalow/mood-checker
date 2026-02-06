@@ -380,8 +380,8 @@ def main() -> int:
 
     last_heartbeat = 0.0
     min_margin = 0.04
-    min_face_size = 50
-    min_blur = 25.0
+    min_face_size = 40
+    min_blur = 10.0
     track_iou_threshold = 0.3
     track_ttl = 1.5
     max_track_embeddings = 5
@@ -446,12 +446,10 @@ def main() -> int:
                 if face_crop is None:
                     continue
                 h, w = face_crop.shape[:2]
-                if min(h, w) < min_face_size:
+                size_ok = min(h, w) >= min_face_size
+                blur_ok = blur_score(face_crop) >= min_blur
+                if not size_ok or not blur_ok:
                     faces_filtered += 1
-                    continue
-                if blur_score(face_crop) < min_blur:
-                    faces_filtered += 1
-                    continue
 
                 embeddings_list: List[np.ndarray] = track["embeddings"]  # type: ignore[assignment]
                 embeddings_list.append(face_embedding)
