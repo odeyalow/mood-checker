@@ -380,8 +380,8 @@ def main() -> int:
 
     last_heartbeat = 0.0
     min_margin = 0.04
-    min_face_size = 70
-    min_blur = 40.0
+    min_face_size = 50
+    min_blur = 25.0
     track_iou_threshold = 0.3
     track_ttl = 1.5
     max_track_embeddings = 5
@@ -469,7 +469,7 @@ def main() -> int:
                     continue
 
                 # allow very strong single-frame hits to reduce latency
-                enough_frames = len(embeddings_list) >= 2 or score >= (settings.similarity_threshold + 0.10)
+                enough_frames = len(embeddings_list) >= 2 or score >= (settings.similarity_threshold + 0.05)
                 if not enough_frames:
                     continue
 
