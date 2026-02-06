@@ -390,6 +390,8 @@ def main() -> int:
 
     while not should_stop:
         ready = 0
+        faces_detected = 0
+        faces_filtered = 0
         for camera in cam_states:
             frame = camera.read()
             if frame is None:
@@ -402,6 +404,7 @@ def main() -> int:
             embeddings, boxes = recognizer.detect_faces(frame)
             if not embeddings:
                 continue
+            faces_detected += len(embeddings)
 
             now = time.time()
 
@@ -444,8 +447,10 @@ def main() -> int:
                     continue
                 h, w = face_crop.shape[:2]
                 if min(h, w) < min_face_size:
+                    faces_filtered += 1
                     continue
                 if blur_score(face_crop) < min_blur:
+                    faces_filtered += 1
                     continue
 
                 embeddings_list: List[np.ndarray] = track["embeddings"]  # type: ignore[assignment]
@@ -491,7 +496,9 @@ def main() -> int:
 
         now = time.time()
         if now - last_heartbeat >= settings.heartbeat_seconds:
-            log(f"heartbeat: cameras_ready={ready}/{len(cam_states)}")
+            log(
+                f"heartbeat: cameras_ready={ready}/{len(cam_states)} faces_detected={faces_detected} filtered={faces_filtered}"
+            )
             last_heartbeat = now
 
         time.sleep(0.02)
