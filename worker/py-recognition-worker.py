@@ -250,6 +250,10 @@ def main() -> int:
 
     last_heartbeat = 0.0
     last_detection_log = 0.0
+    min_det_score = 0.6
+    min_face_size = 40
+    min_aspect = 0.6
+    max_aspect = 1.6
 
     while not should_stop:
         ready = 0
@@ -266,10 +270,28 @@ def main() -> int:
             faces = app.get(frame)
             if not faces:
                 continue
-            faces_detected += len(faces)
+            filtered_faces = []
+            for face in faces:
+                score = float(getattr(face, "det_score", 0.0))
+                if score < min_det_score:
+                    continue
+                x1, y1, x2, y2 = face.bbox.tolist()
+                w = max(0.0, x2 - x1)
+                h = max(0.0, y2 - y1)
+                if w < min_face_size or h < min_face_size:
+                    continue
+                if h == 0:
+                    continue
+                aspect = w / h
+                if aspect < min_aspect or aspect > max_aspect:
+                    continue
+                filtered_faces.append(face)
+            if not filtered_faces:
+                continue
+            faces_detected += len(filtered_faces)
             now = time.time()
             if now - last_detection_log >= 0.2:
-                log(f"[{camera.cam_id}] detected_faces={len(faces)}")
+                log(f"[{camera.cam_id}] detected_faces={len(filtered_faces)}")
                 last_detection_log = now
 
         now = time.time()
