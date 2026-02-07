@@ -343,17 +343,17 @@ def main() -> int:
 
     last_heartbeat = 0.0
     min_margin = 0.04
-    min_face_size = 30
-    min_blur = 5.0
+    min_face_size = 20
+    min_blur = 2.0
     track_iou_threshold = 0.2
     track_embedding_threshold = 0.35
     track_ttl = 1.0
     max_track_embeddings = 5
     next_track_id = 1
     tracks: Dict[int, Dict[str, object]] = {}
-    track_enqueue_interval = 0.3
-    min_track_frames = 3
-    min_confirm_hits = 2
+    track_enqueue_interval = 0.15
+    min_track_frames = 1
+    min_confirm_hits = 1
 
     while not should_stop:
         ready = 0
