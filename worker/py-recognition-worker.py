@@ -12,7 +12,6 @@ from typing import Dict, List, Optional, Tuple
 
 import cv2
 import numpy as np
-import requests
 from insightface.app import FaceAnalysis
 
 
@@ -162,67 +161,6 @@ def load_image(path: Path) -> Optional[np.ndarray]:
         return None
 
 
-def bbox_iou(a: Tuple[float, float, float, float], b: Tuple[float, float, float, float]) -> float:
-    ax1, ay1, ax2, ay2 = a
-    bx1, by1, bx2, by2 = b
-    inter_x1 = max(ax1, bx1)
-    inter_y1 = max(ay1, by1)
-    inter_x2 = min(ax2, bx2)
-    inter_y2 = min(ay2, by2)
-    inter_w = max(0.0, inter_x2 - inter_x1)
-    inter_h = max(0.0, inter_y2 - inter_y1)
-    inter = inter_w * inter_h
-    if inter == 0:
-        return 0.0
-    area_a = max(0.0, ax2 - ax1) * max(0.0, ay2 - ay1)
-    area_b = max(0.0, bx2 - bx1) * max(0.0, by2 - by1)
-    union = area_a + area_b - inter
-    return inter / union if union > 0 else 0.0
-
-
-def crop_face(frame: np.ndarray, box: Tuple[float, float, float, float]) -> Optional[np.ndarray]:
-    h, w = frame.shape[:2]
-    x1, y1, x2, y2 = box
-    x1_i = max(0, int(x1))
-    y1_i = max(0, int(y1))
-    x2_i = min(w, int(x2))
-    y2_i = min(h, int(y2))
-    if x2_i <= x1_i or y2_i <= y1_i:
-        return None
-    return frame[y1_i:y2_i, x1_i:x2_i]
-
-
-def blur_score(face: np.ndarray) -> float:
-    gray = cv2.cvtColor(face, cv2.COLOR_BGR2GRAY)
-    return float(cv2.Laplacian(gray, cv2.CV_64F).var())
-
-
-def load_known_embeddings(settings: Settings, app: FaceAnalysis) -> Dict[str, np.ndarray]:
-    buckets: Dict[str, List[np.ndarray]] = {}
-    for file_path in list_known_files(settings):
-        image = load_image(file_path)
-        if image is None:
-            log(f"known skipped (decode failed): {file_path.name}")
-            continue
-        faces = app.get(image)
-        if not faces:
-            log(f"known skipped (no face): {file_path.name}")
-            continue
-        best_face = max(
-            faces, key=lambda face: float((face.bbox[2] - face.bbox[0]) * (face.bbox[3] - face.bbox[1]))
-        )
-        name = canonical_name(file_path.stem)
-        buckets.setdefault(name, []).append(best_face.normed_embedding)
-        log(f"known loaded: {file_path.name}")
-    known: Dict[str, np.ndarray] = {}
-    for name, embeddings in buckets.items():
-        mean = np.mean(np.stack(embeddings), axis=0)
-        norm = np.linalg.norm(mean)
-        if norm == 0:
-            continue
-        known[name] = mean / norm
-    log(f"known embeddings loaded: {len(known)}")
-    return known
 
 
 def parse_rtsp_cameras(settings: Settings) -> List[Tuple[str, str]]:
@@ -238,21 +176,6 @@ def parse_rtsp_cameras(settings: Settings) -> List[Tuple[str, str]]:
     return parse_cameras_from_ts(settings.cameras_ts)
 
 
-def best_match(face_embedding: np.ndarray, known: Dict[str, np.ndarray]) -> Tuple[str, float, float]:
-    if not known:
-        return ("unknown", 0.0, -1.0)
-    best_name = "unknown"
-    best_score = -1.0
-    second_score = -1.0
-    for name, embedding in known.items():
-        score = float(np.dot(face_embedding, embedding))
-        if score > best_score:
-            second_score = best_score
-            best_score = score
-            best_name = name
-        elif score > second_score:
-            second_score = score
-    return best_name, best_score, second_score
 
 
 class CameraState:
@@ -297,19 +220,6 @@ def resize_for_inference(frame: np.ndarray, max_width: int) -> np.ndarray:
     return cv2.resize(frame, target, interpolation=cv2.INTER_AREA)
 
 
-def post_recognition(
-    session: requests.Session, settings: Settings, name: str, mood: str, cam_id: str
-) -> None:
-    payload = {
-        "name": name,
-        "mood": mood,
-        "detectedAt": datetime.now(timezone.utc).isoformat(),
-        "cameraId": cam_id,
-    }
-    response = session.post(settings.post_url, json=payload, timeout=settings.http_timeout_seconds)
-    response.raise_for_status()
-
-
 def main() -> int:
     project_root = Path(__file__).resolve().parents[1]
     load_env_file(project_root / ".env.worker")
@@ -323,10 +233,7 @@ def main() -> int:
     app = FaceAnalysis(name=settings.model_name, providers=["CPUExecutionProvider"])
     app.prepare(ctx_id=0, det_size=(settings.det_size, settings.det_size))
 
-    known = load_known_embeddings(settings, app)
     cam_states = [CameraState(cam_id, url) for cam_id, url in cameras]
-    last_sent_at: Dict[str, float] = {}
-    session = requests.Session()
 
     should_stop = False
 
@@ -342,23 +249,11 @@ def main() -> int:
         camera.connect()
 
     last_heartbeat = 0.0
-    min_margin = 0.04
-    min_face_size = 20
-    min_blur = 2.0
-    track_iou_threshold = 0.2
-    track_embedding_threshold = 0.35
-    track_ttl = 1.0
-    max_track_embeddings = 5
-    next_track_id = 1
-    tracks: Dict[int, Dict[str, object]] = {}
-    track_enqueue_interval = 0.15
-    min_track_frames = 1
-    min_confirm_hits = 1
+    last_detection_log = 0.0
 
     while not should_stop:
         ready = 0
         faces_detected = 0
-        faces_filtered = 0
         for camera in cam_states:
             frame = camera.read()
             if frame is None:
@@ -372,125 +267,14 @@ def main() -> int:
             if not faces:
                 continue
             faces_detected += len(faces)
-
             now = time.time()
-
-            # assign to tracks
-            assigned: Dict[int, int] = {}
-            for idx, face in enumerate(faces):
-                box = tuple(face.bbox.tolist())
-                best_track = -1
-                best_score = 0.0
-                for track_id, track in tracks.items():
-                    if track["cam_id"] != camera.cam_id:
-                        continue
-                    iou = bbox_iou(box, track["bbox"])
-                    emb_sim = -1.0
-                    last_emb = track.get("last_embedding")
-                    if last_emb is not None:
-                        emb_sim = float(np.dot(face.normed_embedding, last_emb))
-                    if iou < track_iou_threshold and emb_sim < track_embedding_threshold:
-                        continue
-                    score = iou * 0.5 + max(0.0, emb_sim) * 0.5
-                    if score > best_score:
-                        best_score = score
-                        best_track = track_id
-                if best_track >= 0:
-                    assigned[idx] = best_track
-                else:
-                    track_id = next_track_id
-                    next_track_id += 1
-                    tracks[track_id] = {
-                        "cam_id": camera.cam_id,
-                        "bbox": box,
-                        "last_seen": now,
-                        "embeddings": [],
-                        "last_enqueued": 0.0,
-                        "last_embedding": face.normed_embedding,
-                        "last_name": "unknown",
-                        "confirm_hits": 0,
-                    }
-                    assigned[idx] = track_id
-
-            # update tracks with new embeddings and enqueue averaged snapshots
-            for idx, face in enumerate(faces):
-                box = tuple(face.bbox.tolist())
-                track = tracks[assigned[idx]]
-                track["bbox"] = box
-                track["last_seen"] = now
-                track["last_embedding"] = face.normed_embedding
-
-                face_crop = crop_face(frame, box)
-                if face_crop is None:
-                    continue
-                h, w = face_crop.shape[:2]
-                size_ok = min(h, w) >= min_face_size
-                blur_ok = blur_score(face_crop) >= min_blur
-                if not size_ok or not blur_ok:
-                    faces_filtered += 1
-                    # Do not update confirmation on low-quality frames
-                    continue
-
-                emb_sim = -1.0
-                last_emb = track.get("last_embedding")
-                if last_emb is not None:
-                    emb_sim = float(np.dot(face.normed_embedding, last_emb))
-                if emb_sim >= 0 and emb_sim < 0.2:
-                    track["confirm_hits"] = 0
-                    track["last_name"] = "unknown"
-
-                embeddings_list: List[np.ndarray] = track["embeddings"]  # type: ignore[assignment]
-                embeddings_list.append(face.normed_embedding)
-                if len(embeddings_list) > max_track_embeddings:
-                    embeddings_list.pop(0)
-                track["embeddings"] = embeddings_list
-
-                last_enqueued = float(track.get("last_enqueued", 0.0))
-                if len(embeddings_list) >= min_track_frames and (now - last_enqueued) >= track_enqueue_interval:
-                    mean = np.mean(np.stack(embeddings_list), axis=0)
-                    norm = np.linalg.norm(mean)
-                    if norm > 0:
-                        avg_embedding = mean / norm
-                        name, score, second_score = best_match(avg_embedding, known)
-                        is_known = score >= settings.similarity_threshold and (score - second_score) >= min_margin
-                        label = name if is_known else "unknown"
-
-                        if label == "unknown" and not settings.send_unknown:
-                            track["embeddings"] = []
-                            track["last_enqueued"] = now
-                            continue
-
-                        last_name = track.get("last_name", "unknown")
-                        if label == last_name:
-                            track["confirm_hits"] = int(track.get("confirm_hits", 0)) + 1
-                        else:
-                            track["confirm_hits"] = 1
-                            track["last_name"] = label
-
-                        if track["confirm_hits"] >= min_confirm_hits:
-                            key = f"{camera.cam_id}:{label}"
-                            if now - last_sent_at.get(key, 0.0) >= settings.cooldown_seconds:
-                                last_sent_at[key] = now
-                                try:
-                                    log(f"[{camera.cam_id}] match name={label} score={score:.3f} sending")
-                                    post_recognition(session, settings, label, "neutral", camera.cam_id)
-                                    log(f"[{camera.cam_id}] sent name={label} score={score:.3f}")
-                                except Exception as exc:
-                                    log(f"send failed error={exc}")
-
-                        track["embeddings"] = []
-                        track["last_enqueued"] = now
-
-            # cleanup old tracks
-            stale = [tid for tid, t in tracks.items() if now - float(t["last_seen"]) > track_ttl]
-            for tid in stale:
-                del tracks[tid]
+            if now - last_detection_log >= 0.2:
+                log(f"[{camera.cam_id}] detected_faces={len(faces)}")
+                last_detection_log = now
 
         now = time.time()
         if now - last_heartbeat >= settings.heartbeat_seconds:
-            log(
-                f"heartbeat: cameras_ready={ready}/{len(cam_states)} faces_detected={faces_detected} filtered={faces_filtered}"
-            )
+            log(f"heartbeat: cameras_ready={ready}/{len(cam_states)} faces_detected={faces_detected}")
             last_heartbeat = now
 
         time.sleep(0.02)
