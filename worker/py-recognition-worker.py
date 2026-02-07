@@ -8,7 +8,8 @@ import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from collections import deque
+from typing import Deque, Dict, List, Optional, Tuple
 
 import cv2
 import numpy as np
@@ -387,6 +388,11 @@ def main() -> int:
     max_track_embeddings = 5
     next_track_id = 1
     tracks: Dict[int, Dict[str, object]] = {}
+    queue: Deque[Tuple[str, np.ndarray, float]] = deque()
+    queue_max = 150
+    track_enqueue_interval = 0.7
+    min_track_frames = 3
+    process_per_loop = 3
 
     while not should_stop:
         ready = 0
@@ -430,12 +436,11 @@ def main() -> int:
                         "bbox": box,
                         "last_seen": now,
                         "embeddings": [],
-                        "best_name": "unknown",
-                        "best_score": -1.0,
+                        "last_enqueued": 0.0,
                     }
                     assigned[idx] = track_id
 
-            # update tracks with new embeddings
+            # update tracks with new embeddings and enqueue averaged snapshots
             for idx, face_embedding in enumerate(embeddings):
                 box = boxes[idx]
                 track = tracks[assigned[idx]]
@@ -446,10 +451,12 @@ def main() -> int:
                 if face_crop is None:
                     continue
                 h, w = face_crop.shape[:2]
-                size_ok = min(h, w) >= min_face_size
-                blur_ok = blur_score(face_crop) >= min_blur
-                if not size_ok or not blur_ok:
+                if min(h, w) < min_face_size:
                     faces_filtered += 1
+                    continue
+                if blur_score(face_crop) < min_blur:
+                    faces_filtered += 1
+                    continue
 
                 embeddings_list: List[np.ndarray] = track["embeddings"]  # type: ignore[assignment]
                 embeddings_list.append(face_embedding)
@@ -457,40 +464,46 @@ def main() -> int:
                     embeddings_list.pop(0)
                 track["embeddings"] = embeddings_list
 
-                # compute average embedding for more stable matching
-                if len(embeddings_list) == 1:
-                    avg_embedding = embeddings_list[0]
-                else:
+                last_enqueued = float(track.get("last_enqueued", 0.0))
+                if len(embeddings_list) >= min_track_frames and (now - last_enqueued) >= track_enqueue_interval:
                     mean = np.mean(np.stack(embeddings_list), axis=0)
                     norm = np.linalg.norm(mean)
-                    avg_embedding = mean / norm if norm > 0 else embeddings_list[-1]
-
-                name, score, second_score = best_match(avg_embedding, known)
-                is_known = score >= settings.similarity_threshold and (score - second_score) >= min_margin
-                label = name if is_known else "unknown"
-                if label == "unknown" and not settings.send_unknown:
-                    continue
-
-                # allow very strong single-frame hits to reduce latency
-                enough_frames = len(embeddings_list) >= 2 or score >= (settings.similarity_threshold + 0.05)
-                if not enough_frames:
-                    continue
-
-                key = f"{camera.cam_id}:{label}"
-                if now - last_sent_at.get(key, 0.0) < settings.cooldown_seconds:
-                    continue
-                last_sent_at[key] = now
-
-                try:
-                    post_recognition(session, settings, label, "neutral", camera.cam_id)
-                    log(f"[{camera.cam_id}] sent name={label} score={score:.3f}")
-                except Exception as exc:
-                    log(f"send failed error={exc}")
+                    if norm > 0:
+                        avg_embedding = mean / norm
+                        if len(queue) < queue_max:
+                            queue.append((camera.cam_id, avg_embedding, now))
+                            track["last_enqueued"] = now
+                        track["embeddings"] = []
 
             # cleanup old tracks
             stale = [tid for tid, t in tracks.items() if now - float(t["last_seen"]) > track_ttl]
             for tid in stale:
                 del tracks[tid]
+
+        # process queued snapshots
+        processed = 0
+        while queue and processed < process_per_loop:
+            cam_id, embedding, ts = queue.popleft()
+            name, score, second_score = best_match(embedding, known)
+            is_known = score >= settings.similarity_threshold and (score - second_score) >= min_margin
+            label = name if is_known else "unknown"
+            if label == "unknown" and not settings.send_unknown:
+                processed += 1
+                continue
+
+            key = f"{cam_id}:{label}"
+            now = time.time()
+            if now - last_sent_at.get(key, 0.0) < settings.cooldown_seconds:
+                processed += 1
+                continue
+            last_sent_at[key] = now
+
+            try:
+                post_recognition(session, settings, label, "neutral", cam_id)
+                log(f"[{cam_id}] sent name={label} score={score:.3f}")
+            except Exception as exc:
+                log(f"send failed error={exc}")
+            processed += 1
 
         now = time.time()
         if now - last_heartbeat >= settings.heartbeat_seconds:
