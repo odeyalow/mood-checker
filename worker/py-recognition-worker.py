@@ -389,10 +389,10 @@ def main() -> int:
     next_track_id = 1
     tracks: Dict[int, Dict[str, object]] = {}
     queue: Deque[Tuple[str, np.ndarray, float]] = deque()
-    queue_max = 150
-    track_enqueue_interval = 0.7
-    min_track_frames = 3
-    process_per_loop = 3
+    queue_max = 200
+    track_enqueue_interval = 0.3
+    min_track_frames = 2
+    process_per_loop = 5
 
     while not should_stop:
         ready = 0
