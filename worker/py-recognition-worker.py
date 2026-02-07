@@ -347,12 +347,12 @@ def main() -> int:
     min_blur = 5.0
     track_iou_threshold = 0.2
     track_embedding_threshold = 0.35
-    track_ttl = 1.5
+    track_ttl = 1.0
     max_track_embeddings = 5
     next_track_id = 1
     tracks: Dict[int, Dict[str, object]] = {}
     track_enqueue_interval = 0.3
-    min_track_frames = 2
+    min_track_frames = 3
     min_confirm_hits = 2
 
     while not should_stop:
@@ -428,6 +428,16 @@ def main() -> int:
                 blur_ok = blur_score(face_crop) >= min_blur
                 if not size_ok or not blur_ok:
                     faces_filtered += 1
+                    # Do not update confirmation on low-quality frames
+                    continue
+
+                emb_sim = -1.0
+                last_emb = track.get("last_embedding")
+                if last_emb is not None:
+                    emb_sim = float(np.dot(face.normed_embedding, last_emb))
+                if emb_sim >= 0 and emb_sim < 0.2:
+                    track["confirm_hits"] = 0
+                    track["last_name"] = "unknown"
 
                 embeddings_list: List[np.ndarray] = track["embeddings"]  # type: ignore[assignment]
                 embeddings_list.append(face.normed_embedding)
