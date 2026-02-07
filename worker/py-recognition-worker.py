@@ -473,6 +473,7 @@ def main() -> int:
                         if len(queue) < queue_max:
                             queue.append((camera.cam_id, avg_embedding, now))
                             track["last_enqueued"] = now
+                            log(f"[{camera.cam_id}] queued snapshot for matching")
                         track["embeddings"] = []
 
             # cleanup old tracks
@@ -488,6 +489,7 @@ def main() -> int:
             is_known = score >= settings.similarity_threshold and (score - second_score) >= min_margin
             label = name if is_known else "unknown"
             if label == "unknown" and not settings.send_unknown:
+                log(f"[{cam_id}] match=unknown score={score:.3f} (skipped)")
                 processed += 1
                 continue
 
@@ -499,6 +501,7 @@ def main() -> int:
             last_sent_at[key] = now
 
             try:
+                log(f"[{cam_id}] match name={label} score={score:.3f} sending")
                 post_recognition(session, settings, label, "neutral", cam_id)
                 log(f"[{cam_id}] sent name={label} score={score:.3f}")
             except Exception as exc:
