@@ -42,9 +42,8 @@ The worker opens `/${locale}/cameras` in headless Chromium, keeps recognition ru
 The Python worker reads RTSP streams directly and sends recognition events to `/api/recognitions`, so it does not depend on an open browser tab.
 
 Requirements in your Python venv:
-- `facenet-pytorch`
-- `torch`
-- `torchvision`
+- `insightface`
+- `onnxruntime`
 - `opencv-python-headless`
 - `requests`
 
@@ -67,7 +66,7 @@ cd /opt/mood-checker
 npm install
 npm run build
 . .venv/bin/activate
-pip install facenet-pytorch torch torchvision opencv-python-headless requests
+pip install insightface onnxruntime opencv-python-headless requests
 cp -n .env.worker.example .env.worker
 PYTHON_BIN=/opt/mood-checker/.venv/bin/python npm run pm2:start:all
 npm run pm2:save
