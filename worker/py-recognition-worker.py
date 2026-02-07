@@ -250,10 +250,10 @@ def main() -> int:
 
     last_heartbeat = 0.0
     last_detection_log = 0.0
-    min_det_score = 0.6
-    min_face_size = 40
-    min_aspect = 0.6
-    max_aspect = 1.6
+    min_det_score = 0.5
+    min_face_size = 30
+    min_aspect = 0.5
+    max_aspect = 1.8
 
     while not should_stop:
         ready = 0
