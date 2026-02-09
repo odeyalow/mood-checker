@@ -343,6 +343,8 @@ export default function CameraTile({
             motion?: number;
             streak?: number;
             requiredFrames?: number;
+            matchedNames?: string[];
+            matchDistance?: number;
           } | null;
         };
 
@@ -362,6 +364,7 @@ export default function CameraTile({
           setFaceCount(candidate);
           setConfirmedFaceCount(confirmed);
           setFaceFound(confirmed > 0);
+          setMatchedNames(Array.isArray(ws.matchedNames) ? ws.matchedNames : []);
           setDetectStatus(
             `worker candidate=${candidate} confirmed=${confirmed} score=${score.toFixed(2)} motion=${motion.toFixed(1)} streak=${streak}/${required}` +
               (ageSec !== null ? ` age=${ageSec.toFixed(1)}s` : ""),
@@ -370,9 +373,11 @@ export default function CameraTile({
           setFaceCount(0);
           setConfirmedFaceCount(0);
           setFaceFound(false);
+          setMatchedNames([]);
           setDetectStatus("worker waiting status");
         }
       } catch {
+        setMatchedNames([]);
         setDetectStatus("worker status unavailable");
       }
 
@@ -717,7 +722,9 @@ export default function CameraTile({
                 ? matchedNames.length
                   ? `In frame: ${matchedNames.join(", ")}`
                   : "In frame: unknown"
-                : "In frame: worker mode"}
+                : matchedNames.length
+                  ? `In frame: ${matchedNames.join(", ")}`
+                  : "In frame: unknown"}
             </Text>
           </div>
         </div>

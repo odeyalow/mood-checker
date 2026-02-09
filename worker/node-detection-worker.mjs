@@ -56,6 +56,17 @@ function envBool(name, fallback) {
   return ["1", "true", "yes", "on"].includes(v);
 }
 
+function labelFromFilename(fileName) {
+  return fileName.replace(/\.[^/.]+$/, "").trim();
+}
+
+function normalizeKnownList(value) {
+  if (!Array.isArray(value)) return [];
+  return value
+    .map((item) => String(item ?? "").trim())
+    .filter(Boolean);
+}
+
 function parseCameraSources() {
   const explicit = (process.env.WORKER_CAMERA_SOURCES ?? "").trim();
   const list = [];
@@ -241,11 +252,15 @@ function createState(cameraId, src) {
     score: 0,
     motion: 0,
     streak: 0,
+    matchedNames: [],
+    matchDistance: 0,
     lastConfirmedAt: 0,
+    lastMatchAt: 0,
     lastBestBox: null,
     prevLuma: null,
     lastCandidateLogAt: 0,
     lastConfirmLogAt: 0,
+    lastMatchLogAt: 0,
     lastErrLogAt: 0,
   };
 }
@@ -287,6 +302,12 @@ async function main() {
   const filterMaxAreaRatio = envFloat("WORKER_FILTER_MAX_AREA_RATIO", 0.72);
   const filterMinAspect = envFloat("WORKER_FILTER_MIN_ASPECT", 0.52);
   const filterMaxAspect = envFloat("WORKER_FILTER_MAX_ASPECT", 1.9);
+  const enableMatching = envBool("WORKER_ENABLE_MATCHING", true);
+  const matchThreshold = envFloat("WORKER_MATCH_THRESHOLD", 0.52);
+  const matchIntervalMs = Math.max(150, envInt("WORKER_MATCH_INTERVAL_MS", 250));
+  const matchLogCooldownMs = Math.max(300, envInt("WORKER_MATCH_LOG_COOLDOWN_MS", 1000));
+  const knownDir = process.env.WORKER_KNOWN_DIR || path.join(rootDir, "public", "known");
+  const knownListFile = process.env.WORKER_KNOWN_LIST_FILE || path.join(knownDir, "images.json");
 
   const modelDir = path.join(rootDir, "public", "models");
   if (!fs.existsSync(modelDir)) {
@@ -296,6 +317,7 @@ async function main() {
 
   faceapi.tf.enableProdMode();
   await faceapi.nets.tinyFaceDetector.loadFromDisk(modelDir);
+  let matcher = null;
   let ssdLoaded = false;
   if (useSsdFallback) {
     try {
@@ -310,6 +332,62 @@ async function main() {
     scoreThreshold: tinyScoreThreshold,
   });
   const ssdOptions = new faceapi.SsdMobilenetv1Options({ minConfidence: ssdMinConfidence });
+
+  if (enableMatching) {
+    await faceapi.nets.faceLandmark68TinyNet.loadFromDisk(modelDir);
+    await faceapi.nets.faceRecognitionNet.loadFromDisk(modelDir);
+
+    let knownFiles = [];
+    try {
+      const raw = await fsp.readFile(knownListFile, "utf-8");
+      knownFiles = normalizeKnownList(JSON.parse(raw));
+    } catch (err) {
+      log(`known list load failed: ${String(err)}`);
+    }
+
+    const labeledDescriptors = [];
+    for (const fileName of knownFiles) {
+      const absPath = path.join(knownDir, fileName);
+      try {
+        const image = await loadImage(absPath);
+        const w = Number(image.width ?? 0);
+        const h = Number(image.height ?? 0);
+        if (!w || !h) continue;
+        const canvas = createCanvas(w, h);
+        const ctx = canvas.getContext("2d");
+        ctx.drawImage(image, 0, 0, w, h);
+
+        let det = await faceapi
+          .detectSingleFace(canvas, tinyOptions)
+          .withFaceLandmarks(true)
+          .withFaceDescriptor();
+        if (!det && ssdLoaded) {
+          det = await faceapi
+            .detectSingleFace(canvas, ssdOptions)
+            .withFaceLandmarks(true)
+            .withFaceDescriptor();
+        }
+
+        if (det?.descriptor) {
+          labeledDescriptors.push(
+            new faceapi.LabeledFaceDescriptors(labelFromFilename(fileName), [det.descriptor]),
+          );
+        }
+      } catch (err) {
+        log(`known image skipped: ${fileName} (${String(err)})`);
+      }
+    }
+
+    if (labeledDescriptors.length) {
+      matcher = new faceapi.FaceMatcher(labeledDescriptors, matchThreshold);
+      log(`matching=on known=${labeledDescriptors.length} threshold=${matchThreshold}`);
+    } else {
+      log("matching=off reason=no_known_descriptors");
+    }
+  } else {
+    log("matching=off reason=env_disabled");
+  }
+
   log(
     `detector=face-api tiny(input=${tinyInputSize},score=${tinyScoreThreshold}) ` +
       `ssd_fallback=${ssdLoaded ? "on" : "off"}`,
@@ -407,6 +485,10 @@ async function main() {
           maxScore >= minConfirmScore &&
           (fastPassMode ? true : motionGate);
         cam.confirmed = isConfirmed ? cam.candidate : 0;
+        if (!isConfirmed) {
+          cam.matchedNames = [];
+          cam.matchDistance = 0;
+        }
         if (isConfirmed) {
           cam.lastConfirmedAt = now;
           confirmedTotal += cam.confirmed;
@@ -425,11 +507,69 @@ async function main() {
           );
           cam.lastCandidateLogAt = now;
         }
+
+        if (matcher && cam.confirmed > 0 && now - cam.lastMatchAt >= matchIntervalMs) {
+          cam.lastMatchAt = now;
+          try {
+            let descriptorDetections = await faceapi
+              .detectAllFaces(canvas, tinyOptions)
+              .withFaceLandmarks(true)
+              .withFaceDescriptors();
+
+            if ((!descriptorDetections || !descriptorDetections.length) && ssdLoaded) {
+              descriptorDetections = await faceapi
+                .detectAllFaces(canvas, ssdOptions)
+                .withFaceLandmarks(true)
+                .withFaceDescriptors();
+            }
+
+            descriptorDetections = filterAndDedupeDetections(descriptorDetections || [], w, h, {
+              minSidePxBase: filterMinSidePx,
+              minSideRatio: filterMinSideRatio,
+              minAreaRatio: filterMinAreaRatio,
+              maxAreaRatio: filterMaxAreaRatio,
+              minScore: filterMinScore,
+              minAspect: filterMinAspect,
+              maxAspect: filterMaxAspect,
+            });
+
+            const labelToDistance = new Map();
+            for (const det of descriptorDetections) {
+              const best = matcher.findBestMatch(det.descriptor);
+              if (!best || best.label === "unknown") continue;
+              const prev = labelToDistance.get(best.label);
+              if (prev === undefined || best.distance < prev) {
+                labelToDistance.set(best.label, best.distance);
+              }
+            }
+
+            const sorted = [...labelToDistance.entries()].sort((a, b) => a[1] - b[1]);
+            cam.matchedNames = sorted.map(([name]) => name);
+            cam.matchDistance = sorted.length ? Number(sorted[0][1]) : 0;
+
+            if (cam.matchedNames.length && now - cam.lastMatchLogAt >= matchLogCooldownMs) {
+              log(
+                `[${cam.cameraId}] matched names=${cam.matchedNames.join(",")} ` +
+                  `distance=${cam.matchDistance.toFixed(3)}`,
+              );
+              cam.lastMatchLogAt = now;
+            }
+          } catch (err) {
+            cam.matchedNames = [];
+            cam.matchDistance = 0;
+            if (now - cam.lastErrLogAt >= 2000) {
+              log(`[${cam.cameraId}] match error: ${String(err)}`);
+              cam.lastErrLogAt = now;
+            }
+          }
+        }
       } catch (err) {
         cam.candidate = 0;
         cam.confirmed = 0;
         cam.score = 0;
         cam.streak = 0;
+        cam.matchedNames = [];
+        cam.matchDistance = 0;
         if (now - cam.lastErrLogAt >= 2000) {
           log(`[${cam.cameraId}] frame error: ${String(err)}`);
           cam.lastErrLogAt = now;
@@ -453,7 +593,7 @@ async function main() {
         log(
           `[${cam.cameraId}] status candidate=${cam.candidate} confirmed=${cam.confirmed} ` +
             `score=${cam.score.toFixed(3)} motion=${cam.motion.toFixed(2)} ` +
-            `streak=${cam.streak}/${confirmFrames}`,
+            `streak=${cam.streak}/${confirmFrames} names=${cam.matchedNames.join("|") || "-"}`,
         );
         payload.cameras[cam.cameraId] = {
           candidate: cam.candidate,
@@ -462,6 +602,8 @@ async function main() {
           motion: Number(cam.motion.toFixed(2)),
           streak: cam.streak,
           requiredFrames: confirmFrames,
+          matchedNames: cam.matchedNames,
+          matchDistance: Number(cam.matchDistance.toFixed(3)),
         };
       }
       try {

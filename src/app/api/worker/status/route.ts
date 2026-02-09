@@ -8,6 +8,8 @@ type WorkerStatusCamera = {
   motion: number;
   streak: number;
   requiredFrames: number;
+  matchedNames?: string[];
+  matchDistance?: number;
 };
 
 type WorkerStatusPayload = {
@@ -46,4 +48,3 @@ export async function GET(request: Request) {
     );
   }
 }
-
