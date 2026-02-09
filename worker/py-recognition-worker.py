@@ -243,10 +243,10 @@ def run() -> int:
     max_width = max(320, getenv_int("WORKER_MAX_WIDTH", 960))
     grab_flush = max(0, getenv_int("WORKER_GRAB_FLUSH", 1))
     confirm_frames = max(1, getenv_int("WORKER_CONFIRM_FRAMES", 2))
-    min_confirm_score = max(0.1, min(0.95, getenv_float("WORKER_MIN_CONFIRM_SCORE", 0.4)))
-    motion_threshold = max(0.5, getenv_float("WORKER_MOTION_THRESHOLD", 2.1))
-    track_iou_threshold = max(0.01, min(0.9, getenv_float("WORKER_TRACK_IOU_THRESHOLD", 0.12)))
-    status_log_seconds = max(0.3, getenv_float("WORKER_STATUS_LOG_SECONDS", 1.0))
+    min_confirm_score = max(0.1, min(0.95, getenv_float("WORKER_MIN_CONFIRM_SCORE", 0.34)))
+    motion_threshold = max(0.5, getenv_float("WORKER_MOTION_THRESHOLD", 1.3))
+    track_iou_threshold = max(0.01, min(0.9, getenv_float("WORKER_TRACK_IOU_THRESHOLD", 0.08)))
+    status_log_seconds = max(0.3, getenv_float("WORKER_STATUS_LOG_SECONDS", 1.5))
 
     detector = Detector()
     cams = [CameraState(idx=i + 1, url=url) for i, url in enumerate(urls)]
@@ -323,8 +323,13 @@ def run() -> int:
                     else:
                         cam.stable_positive_frames = 0
 
-                    recent_confirm = (now - cam.last_confirmed_at) < 1.8
-                    motion_gate = motion_score >= motion_threshold or recent_confirm or best_score >= 0.72
+                    recent_confirm = (now - cam.last_confirmed_at) < 2.5
+                    motion_gate = (
+                        motion_score >= motion_threshold
+                        or recent_confirm
+                        or best_score >= 0.62
+                        or max(best_box[2], best_box[3]) >= 150
+                    )
                     confirmed = (
                         cam.stable_positive_frames >= confirm_frames
                         and best_score >= min_confirm_score
