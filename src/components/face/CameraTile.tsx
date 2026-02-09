@@ -9,6 +9,17 @@ const { Text } = Typography;
 const DEFAULT_DETECTION_MODE: "browser" | "worker" =
   process.env.NEXT_PUBLIC_DETECTION_MODE === "worker" ? "worker" : "browser";
 const BROWSER_USE_SSD_FALLBACK = process.env.NEXT_PUBLIC_BROWSER_USE_SSD_FALLBACK === "true";
+const BROWSER_MATCH_THRESHOLD = (() => {
+  const v = Number(process.env.NEXT_PUBLIC_BROWSER_MATCH_THRESHOLD ?? "0.52");
+  return Number.isFinite(v) ? v : 0.52;
+})();
+
+type KnownMatcher = {
+  faceMatcher: any;
+  knownCount: number;
+};
+
+let knownMatcherPromise: Promise<KnownMatcher> | null = null;
 
 async function waitForPlayer(timeoutMs = 15000) {
   const started = Date.now();
@@ -51,6 +62,80 @@ async function drawSnapshotToCanvas(src: string, canvas: HTMLCanvasElement) {
     ctx.filter = "none";
   } finally {
     bitmap.close();
+  }
+}
+
+async function drawImageUrlToCanvas(url: string) {
+  const response = await fetch(url, { cache: "no-store" });
+  if (!response.ok) throw new Error(`known_image_http_${response.status}`);
+  const blob = await response.blob();
+  const bitmap = await createImageBitmap(blob);
+  const canvas = document.createElement("canvas");
+  canvas.width = bitmap.width;
+  canvas.height = bitmap.height;
+  const ctx = canvas.getContext("2d");
+  if (!ctx) {
+    bitmap.close();
+    throw new Error("known_no_canvas_context");
+  }
+  ctx.drawImage(bitmap, 0, 0, canvas.width, canvas.height);
+  bitmap.close();
+  return canvas;
+}
+
+function labelFromFilename(fileName: string) {
+  return fileName.replace(/\.[^/.]+$/, "").trim();
+}
+
+async function loadKnownMatcher(faceapi: any, tinyOptions: any, ssdOptions: any): Promise<KnownMatcher> {
+  if (knownMatcherPromise) return knownMatcherPromise;
+
+  knownMatcherPromise = (async () => {
+    const indexRes = await fetch("/known/images.json", { cache: "no-store" });
+    if (!indexRes.ok) throw new Error(`known_index_http_${indexRes.status}`);
+    const imageFiles = (await indexRes.json()) as string[];
+    const labeledDescriptors: any[] = [];
+
+    for (const fileName of imageFiles) {
+      try {
+        const canvas = await drawImageUrlToCanvas(`/known/${encodeURIComponent(fileName)}`);
+        let det = await faceapi
+          .detectSingleFace(canvas, tinyOptions)
+          .withFaceLandmarks(true)
+          .withFaceDescriptor();
+
+        if (!det && BROWSER_USE_SSD_FALLBACK) {
+          det = await faceapi
+            .detectSingleFace(canvas, ssdOptions)
+            .withFaceLandmarks(true)
+            .withFaceDescriptor();
+        }
+
+        if (det?.descriptor) {
+          labeledDescriptors.push(
+            new faceapi.LabeledFaceDescriptors(labelFromFilename(fileName), [det.descriptor]),
+          );
+        }
+      } catch (error) {
+        console.warn("[camera] known image skipped:", fileName, error);
+      }
+    }
+
+    if (!labeledDescriptors.length) {
+      throw new Error("known_descriptors_empty");
+    }
+
+    return {
+      faceMatcher: new faceapi.FaceMatcher(labeledDescriptors, BROWSER_MATCH_THRESHOLD),
+      knownCount: labeledDescriptors.length,
+    };
+  })();
+
+  try {
+    return await knownMatcherPromise;
+  } catch (error) {
+    knownMatcherPromise = null;
+    throw error;
   }
 }
 
@@ -175,6 +260,7 @@ export default function CameraTile({
   const [faceFound, setFaceFound] = useState(false);
   const [faceCount, setFaceCount] = useState(0);
   const [confirmedFaceCount, setConfirmedFaceCount] = useState(0);
+  const [matchedNames, setMatchedNames] = useState<string[]>([]);
   const [detectStatus, setDetectStatus] = useState("detection idle");
   const lastPixelRef = useRef<string | null>(null);
   const lastServerLogRef = useRef(0);
@@ -183,6 +269,9 @@ export default function CameraTile({
   const lastConfirmedAtRef = useRef(0);
   const motionLumaRef = useRef<Uint8Array | null>(null);
   const frameSeqRef = useRef(0);
+  const matcherRef = useRef<KnownMatcher | null>(null);
+  const matchInFlightRef = useRef(false);
+  const lastMatchAtRef = useRef(0);
 
   useEffect(() => {
     const overlay = overlayRef.current;
@@ -196,6 +285,7 @@ export default function CameraTile({
     setFaceFound(false);
     setFaceCount(0);
     setConfirmedFaceCount(0);
+    setMatchedNames([]);
     setDetectStatus(detectionMode === "worker" ? "worker waiting status" : "detection idle");
   }, [detectionMode]);
 
@@ -322,6 +412,8 @@ export default function CameraTile({
         await Promise.all([
           faceapi.nets.ssdMobilenetv1.loadFromUri("/models"),
           faceapi.nets.tinyFaceDetector.loadFromUri("/models"),
+          faceapi.nets.faceLandmark68TinyNet.loadFromUri("/models"),
+          faceapi.nets.faceRecognitionNet.loadFromUri("/models"),
         ]);
         setDetectStatus("detection active");
       } catch (error) {
@@ -338,6 +430,14 @@ export default function CameraTile({
         inputSize: 512,
         scoreThreshold: 0.18,
       });
+
+      try {
+        matcherRef.current = await loadKnownMatcher(faceapi, tinyOptions, ssdOptions);
+      } catch (error) {
+        matcherRef.current = null;
+        console.warn("[camera] matcher unavailable:", error);
+      }
+
       const motionCanvas = document.createElement("canvas");
       motionCanvas.width = 96;
       motionCanvas.height = 54;
@@ -460,6 +560,70 @@ export default function CameraTile({
           if (confirmedCount > 0) {
             lastConfirmedAtRef.current = Date.now();
           }
+
+          const nowMs = Date.now();
+          if (
+            count > 0 &&
+            matcherRef.current &&
+            !matchInFlightRef.current &&
+            nowMs - lastMatchAtRef.current >= 250
+          ) {
+            matchInFlightRef.current = true;
+            const matchingCanvas = document.createElement("canvas");
+            matchingCanvas.width = captureCanvas.width;
+            matchingCanvas.height = captureCanvas.height;
+            const matchingCtx = matchingCanvas.getContext("2d");
+            if (!matchingCtx) {
+              matchInFlightRef.current = false;
+              lastMatchAtRef.current = Date.now();
+            } else {
+              matchingCtx.drawImage(captureCanvas, 0, 0, matchingCanvas.width, matchingCanvas.height);
+
+              void (async () => {
+                try {
+                  let descriptorDetections = await faceapi
+                    .detectAllFaces(matchingCanvas, tinyOptions)
+                    .withFaceLandmarks(true)
+                    .withFaceDescriptors();
+
+                  if (
+                    BROWSER_USE_SSD_FALLBACK &&
+                    (!descriptorDetections || !descriptorDetections.length) &&
+                    frameSeqRef.current % 6 === 0
+                  ) {
+                    descriptorDetections = await faceapi
+                      .detectAllFaces(matchingCanvas, ssdOptions)
+                      .withFaceLandmarks(true)
+                      .withFaceDescriptors();
+                  }
+
+                  const hitDistances = new Map<string, number>();
+                  for (const det of descriptorDetections || []) {
+                    const best = matcherRef.current?.faceMatcher.findBestMatch(det.descriptor);
+                    if (!best || best.label === "unknown") continue;
+                    const prev = hitDistances.get(best.label);
+                    if (prev === undefined || best.distance < prev) {
+                      hitDistances.set(best.label, best.distance);
+                    }
+                  }
+
+                  const names = [...hitDistances.entries()]
+                    .sort((a, b) => a[1] - b[1])
+                    .map(([name]) => name);
+                  if (mounted) setMatchedNames(names);
+                } catch (error) {
+                  if (mounted) setMatchedNames([]);
+                  console.warn("[camera] matching error:", error);
+                } finally {
+                  lastMatchAtRef.current = Date.now();
+                  matchInFlightRef.current = false;
+                }
+              })();
+            }
+          } else if (count === 0) {
+            setMatchedNames((prev) => (prev.length ? [] : prev));
+          }
+
           setFaceCount(count);
           setConfirmedFaceCount(confirmedCount);
           setFaceFound(confirmedCount > 0);
@@ -517,8 +681,9 @@ export default function CameraTile({
     return () => {
       mounted = false;
       if (timer) window.clearTimeout(timer);
+      matchInFlightRef.current = false;
     };
-  }, [status, detectionMode]);
+  }, [status, detectionMode, camera.id, camera.name, camera.go2rtcSrc]);
 
   return (
     <Card className="camera-card" size="small">
@@ -544,6 +709,15 @@ export default function CameraTile({
                 ? `Faces: ${faceCount} (confirmed: ${confirmedFaceCount})`
                 : `Faces: ${faceCount} (confirmed: 0)`}{" "}
               - {detectStatus}
+            </Text>
+          </div>
+          <div>
+            <Text type="secondary">
+              {detectionMode === "browser"
+                ? matchedNames.length
+                  ? `In frame: ${matchedNames.join(", ")}`
+                  : "In frame: unknown"
+                : "In frame: worker mode"}
             </Text>
           </div>
         </div>
