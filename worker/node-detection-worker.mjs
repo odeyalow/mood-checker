@@ -356,16 +356,24 @@ async function main() {
         const canvas = createCanvas(w, h);
         const ctx = canvas.getContext("2d");
         ctx.drawImage(image, 0, 0, w, h);
+        const rgba = ctx.getImageData(0, 0, w, h).data;
+        const rgb = rgbaToRgbTensorData(rgba);
+        const knownTensor = faceapi.tf.tensor3d(rgb, [h, w, 3], "int32");
 
-        let det = await faceapi
-          .detectSingleFace(canvas, tinyOptions)
-          .withFaceLandmarks(true)
-          .withFaceDescriptor();
-        if (!det && ssdLoaded) {
+        let det = null;
+        try {
           det = await faceapi
-            .detectSingleFace(canvas, ssdOptions)
+            .detectSingleFace(knownTensor, tinyOptions)
             .withFaceLandmarks(true)
             .withFaceDescriptor();
+          if (!det && ssdLoaded) {
+            det = await faceapi
+              .detectSingleFace(knownTensor, ssdOptions)
+              .withFaceLandmarks(true)
+              .withFaceDescriptor();
+          }
+        } finally {
+          knownTensor.dispose();
         }
 
         if (det?.descriptor) {
@@ -511,16 +519,22 @@ async function main() {
         if (matcher && cam.confirmed > 0 && now - cam.lastMatchAt >= matchIntervalMs) {
           cam.lastMatchAt = now;
           try {
-            let descriptorDetections = await faceapi
-              .detectAllFaces(canvas, tinyOptions)
-              .withFaceLandmarks(true)
-              .withFaceDescriptors();
-
-            if ((!descriptorDetections || !descriptorDetections.length) && ssdLoaded) {
+            const matchTensor = faceapi.tf.tensor3d(rgb, [h, w, 3], "int32");
+            let descriptorDetections = [];
+            try {
               descriptorDetections = await faceapi
-                .detectAllFaces(canvas, ssdOptions)
+                .detectAllFaces(matchTensor, tinyOptions)
                 .withFaceLandmarks(true)
                 .withFaceDescriptors();
+
+              if ((!descriptorDetections || !descriptorDetections.length) && ssdLoaded) {
+                descriptorDetections = await faceapi
+                  .detectAllFaces(matchTensor, ssdOptions)
+                  .withFaceLandmarks(true)
+                  .withFaceDescriptors();
+              }
+            } finally {
+              matchTensor.dispose();
             }
 
             descriptorDetections = filterAndDedupeDetections(descriptorDetections || [], w, h, {
