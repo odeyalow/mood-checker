@@ -1,8 +1,6 @@
 const http = require("http");
 const express = require("express");
 const next = require("next");
-const rtspRelay = require("rtsp-relay");
-
 const dev = process.argv.includes("--dev");
 process.env.NODE_ENV = dev ? "development" : "production";
 
@@ -30,7 +28,6 @@ function isIgnorableWsError(error) {
 
 const handleFatalError = (error) => {
   if (isIgnorableWsError(error)) {
-    console.warn("[ws] Ignored invalid close code frame.");
     return;
   }
   console.error("Uncaught exception:", error);
@@ -51,35 +48,6 @@ app
   .then(() => {
     const expressApp = express();
     const server = http.createServer(expressApp);
-    const { proxy } = rtspRelay(expressApp, server);
-
-    expressApp.ws("/api/stream", (ws, req) => {
-      ws.on("error", (error) => {
-        if (isIgnorableWsError(error)) return;
-        console.error("[ws] Stream socket error:", error);
-      });
-
-      const rawUrl = req.query?.url;
-      const url = Array.isArray(rawUrl) ? rawUrl[0] : rawUrl;
-
-      if (typeof url !== "string" || !url.startsWith("rtsp://")) {
-        ws.close(1008, "invalid_rtsp_url");
-        return;
-      }
-
-      try {
-        const handler = proxy({
-          url,
-          transport: "tcp",
-          verbose: false,
-        });
-        handler(ws);
-      } catch (error) {
-        console.error("[ws] Failed to attach stream handler:", error);
-        ws.close(1011, "stream_handler_error");
-      }
-    });
-
     expressApp.use((req, res) => handle(req, res));
 
     server.listen(port, () => {
