@@ -83,6 +83,7 @@ class Detector:
         self.mode = "haar"
         self._face_app = None
         self._haar = None
+        self.enable_haar_fallback = os.getenv("WORKER_HAAR_FALLBACK", "true").strip().lower() == "true"
         self.min_score = getenv_float("WORKER_DET_MIN_SCORE", 0.35)
         self.min_side_ratio = getenv_float("WORKER_DET_MIN_SIDE_RATIO", 0.02)
         self.max_side_ratio = getenv_float("WORKER_DET_MAX_SIDE_RATIO", 0.82)
@@ -93,7 +94,7 @@ class Detector:
         if preferred == "insightface":
             self._try_insightface()
 
-        if self._face_app is None:
+        if self._face_app is None or self.enable_haar_fallback:
             self._init_haar()
 
     def _try_insightface(self) -> None:
@@ -124,13 +125,13 @@ class Detector:
         self.mode = "haar"
         log("detector=haar")
 
-    def detect(self, frame_bgr) -> List[Tuple[int, int, int, int, float]]:
+    def detect(self, frame_bgr) -> List[Tuple[int, int, int, int, float, str]]:
         fh, fw = frame_bgr.shape[:2]
         min_side_px = max(20, int(min(fw, fh) * self.min_side_ratio))
         max_side_px = max(min_side_px, int(min(fw, fh) * self.max_side_ratio))
+        insight_boxes: List[Tuple[int, int, int, int, float, str]] = []
         if self._face_app is not None:
             faces = self._face_app.get(frame_bgr)
-            boxes: List[Tuple[int, int, int, int, float]] = []
             for f in faces:
                 bbox = getattr(f, "bbox", None)
                 det_score = float(getattr(f, "det_score", 1.0))
@@ -143,19 +144,33 @@ class Detector:
                 plausible_shape = self.min_aspect <= aspect <= self.max_aspect
                 plausible_size = min_side_px <= max(w, h) <= max_side_px
                 if w > 0 and h > 0 and det_score >= self.min_score and plausible_shape and plausible_size:
-                    boxes.append((x1, y1, w, h, det_score))
-            return boxes
+                    insight_boxes.append((x1, y1, w, h, det_score, "insight"))
+            if insight_boxes:
+                return insight_boxes
 
         if self._haar is None:
-            return []
+            return insight_boxes
         gray = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2GRAY)
         detections = self._haar.detectMultiScale(
             gray,
-            scaleFactor=1.1,
-            minNeighbors=6,
-            minSize=(28, 28),
+            scaleFactor=1.08,
+            minNeighbors=4,
+            minSize=(22, 22),
         )
-        return [(int(x), int(y), int(w), int(h), 1.0) for (x, y, w, h) in detections]
+        haar_boxes: List[Tuple[int, int, int, int, float, str]] = []
+        for (x, y, w, h) in detections:
+            x1 = int(x)
+            y1 = int(y)
+            ww = int(w)
+            hh = int(h)
+            if ww <= 0 or hh <= 0:
+                continue
+            aspect = ww / float(max(hh, 1))
+            plausible_shape = self.min_aspect <= aspect <= self.max_aspect
+            plausible_size = min_side_px <= max(ww, hh) <= max_side_px
+            if plausible_shape and plausible_size:
+                haar_boxes.append((x1, y1, ww, hh, 0.55, "haar"))
+        return haar_boxes
 
 
 def iou(a: Tuple[int, int, int, int], b: Tuple[int, int, int, int]) -> float:
@@ -311,6 +326,7 @@ def run() -> int:
                     best = max(boxes, key=lambda b: float(b[2] * b[3]) * float(b[4]))
                     best_box = (int(best[0]), int(best[1]), int(best[2]), int(best[3]))
                     best_score = float(best[4])
+                    best_source = str(best[5])
                     cam.last_best_score = best_score
                     is_track_stable = (
                         cam.last_best_box is not None
@@ -346,7 +362,7 @@ def run() -> int:
                         if now - cam.last_event_log >= detection_log_cooldown:
                             log(
                                 f"[{cam.camera_id}] face_detected count={count} "
-                                f"score={best_score:.3f} motion={motion_score:.2f}"
+                                f"score={best_score:.3f} source={best_source} motion={motion_score:.2f}"
                             )
                             cam.last_event_log = now
                     else:
@@ -354,7 +370,7 @@ def run() -> int:
                         if now - cam.last_candidate_log >= candidate_log_cooldown:
                             log(
                                 f"[{cam.camera_id}] candidate_detected count={count} "
-                                f"score={best_score:.3f} motion={motion_score:.2f} "
+                                f"score={best_score:.3f} source={best_source} motion={motion_score:.2f} "
                                 f"streak={cam.stable_positive_frames}/{confirm_frames}"
                             )
                             cam.last_candidate_log = now
