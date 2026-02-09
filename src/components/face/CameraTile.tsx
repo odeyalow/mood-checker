@@ -8,6 +8,7 @@ import type { CameraConfig } from "@/lib/cameras";
 const { Text } = Typography;
 const DEFAULT_DETECTION_MODE: "browser" | "worker" =
   process.env.NEXT_PUBLIC_DETECTION_MODE === "worker" ? "worker" : "browser";
+const BROWSER_USE_SSD_FALLBACK = process.env.NEXT_PUBLIC_BROWSER_USE_SSD_FALLBACK === "true";
 
 async function waitForPlayer(timeoutMs = 15000) {
   const started = Date.now();
@@ -106,10 +107,10 @@ function computeMotionScore(prev: Uint8Array | null, next: Uint8Array) {
 }
 
 function filterAndDedupeDetections(detections: any[], frameWidth: number, frameHeight: number) {
-  const minSidePx = Math.max(26, Math.floor(Math.min(frameWidth, frameHeight) * 0.04));
-  const minArea = frameWidth * frameHeight * 0.0024;
-  const maxArea = frameWidth * frameHeight * 0.65;
-  const minScore = 0.28;
+  const minSidePx = Math.max(12, Math.floor(Math.min(frameWidth, frameHeight) * 0.015));
+  const minArea = frameWidth * frameHeight * 0.0005;
+  const maxArea = frameWidth * frameHeight * 0.72;
+  const minScore = 0.12;
 
   const filtered = detections.filter((det) => {
     const box = getDetBox(det);
@@ -117,7 +118,7 @@ function filterAndDedupeDetections(detections: any[], frameWidth: number, frameH
     const score = getDetScore(det);
     const area = box.width * box.height;
     const ratio = box.width / Math.max(1, box.height);
-    const plausibleShape = ratio >= 0.72 && ratio <= 1.42;
+    const plausibleShape = ratio >= 0.52 && ratio <= 1.9;
     const plausibleSize =
       box.width >= minSidePx &&
       box.height >= minSidePx &&
@@ -330,12 +331,12 @@ export default function CameraTile({
       }
 
       const ssdOptions = new faceapi.SsdMobilenetv1Options({
-        minConfidence: 0.52,
+        minConfidence: 0.35,
         maxResults: 12,
       });
       const tinyOptions = new faceapi.TinyFaceDetectorOptions({
-        inputSize: 608,
-        scoreThreshold: 0.24,
+        inputSize: 512,
+        scoreThreshold: 0.18,
       });
       const motionCanvas = document.createElement("canvas");
       motionCanvas.width = 96;
@@ -388,15 +389,15 @@ export default function CameraTile({
 
           frameSeqRef.current += 1;
           let detections = await faceapi.detectAllFaces(captureCanvas, tinyOptions);
-          // SSD is slower; run it periodically only when tiny sees nothing.
-          if (!detections.length && frameSeqRef.current % 3 === 0) {
+          // SSD is slower; keep it optional and sparse for fast-pass detection.
+          if (BROWSER_USE_SSD_FALLBACK && !detections.length && frameSeqRef.current % 6 === 0) {
             detections = await faceapi.detectAllFaces(captureCanvas, ssdOptions);
           }
           const cleanedDetections = Array.isArray(detections)
             ? filterAndDedupeDetections(detections, captureCanvas.width, captureCanvas.height)
             : [];
           const count = cleanedDetections.length;
-          const { maxSide, maxScore } = getLargestFaceStats(cleanedDetections);
+          const { maxScore } = getLargestFaceStats(cleanedDetections);
           const frameInfo = `${captureCanvas.width}x${captureCanvas.height}`;
 
           const overlayWidth = streamCanvas.width || captureCanvas.width;
@@ -439,23 +440,21 @@ export default function CameraTile({
               : false;
           lastBestBoxRef.current = bestCurrentBox;
 
-          if (count > 0 && maxScore >= 0.3 && (trackStable || stablePositiveFramesRef.current === 0)) {
+          if (count > 0 && maxScore >= 0.12 && (trackStable || stablePositiveFramesRef.current === 0)) {
             stablePositiveFramesRef.current += 1;
-          } else if (count > 0 && maxScore >= 0.3) {
+          } else if (count > 0 && maxScore >= 0.12) {
             stablePositiveFramesRef.current = 1;
           } else {
             stablePositiveFramesRef.current = 0;
           }
 
-          const requiredFrames = maxSide >= 140 ? 1 : maxSide >= 95 ? 2 : 3;
-          const minConfirmScore = maxSide >= 140 ? 0.34 : maxSide >= 95 ? 0.38 : 0.46;
-          const recentConfirmed = Date.now() - lastConfirmedAtRef.current < 1800;
-          const hasMotion = motionScore >= 1.5;
-          const motionGate = hasMotion || recentConfirmed || maxScore >= 0.65 || maxSide >= 150;
+          const requiredFrames = 1;
+          const minConfirmScore = 0.18;
           const confirmedCount =
             stablePositiveFramesRef.current >= requiredFrames &&
             maxScore >= minConfirmScore &&
-            motionGate
+            // Fast-pass mode: do not require motion gate for short passers-by.
+            true
               ? count
               : 0;
           if (confirmedCount > 0) {
@@ -505,7 +504,7 @@ export default function CameraTile({
 
         timer = window.setTimeout(() => {
           void loop();
-        }, 120);
+        }, 80);
       };
 
       void loop();

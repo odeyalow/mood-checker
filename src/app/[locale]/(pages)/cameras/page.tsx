@@ -36,7 +36,7 @@ export default function CamerasPage({
     <MainLayout title="Cameras" locale={locale}>
       <FaceScripts includeFaceApi={mode === "browser"} />
       <Card className="soft-card">
-        <Space direction="vertical" size={12} style={{ width: "100%" }}>
+        <Space orientation="vertical" size={12} style={{ width: "100%" }}>
           <Segmented
             value={mode}
             options={[
@@ -48,7 +48,7 @@ export default function CamerasPage({
           <Text type="secondary">
             {mode === "browser"
               ? "Detection runs in browser (face-api)."
-              : "Detection runs in Python worker; UI shows worker status."}
+              : "Detection runs in Node worker; UI shows worker status."}
           </Text>
           <CameraGrid detectionMode={mode} />
         </Space>
@@ -56,4 +56,3 @@ export default function CamerasPage({
     </MainLayout>
   );
 }
-
