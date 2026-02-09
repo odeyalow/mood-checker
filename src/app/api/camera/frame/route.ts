@@ -18,7 +18,11 @@ export async function GET(req: NextRequest) {
   try {
     const upstream = await fetch(url, { cache: "no-store" });
     if (!upstream.ok) {
-      return new Response(`go2rtc upstream ${upstream.status}`, { status: 502 });
+      const reason = await upstream.text().catch(() => "");
+      return new Response(
+        `go2rtc upstream status=${upstream.status} src=${src} body=${reason.slice(0, 300)}`,
+        { status: 502 },
+      );
     }
 
     const body = await upstream.arrayBuffer();
@@ -35,4 +39,3 @@ export async function GET(req: NextRequest) {
     return new Response("camera frame proxy error", { status: 500 });
   }
 }
-
