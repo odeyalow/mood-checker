@@ -28,12 +28,9 @@ async function waitForFaceApi(timeoutMs = 15000) {
 }
 
 async function drawSnapshotToCanvas(src: string, canvas: HTMLCanvasElement) {
-  const controller = new AbortController();
-  const timeout = window.setTimeout(() => controller.abort(), 1600);
   const response = await fetch(`/api/camera/frame?src=${encodeURIComponent(src)}&t=${Date.now()}`, {
     cache: "no-store",
-    signal: controller.signal,
-  }).finally(() => window.clearTimeout(timeout));
+  });
   if (!response.ok) {
     throw new Error(`snapshot_http_${response.status}`);
   }
@@ -45,8 +42,8 @@ async function drawSnapshotToCanvas(src: string, canvas: HTMLCanvasElement) {
     canvas.height = bitmap.height;
     const ctx = canvas.getContext("2d", { willReadFrequently: true });
     if (!ctx) throw new Error("no_capture_context");
-    // Mild enhancement to avoid over-amplifying noise/false positives.
-    ctx.filter = "brightness(1.06) contrast(1.08) saturate(1.03)";
+    // Improve visibility of distant/dark faces.
+    ctx.filter = "brightness(1.12) contrast(1.14) saturate(1.06)";
     ctx.drawImage(bitmap, 0, 0, canvas.width, canvas.height);
     ctx.filter = "none";
   } finally {
@@ -88,10 +85,10 @@ function iou(a: { x: number; y: number; width: number; height: number }, b: { x:
 }
 
 function filterAndDedupeDetections(detections: any[], frameWidth: number, frameHeight: number) {
-  const minSidePx = Math.max(26, Math.floor(Math.min(frameWidth, frameHeight) * 0.04));
-  const minArea = frameWidth * frameHeight * 0.003;
+  const minSidePx = Math.max(24, Math.floor(Math.min(frameWidth, frameHeight) * 0.038));
+  const minArea = frameWidth * frameHeight * 0.0018;
   const maxArea = frameWidth * frameHeight * 0.65;
-  const minScore = 0.22;
+  const minScore = 0.16;
 
   const filtered = detections.filter((det) => {
     const box = getDetBox(det);
@@ -99,15 +96,13 @@ function filterAndDedupeDetections(detections: any[], frameWidth: number, frameH
     const score = getDetScore(det);
     const area = box.width * box.height;
     const ratio = box.width / Math.max(1, box.height);
-    const plausibleShape = ratio >= 0.72 && ratio <= 1.45;
+    const plausibleShape = ratio >= 0.65 && ratio <= 1.55;
     const plausibleSize =
       box.width >= minSidePx &&
       box.height >= minSidePx &&
       area >= minArea &&
       area <= maxArea;
-    const maxSide = Math.max(box.width, box.height);
-    const strongEnoughForSmallFace = maxSide >= 64 || score >= 0.45;
-    return score >= minScore && plausibleShape && plausibleSize && strongEnoughForSmallFace;
+    return score >= minScore && plausibleShape && plausibleSize;
   });
 
   filtered.sort((a, b) => getDetScore(b) - getDetScore(a));
@@ -202,7 +197,10 @@ export default function CameraTile({ camera }: { camera: CameraConfig }) {
       }
 
       try {
-        await faceapi.nets.tinyFaceDetector.loadFromUri("/models");
+        await Promise.all([
+          faceapi.nets.ssdMobilenetv1.loadFromUri("/models"),
+          faceapi.nets.tinyFaceDetector.loadFromUri("/models"),
+        ]);
         setDetectStatus("detection active");
       } catch (error) {
         console.error("[camera] failed to load face models:", error);
@@ -210,16 +208,14 @@ export default function CameraTile({ camera }: { camera: CameraConfig }) {
         return;
       }
 
-      // Fast pass each cycle + periodic quality pass keeps latency low.
-      const tinyFastOptions = new faceapi.TinyFaceDetectorOptions({
-        inputSize: 416,
-        scoreThreshold: 0.32,
+      const ssdOptions = new faceapi.SsdMobilenetv1Options({
+        minConfidence: 0.28,
+        maxResults: 25,
       });
-      const tinyQualityOptions = new faceapi.TinyFaceDetectorOptions({
-        inputSize: 640,
-        scoreThreshold: 0.2,
+      const tinyOptions = new faceapi.TinyFaceDetectorOptions({
+        inputSize: 736,
+        scoreThreshold: 0.1,
       });
-      let loopCounter = 0;
 
       const loop = async () => {
         if (!mounted) return;
@@ -239,7 +235,7 @@ export default function CameraTile({ camera }: { camera: CameraConfig }) {
               setDetectStatus("no frame context");
               throw new Error("no_capture_context");
             }
-            captureCtx.filter = "brightness(1.06) contrast(1.08) saturate(1.03)";
+            captureCtx.filter = "brightness(1.12) contrast(1.14) saturate(1.06)";
             captureCtx.drawImage(streamCanvas, 0, 0, captureCanvas.width, captureCanvas.height);
             captureCtx.filter = "none";
           }
@@ -265,10 +261,47 @@ export default function CameraTile({ camera }: { camera: CameraConfig }) {
             setDetectStatus("frame read failed");
           }
 
-          loopCounter += 1;
-          let detections = await faceapi.detectAllFaces(captureCanvas, tinyFastOptions);
-          if (!detections.length && loopCounter % 4 === 0) {
-            detections = await faceapi.detectAllFaces(captureCanvas, tinyQualityOptions);
+          // Try multiple detection paths because some RTSP renderers draw into canvas
+          // in a way that one path may fail intermittently.
+          let detections = await faceapi.detectAllFaces(captureCanvas, tinyOptions);
+          if (!detections.length) {
+            detections = await faceapi.detectAllFaces(captureCanvas, ssdOptions);
+          }
+
+          // Extra fallback for far faces: multiple crops + upscale.
+          if (!detections.length) {
+            const sw = captureCanvas.width;
+            const sh = captureCanvas.height;
+            const zoomCanvas = document.createElement("canvas");
+            zoomCanvas.width = sw;
+            zoomCanvas.height = sh;
+            const zoomCtx = zoomCanvas.getContext("2d");
+            if (zoomCtx) {
+              const crops = [
+                // Center crop
+                { sx: Math.floor(sw * 0.2), sy: Math.floor(sh * 0.2), cw: Math.floor(sw * 0.6), ch: Math.floor(sh * 0.6) },
+                // Left-focused crop
+                { sx: 0, sy: Math.floor(sh * 0.15), cw: Math.floor(sw * 0.65), ch: Math.floor(sh * 0.7) },
+                // Right-focused crop
+                { sx: Math.floor(sw * 0.35), sy: Math.floor(sh * 0.15), cw: Math.floor(sw * 0.65), ch: Math.floor(sh * 0.7) },
+              ];
+              for (const crop of crops) {
+                zoomCtx.clearRect(0, 0, sw, sh);
+                zoomCtx.drawImage(
+                  captureCanvas,
+                  crop.sx,
+                  crop.sy,
+                  crop.cw,
+                  crop.ch,
+                  0,
+                  0,
+                  sw,
+                  sh,
+                );
+                detections = await faceapi.detectAllFaces(zoomCanvas, tinyOptions);
+                if (detections.length) break;
+              }
+            }
           }
           const cleanedDetections = Array.isArray(detections)
             ? filterAndDedupeDetections(detections, captureCanvas.width, captureCanvas.height)
@@ -295,7 +328,7 @@ export default function CameraTile({ camera }: { camera: CameraConfig }) {
           } else {
             stablePositiveFramesRef.current = 0;
           }
-          const requiredFrames = maxSide >= 110 && maxScore >= 0.55 ? 1 : 2;
+          const requiredFrames = maxSide >= 110 && maxScore >= 0.45 ? 1 : 2;
           const confirmedCount = stablePositiveFramesRef.current >= requiredFrames ? count : 0;
           setFaceCount(confirmedCount);
           setFaceFound(confirmedCount > 0);
@@ -340,7 +373,7 @@ export default function CameraTile({ camera }: { camera: CameraConfig }) {
 
         timer = window.setTimeout(() => {
           void loop();
-        }, 120);
+        }, 180);
       };
 
       void loop();
