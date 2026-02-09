@@ -9,6 +9,7 @@ const { Text } = Typography;
 const DEFAULT_DETECTION_MODE: "browser" | "worker" =
   process.env.NEXT_PUBLIC_DETECTION_MODE === "worker" ? "worker" : "browser";
 const BROWSER_USE_SSD_FALLBACK = process.env.NEXT_PUBLIC_BROWSER_USE_SSD_FALLBACK === "true";
+const BROWSER_ENABLE_MATCHING = process.env.NEXT_PUBLIC_BROWSER_ENABLE_MATCHING !== "false";
 const BROWSER_MATCH_THRESHOLD = (() => {
   const v = Number(process.env.NEXT_PUBLIC_BROWSER_MATCH_THRESHOLD ?? "0.52");
   return Number.isFinite(v) ? v : 0.52;
@@ -19,7 +20,7 @@ type KnownMatcher = {
   knownCount: number;
 };
 
-let knownMatcherPromise: Promise<KnownMatcher> | null = null;
+let knownMatcherPromise: Promise<KnownMatcher | null> | null = null;
 
 async function waitForPlayer(timeoutMs = 15000) {
   const started = Date.now();
@@ -87,13 +88,15 @@ function labelFromFilename(fileName: string) {
   return fileName.replace(/\.[^/.]+$/, "").trim();
 }
 
-async function loadKnownMatcher(faceapi: any, tinyOptions: any, ssdOptions: any): Promise<KnownMatcher> {
+async function loadKnownMatcher(faceapi: any, tinyOptions: any, ssdOptions: any): Promise<KnownMatcher | null> {
   if (knownMatcherPromise) return knownMatcherPromise;
 
   knownMatcherPromise = (async () => {
     const indexRes = await fetch("/known/images.json", { cache: "no-store" });
-    if (!indexRes.ok) throw new Error(`known_index_http_${indexRes.status}`);
-    const imageFiles = (await indexRes.json()) as string[];
+    if (!indexRes.ok) return null;
+    const imageFilesRaw = await indexRes.json();
+    const imageFiles = Array.isArray(imageFilesRaw) ? imageFilesRaw : [];
+    if (!imageFiles.length) return null;
     const labeledDescriptors: any[] = [];
 
     for (const fileName of imageFiles) {
@@ -121,9 +124,7 @@ async function loadKnownMatcher(faceapi: any, tinyOptions: any, ssdOptions: any)
       }
     }
 
-    if (!labeledDescriptors.length) {
-      throw new Error("known_descriptors_empty");
-    }
+    if (!labeledDescriptors.length) return null;
 
     return {
       faceMatcher: new faceapi.FaceMatcher(labeledDescriptors, BROWSER_MATCH_THRESHOLD),
@@ -131,12 +132,7 @@ async function loadKnownMatcher(faceapi: any, tinyOptions: any, ssdOptions: any)
     };
   })();
 
-  try {
-    return await knownMatcherPromise;
-  } catch (error) {
-    knownMatcherPromise = null;
-    throw error;
-  }
+  return knownMatcherPromise;
 }
 
 function getDetBox(det: any) {
@@ -414,12 +410,15 @@ export default function CameraTile({
       }
 
       try {
-        await Promise.all([
+        const modelLoads = [
           faceapi.nets.ssdMobilenetv1.loadFromUri("/models"),
           faceapi.nets.tinyFaceDetector.loadFromUri("/models"),
-          faceapi.nets.faceLandmark68TinyNet.loadFromUri("/models"),
-          faceapi.nets.faceRecognitionNet.loadFromUri("/models"),
-        ]);
+        ];
+        if (BROWSER_ENABLE_MATCHING) {
+          modelLoads.push(faceapi.nets.faceLandmark68TinyNet.loadFromUri("/models"));
+          modelLoads.push(faceapi.nets.faceRecognitionNet.loadFromUri("/models"));
+        }
+        await Promise.all(modelLoads);
         setDetectStatus("detection active");
       } catch (error) {
         console.error("[camera] failed to load face models:", error);
@@ -436,11 +435,18 @@ export default function CameraTile({
         scoreThreshold: 0.18,
       });
 
-      try {
-        matcherRef.current = await loadKnownMatcher(faceapi, tinyOptions, ssdOptions);
-      } catch (error) {
+      if (BROWSER_ENABLE_MATCHING) {
+        try {
+          matcherRef.current = await loadKnownMatcher(faceapi, tinyOptions, ssdOptions);
+          if (!matcherRef.current) {
+            console.warn("[camera] matcher unavailable: no known descriptors");
+          }
+        } catch (error) {
+          matcherRef.current = null;
+          console.warn("[camera] matcher unavailable:", error);
+        }
+      } else {
         matcherRef.current = null;
-        console.warn("[camera] matcher unavailable:", error);
       }
 
       const motionCanvas = document.createElement("canvas");
@@ -568,6 +574,7 @@ export default function CameraTile({
 
           const nowMs = Date.now();
           if (
+            BROWSER_ENABLE_MATCHING &&
             count > 0 &&
             matcherRef.current &&
             !matchInFlightRef.current &&
@@ -719,9 +726,11 @@ export default function CameraTile({
           <div>
             <Text type="secondary">
               {detectionMode === "browser"
-                ? matchedNames.length
-                  ? `In frame: ${matchedNames.join(", ")}`
-                  : "In frame: unknown"
+                ? !BROWSER_ENABLE_MATCHING
+                  ? "In frame: matching disabled"
+                  : matchedNames.length
+                    ? `In frame: ${matchedNames.join(", ")}`
+                    : "In frame: unknown"
                 : matchedNames.length
                   ? `In frame: ${matchedNames.join(", ")}`
                   : "In frame: unknown"}
