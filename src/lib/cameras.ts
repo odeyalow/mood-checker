@@ -14,6 +14,14 @@ const camera1Go2rtcSrc = process.env.NEXT_PUBLIC_CAMERA_1_GO2RTC_SRC || "cam01_m
 const camera1Name = process.env.NEXT_PUBLIC_CAMERA_1_NAME || "Camera 1";
 const camera1Location = process.env.NEXT_PUBLIC_CAMERA_1_LOCATION || "192.168.0.36";
 
+const camera2Rtsp =
+  process.env.NEXT_PUBLIC_CAMERA_2_RTSP_URL ||
+  "rtsp://danil:danil_2004@192.168.0.241:554/cam/realmonitor?channel=1&subtype=0&unicast=true&proto=Onvif";
+const camera2Go2rtcSrc = process.env.NEXT_PUBLIC_CAMERA_2_GO2RTC_SRC || "cam02_main";
+
+const camera2Name = process.env.NEXT_PUBLIC_CAMERA_2_NAME || "Camera 2";
+const camera2Location = process.env.NEXT_PUBLIC_CAMERA_2_LOCATION || "192.168.0.241";
+
 export const CAMERA_CONFIGS: CameraConfig[] = [
   {
     id: "cam-01",
@@ -21,5 +29,12 @@ export const CAMERA_CONFIGS: CameraConfig[] = [
     location: camera1Location,
     rtspUrl: camera1Rtsp,
     go2rtcSrc: camera1Go2rtcSrc,
+  },
+  {
+    id: "cam-02",
+    name: camera2Name,
+    location: camera2Location,
+    rtspUrl: camera2Rtsp,
+    go2rtcSrc: camera2Go2rtcSrc,
   },
 ];
