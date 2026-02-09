@@ -263,12 +263,25 @@ async function main() {
     process.exit(1);
   }
 
-  const sampleCanvas = createCanvas(1, 1);
+  // face-api may call either env.createCanvasElement() or new Canvas().
+  // @napi-rs/canvas requires width/height, so we provide a safe wrapper.
+  function CanvasCompat(width = 1, height = 1) {
+    const w = Number.isFinite(Number(width)) && Number(width) > 0 ? Number(width) : 1;
+    const h = Number.isFinite(Number(height)) && Number(height) > 0 ? Number(height) : 1;
+    return createCanvas(w, h);
+  }
+
   faceapi.env.monkeyPatch({
-    Canvas: sampleCanvas.constructor,
+    Canvas: CanvasCompat,
     Image,
     ImageData,
+    createCanvasElement: () => createCanvas(1, 1),
+    createImageElement: () => new Image(),
   });
+  // Extra hard override for older face-api internals.
+  const env = faceapi.env.getEnv();
+  env.createCanvasElement = () => createCanvas(1, 1);
+  env.createImageElement = () => new Image();
   tf.enableProdMode();
   await faceapi.nets.tinyFaceDetector.loadFromDisk(modelDir);
   let ssdLoaded = false;
