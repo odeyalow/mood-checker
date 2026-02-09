@@ -9,6 +9,7 @@ import { setTimeout as sleep } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import "@tensorflow/tfjs-node";
 import * as faceapi from "face-api.js";
+import { createCanvas, loadImage } from "@napi-rs/canvas";
 
 const rootDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -185,6 +186,17 @@ function largestFaceStats(detections) {
   return { maxSide, maxScore };
 }
 
+function rgbaToRgbTensorData(rgba) {
+  const rgb = new Uint8Array(Math.floor((rgba.length / 4) * 3));
+  let j = 0;
+  for (let i = 0; i < rgba.length; i += 4) {
+    rgb[j++] = rgba[i];
+    rgb[j++] = rgba[i + 1];
+    rgb[j++] = rgba[i + 2];
+  }
+  return rgb;
+}
+
 async function fetchFrame(frameUrl, timeoutMs) {
   const controller = new AbortController();
   const t = setTimeout(() => controller.abort(), timeoutMs);
@@ -305,14 +317,19 @@ async function main() {
 
       try {
         const jpg = await fetchFrame(frameUrl, frameTimeoutMs);
-        const frameTensor = faceapi.tf.node.decodeImage(jpg, 3);
-        const shape = frameTensor.shape;
-        const h = Number(shape?.[0] ?? 0);
-        const w = Number(shape?.[1] ?? 0);
+        const image = await loadImage(jpg);
+        const w = Number(image.width ?? 0);
+        const h = Number(image.height ?? 0);
         if (!w || !h) {
-          frameTensor.dispose();
           throw new Error("invalid_image");
         }
+
+        const canvas = createCanvas(w, h);
+        const ctx = canvas.getContext("2d");
+        ctx.drawImage(image, 0, 0, w, h);
+        const rgba = ctx.getImageData(0, 0, w, h).data;
+        const rgb = rgbaToRgbTensorData(rgba);
+        const frameTensor = faceapi.tf.tensor3d(rgb, [h, w, 3], "float32");
 
         let detections = [];
         try {
