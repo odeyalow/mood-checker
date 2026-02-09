@@ -85,10 +85,10 @@ function iou(a: { x: number; y: number; width: number; height: number }, b: { x:
 }
 
 function filterAndDedupeDetections(detections: any[], frameWidth: number, frameHeight: number) {
-  const minSidePx = Math.max(28, Math.floor(Math.min(frameWidth, frameHeight) * 0.045));
-  const minArea = frameWidth * frameHeight * 0.0025;
+  const minSidePx = Math.max(24, Math.floor(Math.min(frameWidth, frameHeight) * 0.038));
+  const minArea = frameWidth * frameHeight * 0.0018;
   const maxArea = frameWidth * frameHeight * 0.65;
-  const minScore = 0.2;
+  const minScore = 0.16;
 
   const filtered = detections.filter((det) => {
     const box = getDetBox(det);
@@ -117,6 +117,20 @@ function filterAndDedupeDetections(detections: any[], frameWidth: number, frameH
     if (!overlaps) deduped.push(det);
   }
   return deduped;
+}
+
+function getLargestFaceStats(detections: any[]) {
+  let maxSide = 0;
+  let maxScore = 0;
+  for (const det of detections) {
+    const box = getDetBox(det);
+    if (!box) continue;
+    const side = Math.max(box.width, box.height);
+    if (side > maxSide) maxSide = side;
+    const score = getDetScore(det);
+    if (score > maxScore) maxScore = score;
+  }
+  return { maxSide, maxScore };
 }
 
 export default function CameraTile({ camera }: { camera: CameraConfig }) {
@@ -254,27 +268,46 @@ export default function CameraTile({ camera }: { camera: CameraConfig }) {
             detections = await faceapi.detectAllFaces(captureCanvas, ssdOptions);
           }
 
-          // Extra fallback for far faces: center crop + upscale.
+          // Extra fallback for far faces: multiple crops + upscale.
           if (!detections.length) {
             const sw = captureCanvas.width;
             const sh = captureCanvas.height;
-            const cw = Math.floor(sw * 0.6);
-            const ch = Math.floor(sh * 0.6);
-            const sx = Math.floor((sw - cw) / 2);
-            const sy = Math.floor((sh - ch) / 2);
             const zoomCanvas = document.createElement("canvas");
             zoomCanvas.width = sw;
             zoomCanvas.height = sh;
             const zoomCtx = zoomCanvas.getContext("2d");
             if (zoomCtx) {
-              zoomCtx.drawImage(captureCanvas, sx, sy, cw, ch, 0, 0, sw, sh);
-              detections = await faceapi.detectAllFaces(zoomCanvas, tinyOptions);
+              const crops = [
+                // Center crop
+                { sx: Math.floor(sw * 0.2), sy: Math.floor(sh * 0.2), cw: Math.floor(sw * 0.6), ch: Math.floor(sh * 0.6) },
+                // Left-focused crop
+                { sx: 0, sy: Math.floor(sh * 0.15), cw: Math.floor(sw * 0.65), ch: Math.floor(sh * 0.7) },
+                // Right-focused crop
+                { sx: Math.floor(sw * 0.35), sy: Math.floor(sh * 0.15), cw: Math.floor(sw * 0.65), ch: Math.floor(sh * 0.7) },
+              ];
+              for (const crop of crops) {
+                zoomCtx.clearRect(0, 0, sw, sh);
+                zoomCtx.drawImage(
+                  captureCanvas,
+                  crop.sx,
+                  crop.sy,
+                  crop.cw,
+                  crop.ch,
+                  0,
+                  0,
+                  sw,
+                  sh,
+                );
+                detections = await faceapi.detectAllFaces(zoomCanvas, tinyOptions);
+                if (detections.length) break;
+              }
             }
           }
           const cleanedDetections = Array.isArray(detections)
             ? filterAndDedupeDetections(detections, captureCanvas.width, captureCanvas.height)
             : [];
           const count = cleanedDetections.length;
+          const { maxSide, maxScore } = getLargestFaceStats(cleanedDetections);
           const frameInfo = `${captureCanvas.width}x${captureCanvas.height}`;
 
           const overlayWidth = streamCanvas.width || captureCanvas.width;
@@ -295,7 +328,8 @@ export default function CameraTile({ camera }: { camera: CameraConfig }) {
           } else {
             stablePositiveFramesRef.current = 0;
           }
-          const confirmedCount = stablePositiveFramesRef.current >= 2 ? count : 0;
+          const requiredFrames = maxSide >= 110 && maxScore >= 0.45 ? 1 : 2;
+          const confirmedCount = stablePositiveFramesRef.current >= requiredFrames ? count : 0;
           setFaceCount(confirmedCount);
           setFaceFound(confirmedCount > 0);
           if (count === 0) {
@@ -304,7 +338,7 @@ export default function CameraTile({ camera }: { camera: CameraConfig }) {
             setDetectStatus(
               confirmedCount > 0
                 ? `face detected (${frameInfo})`
-                : `candidate detected (${frameInfo})`,
+                : `candidate detected (${frameInfo}, ${stablePositiveFramesRef.current}/${requiredFrames})`,
             );
           }
 
@@ -339,7 +373,7 @@ export default function CameraTile({ camera }: { camera: CameraConfig }) {
 
         timer = window.setTimeout(() => {
           void loop();
-        }, 220);
+        }, 180);
       };
 
       void loop();
