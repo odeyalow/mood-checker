@@ -11,6 +11,7 @@ from __future__ import annotations
 import os
 import sys
 import time
+import json
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -241,6 +242,11 @@ def resize_for_detection(frame, max_width: int):
     nh = max(1, int(h * scale))
     return cv2.resize(frame, (max_width, nh), interpolation=cv2.INTER_AREA)
 
+def write_status_file(path: Path, payload: dict) -> None:
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+    tmp.replace(path)
+
 
 def run() -> int:
     root = Path(__file__).resolve().parent.parent
@@ -264,6 +270,9 @@ def run() -> int:
     motion_threshold = max(0.5, getenv_float("WORKER_MOTION_THRESHOLD", 1.3))
     track_iou_threshold = max(0.01, min(0.9, getenv_float("WORKER_TRACK_IOU_THRESHOLD", 0.08)))
     status_log_seconds = max(0.3, getenv_float("WORKER_STATUS_LOG_SECONDS", 1.5))
+    status_file = Path(os.getenv("WORKER_STATUS_FILE", "/tmp/mood-checker-worker-status.json"))
+    if status_file.parent:
+        status_file.parent.mkdir(parents=True, exist_ok=True)
 
     detector = Detector()
     cams = [CameraState(idx=i + 1, url=url) for i, url in enumerate(urls)]
@@ -385,6 +394,10 @@ def run() -> int:
                 last_heartbeat = now
 
             if now - last_status >= status_log_seconds:
+                status_payload = {
+                    "ts": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                    "cameras": {},
+                }
                 for cam in cams:
                     log(
                         f"[{cam.camera_id}] status candidate={cam.last_candidate_count} "
@@ -392,6 +405,18 @@ def run() -> int:
                         f"score={cam.last_best_score:.3f} motion={cam.last_motion_score:.2f} "
                         f"streak={cam.stable_positive_frames}/{confirm_frames}"
                     )
+                    status_payload["cameras"][cam.camera_id] = {
+                        "candidate": cam.last_candidate_count,
+                        "confirmed": cam.last_confirmed_count,
+                        "score": round(cam.last_best_score, 3),
+                        "motion": round(cam.last_motion_score, 2),
+                        "streak": cam.stable_positive_frames,
+                        "requiredFrames": confirm_frames,
+                    }
+                try:
+                    write_status_file(status_file, status_payload)
+                except Exception as exc:
+                    log(f"status file write failed: {exc}")
                 last_status = now
 
             time.sleep(0.03)

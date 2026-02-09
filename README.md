@@ -24,12 +24,14 @@ NEXT_PUBLIC_CAMERA_2_GO2RTC_SRC=cam02_main
 NEXT_PUBLIC_CAMERA_2_NAME=Office Camera 2
 NEXT_PUBLIC_CAMERA_2_LOCATION=NVR LAN
 NEXT_PUBLIC_ENABLE_WEBCAM_TILE=false
+NEXT_PUBLIC_DETECTION_MODE=worker
 ```
 
 Notes:
 - `NEXT_PUBLIC_CAMERA_1_RTSP_URL` is consumed by the browser camera page through your `/api/stream` proxy.
 - `NEXT_PUBLIC_CAMERA_1_GO2RTC_SRC` is used by face detection snapshot proxy (`/api/camera/frame`) and should match go2rtc stream name.
 - `NEXT_PUBLIC_ENABLE_WEBCAM_TILE=true` enables the local webcam tile for debugging.
+- `NEXT_PUBLIC_DETECTION_MODE=worker` disables browser face-api detection and shows worker live status under camera tiles.
 
 ## Python detection worker (recommended for server)
 
@@ -65,6 +67,12 @@ Verify:
 
 ```bash
 pm2 logs mood-checker-pyworker --lines 80
+```
+
+Worker status API used by UI in worker mode:
+
+```bash
+curl -s "http://127.0.0.1:3000/api/worker/status?cameraId=cam-01"
 ```
 
 Look for:

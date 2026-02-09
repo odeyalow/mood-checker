@@ -6,6 +6,7 @@ import { VideoCameraOutlined } from "@ant-design/icons";
 import type { CameraConfig } from "@/lib/cameras";
 
 const { Text } = Typography;
+const DETECTION_MODE = process.env.NEXT_PUBLIC_DETECTION_MODE === "worker" ? "worker" : "browser";
 
 async function waitForPlayer(timeoutMs = 15000) {
   const started = Date.now();
@@ -208,6 +209,75 @@ export default function CameraTile({ camera }: { camera: CameraConfig }) {
   }, [camera.id, camera.rtspUrl]);
 
   useEffect(() => {
+    if (status !== "ready" || DETECTION_MODE !== "worker") return;
+
+    let mounted = true;
+    let timer = 0;
+
+    const poll = async () => {
+      if (!mounted) return;
+      try {
+        const res = await fetch(`/api/worker/status?cameraId=${encodeURIComponent(camera.id)}`, {
+          cache: "no-store",
+        });
+        const payload = (await res.json()) as {
+          ts?: string;
+          cameraId?: string;
+          status?: {
+            candidate?: number;
+            confirmed?: number;
+            score?: number;
+            motion?: number;
+            streak?: number;
+            requiredFrames?: number;
+          } | null;
+        };
+
+        const ws = payload.status;
+        if (ws) {
+          const candidate = Number(ws.candidate ?? 0);
+          const confirmed = Number(ws.confirmed ?? 0);
+          const score = Number(ws.score ?? 0);
+          const motion = Number(ws.motion ?? 0);
+          const streak = Number(ws.streak ?? 0);
+          const required = Number(ws.requiredFrames ?? 0);
+          const ageSec =
+            payload.ts && Number.isFinite(Date.parse(payload.ts))
+              ? Math.max(0, (Date.now() - Date.parse(payload.ts)) / 1000)
+              : null;
+
+          setFaceCount(candidate);
+          setConfirmedFaceCount(confirmed);
+          setFaceFound(confirmed > 0);
+          setDetectStatus(
+            `worker candidate=${candidate} confirmed=${confirmed} score=${score.toFixed(2)} motion=${motion.toFixed(1)} streak=${streak}/${required}` +
+              (ageSec !== null ? ` age=${ageSec.toFixed(1)}s` : ""),
+          );
+        } else {
+          setFaceCount(0);
+          setConfirmedFaceCount(0);
+          setFaceFound(false);
+          setDetectStatus("worker waiting status");
+        }
+      } catch {
+        setDetectStatus("worker status unavailable");
+      }
+
+      timer = window.setTimeout(() => {
+        void poll();
+      }, 700);
+    };
+
+    void poll();
+    return () => {
+      mounted = false;
+      if (timer) window.clearTimeout(timer);
+    };
+  }, [status, camera.id]);
+
+  useEffect(() => {
+    if (DETECTION_MODE === "worker") return;
+
     let mounted = true;
     let timer = 0;
     let lastLoggedAt = 0;
