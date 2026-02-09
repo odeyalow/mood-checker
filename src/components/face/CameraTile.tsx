@@ -27,6 +27,27 @@ async function waitForFaceApi(timeoutMs = 15000) {
   return null;
 }
 
+async function drawSnapshotToCanvas(src: string, canvas: HTMLCanvasElement) {
+  const response = await fetch(`/api/camera/frame?src=${encodeURIComponent(src)}&t=${Date.now()}`, {
+    cache: "no-store",
+  });
+  if (!response.ok) {
+    throw new Error(`snapshot_http_${response.status}`);
+  }
+
+  const blob = await response.blob();
+  const bitmap = await createImageBitmap(blob);
+  try {
+    canvas.width = bitmap.width;
+    canvas.height = bitmap.height;
+    const ctx = canvas.getContext("2d", { willReadFrequently: true });
+    if (!ctx) throw new Error("no_capture_context");
+    ctx.drawImage(bitmap, 0, 0, canvas.width, canvas.height);
+  } finally {
+    bitmap.close();
+  }
+}
+
 export default function CameraTile({ camera }: { camera: CameraConfig }) {
   const streamRef = useRef<HTMLCanvasElement | null>(null);
   const captureRef = useRef<HTMLCanvasElement | null>(null);
@@ -114,21 +135,28 @@ export default function CameraTile({ camera }: { camera: CameraConfig }) {
         if (!mounted) return;
 
         try {
-          if (streamCanvas.width === 0 || streamCanvas.height === 0) {
-            setDetectStatus("no frames");
-            throw new Error("empty_frame");
+          if (camera.go2rtcSrc) {
+            await drawSnapshotToCanvas(camera.go2rtcSrc, captureCanvas);
+          } else {
+            if (streamCanvas.width === 0 || streamCanvas.height === 0) {
+              setDetectStatus("no frames");
+              throw new Error("empty_frame");
+            }
+            captureCanvas.width = streamCanvas.width;
+            captureCanvas.height = streamCanvas.height;
+            const captureCtx = captureCanvas.getContext("2d", { willReadFrequently: true });
+            if (!captureCtx) {
+              setDetectStatus("no frame context");
+              throw new Error("no_capture_context");
+            }
+            captureCtx.drawImage(streamCanvas, 0, 0, captureCanvas.width, captureCanvas.height);
           }
-
-          captureCanvas.width = streamCanvas.width;
-          captureCanvas.height = streamCanvas.height;
 
           const captureCtx = captureCanvas.getContext("2d", { willReadFrequently: true });
           if (!captureCtx) {
             setDetectStatus("no frame context");
             throw new Error("no_capture_context");
           }
-
-          captureCtx.drawImage(streamCanvas, 0, 0, captureCanvas.width, captureCanvas.height);
 
           try {
             const pixel = captureCtx.getImageData(0, 0, 1, 1).data;
@@ -147,13 +175,7 @@ export default function CameraTile({ camera }: { camera: CameraConfig }) {
 
           // Try multiple detection paths because some RTSP renderers draw into canvas
           // in a way that one path may fail intermittently.
-          let detections = await faceapi.detectAllFaces(streamCanvas, tinyOptions);
-          if (!detections.length) {
-            detections = await faceapi.detectAllFaces(captureCanvas, tinyOptions);
-          }
-          if (!detections.length) {
-            detections = await faceapi.detectAllFaces(streamCanvas, ssdOptions);
-          }
+          let detections = await faceapi.detectAllFaces(captureCanvas, tinyOptions);
           if (!detections.length) {
             detections = await faceapi.detectAllFaces(captureCanvas, ssdOptions);
           }
@@ -176,10 +198,12 @@ export default function CameraTile({ camera }: { camera: CameraConfig }) {
             }
           }
           const count = Array.isArray(detections) ? detections.length : 0;
-          const frameInfo = `${streamCanvas.width}x${streamCanvas.height}`;
+          const frameInfo = `${captureCanvas.width}x${captureCanvas.height}`;
 
-          overlayCanvas.width = streamCanvas.width;
-          overlayCanvas.height = streamCanvas.height;
+          const overlayWidth = streamCanvas.width || captureCanvas.width;
+          const overlayHeight = streamCanvas.height || captureCanvas.height;
+          overlayCanvas.width = overlayWidth;
+          overlayCanvas.height = overlayHeight;
           const overlayCtx = overlayCanvas.getContext("2d");
           overlayCtx?.clearRect(0, 0, overlayCanvas.width, overlayCanvas.height);
 
@@ -220,6 +244,9 @@ export default function CameraTile({ camera }: { camera: CameraConfig }) {
             });
           }
         } catch (error) {
+          if (camera.go2rtcSrc) {
+            setDetectStatus("snapshot unavailable");
+          }
           console.error("[camera] detection error:", error);
         }
 
