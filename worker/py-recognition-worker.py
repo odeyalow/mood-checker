@@ -83,6 +83,11 @@ class Detector:
         self.mode = "haar"
         self._face_app = None
         self._haar = None
+        self.min_score = getenv_float("WORKER_DET_MIN_SCORE", 0.45)
+        self.min_side_ratio = getenv_float("WORKER_DET_MIN_SIDE_RATIO", 0.03)
+        self.max_side_ratio = getenv_float("WORKER_DET_MAX_SIDE_RATIO", 0.82)
+        self.min_aspect = getenv_float("WORKER_DET_MIN_ASPECT", 0.7)
+        self.max_aspect = getenv_float("WORKER_DET_MAX_ASPECT", 1.5)
 
         preferred = os.getenv("WORKER_DETECTOR", "insightface").strip().lower()
         if preferred == "insightface":
@@ -95,7 +100,7 @@ class Detector:
         try:
             from insightface.app import FaceAnalysis  # type: ignore
 
-            det_size = getenv_int("WORKER_DET_SIZE", 960)
+            det_size = getenv_int("WORKER_DET_SIZE", 640)
             model_name = os.getenv("WORKER_MODEL_NAME", "buffalo_l").strip() or "buffalo_l"
             face_app = FaceAnalysis(
                 name=model_name,
@@ -120,17 +125,24 @@ class Detector:
         log("detector=haar")
 
     def detect(self, frame_bgr) -> List[Tuple[int, int, int, int]]:
+        fh, fw = frame_bgr.shape[:2]
+        min_side_px = max(20, int(min(fw, fh) * self.min_side_ratio))
+        max_side_px = max(min_side_px, int(min(fw, fh) * self.max_side_ratio))
         if self._face_app is not None:
             faces = self._face_app.get(frame_bgr)
             boxes: List[Tuple[int, int, int, int]] = []
             for f in faces:
                 bbox = getattr(f, "bbox", None)
+                det_score = float(getattr(f, "det_score", 1.0))
                 if bbox is None or len(bbox) != 4:
                     continue
                 x1, y1, x2, y2 = [int(v) for v in bbox]
                 w = max(0, x2 - x1)
                 h = max(0, y2 - y1)
-                if w > 0 and h > 0:
+                aspect = w / float(max(h, 1))
+                plausible_shape = self.min_aspect <= aspect <= self.max_aspect
+                plausible_size = min_side_px <= max(w, h) <= max_side_px
+                if w > 0 and h > 0 and det_score >= self.min_score and plausible_shape and plausible_size:
                     boxes.append((x1, y1, w, h))
             return boxes
 
@@ -200,7 +212,8 @@ def run() -> int:
     heartbeat_seconds = max(1.0, getenv_float("WORKER_HEARTBEAT_SECONDS", 5.0))
     reconnect_delay_seconds = max(0.5, getenv_float("WORKER_RECONNECT_DELAY_SECONDS", 1.5))
     detection_log_cooldown = max(0.2, getenv_float("WORKER_DETECTION_LOG_COOLDOWN_SECONDS", 0.5))
-    max_width = max(320, getenv_int("WORKER_MAX_WIDTH", 1280))
+    max_width = max(320, getenv_int("WORKER_MAX_WIDTH", 960))
+    grab_flush = max(0, getenv_int("WORKER_GRAB_FLUSH", 1))
 
     detector = Detector()
     cams = [CameraState(idx=i + 1, url=url) for i, url in enumerate(urls)]
@@ -227,6 +240,9 @@ def run() -> int:
                     continue
 
                 ready += 1
+                if cam.cap is not None and grab_flush > 0:
+                    for _ in range(grab_flush):
+                        cam.cap.grab()
                 ok, frame = cam.cap.read()
                 if not ok or frame is None:
                     if now - cam.last_reconnect_log >= 2.0:
