@@ -95,7 +95,7 @@ class Detector:
         try:
             from insightface.app import FaceAnalysis  # type: ignore
 
-            det_size = getenv_int("WORKER_DET_SIZE", 640)
+            det_size = getenv_int("WORKER_DET_SIZE", 960)
             model_name = os.getenv("WORKER_MODEL_NAME", "buffalo_l").strip() or "buffalo_l"
             face_app = FaceAnalysis(name=model_name, providers=["CPUExecutionProvider"])
             face_app.prepare(ctx_id=0, det_size=(det_size, det_size))
@@ -194,8 +194,8 @@ def run() -> int:
 
     frame_stride = max(1, getenv_int("WORKER_FRAME_STRIDE", 1))
     heartbeat_seconds = max(1.0, getenv_float("WORKER_HEARTBEAT_SECONDS", 5.0))
-    reconnect_delay_seconds = max(0.5, getenv_float("WORKER_RECONNECT_DELAY_SECONDS", 2.0))
-    detection_log_cooldown = max(0.2, getenv_float("WORKER_DETECTION_LOG_COOLDOWN_SECONDS", 1.0))
+    reconnect_delay_seconds = max(0.5, getenv_float("WORKER_RECONNECT_DELAY_SECONDS", 1.5))
+    detection_log_cooldown = max(0.2, getenv_float("WORKER_DETECTION_LOG_COOLDOWN_SECONDS", 0.5))
     max_width = max(320, getenv_int("WORKER_MAX_WIDTH", 1280))
 
     detector = Detector()
@@ -259,4 +259,3 @@ def run() -> int:
 
 if __name__ == "__main__":
     sys.exit(run())
-
