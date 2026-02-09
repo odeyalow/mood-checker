@@ -83,11 +83,11 @@ class Detector:
         self.mode = "haar"
         self._face_app = None
         self._haar = None
-        self.min_score = getenv_float("WORKER_DET_MIN_SCORE", 0.45)
-        self.min_side_ratio = getenv_float("WORKER_DET_MIN_SIDE_RATIO", 0.03)
+        self.min_score = getenv_float("WORKER_DET_MIN_SCORE", 0.35)
+        self.min_side_ratio = getenv_float("WORKER_DET_MIN_SIDE_RATIO", 0.02)
         self.max_side_ratio = getenv_float("WORKER_DET_MAX_SIDE_RATIO", 0.82)
-        self.min_aspect = getenv_float("WORKER_DET_MIN_ASPECT", 0.7)
-        self.max_aspect = getenv_float("WORKER_DET_MAX_ASPECT", 1.5)
+        self.min_aspect = getenv_float("WORKER_DET_MIN_ASPECT", 0.62)
+        self.max_aspect = getenv_float("WORKER_DET_MAX_ASPECT", 1.62)
 
         preferred = os.getenv("WORKER_DETECTOR", "insightface").strip().lower()
         if preferred == "insightface":
@@ -100,7 +100,7 @@ class Detector:
         try:
             from insightface.app import FaceAnalysis  # type: ignore
 
-            det_size = getenv_int("WORKER_DET_SIZE", 640)
+            det_size = getenv_int("WORKER_DET_SIZE", 960)
             model_name = os.getenv("WORKER_MODEL_NAME", "buffalo_l").strip() or "buffalo_l"
             face_app = FaceAnalysis(
                 name=model_name,
@@ -195,6 +195,7 @@ class CameraState:
     last_confirmed_count: int = 0
     last_best_score: float = 0.0
     last_motion_score: float = 0.0
+    last_candidate_log: float = 0.0
 
     @property
     def camera_id(self) -> str:
@@ -240,7 +241,8 @@ def run() -> int:
     heartbeat_seconds = max(1.0, getenv_float("WORKER_HEARTBEAT_SECONDS", 5.0))
     reconnect_delay_seconds = max(0.5, getenv_float("WORKER_RECONNECT_DELAY_SECONDS", 1.5))
     detection_log_cooldown = max(0.2, getenv_float("WORKER_DETECTION_LOG_COOLDOWN_SECONDS", 0.5))
-    max_width = max(320, getenv_int("WORKER_MAX_WIDTH", 960))
+    candidate_log_cooldown = max(0.2, getenv_float("WORKER_CANDIDATE_LOG_COOLDOWN_SECONDS", 0.6))
+    max_width = max(320, getenv_int("WORKER_MAX_WIDTH", 1280))
     grab_flush = max(0, getenv_int("WORKER_GRAB_FLUSH", 1))
     confirm_frames = max(1, getenv_int("WORKER_CONFIRM_FRAMES", 2))
     min_confirm_score = max(0.1, min(0.95, getenv_float("WORKER_MIN_CONFIRM_SCORE", 0.34)))
@@ -290,6 +292,8 @@ def run() -> int:
                     continue
 
                 frame_for_det = resize_for_detection(frame, max_width=max_width)
+                # Match frontend behavior: mild contrast/brightness lift improves low-light detection.
+                frame_for_det = cv2.convertScaleAbs(frame_for_det, alpha=1.08, beta=6)
                 boxes = detector.detect(frame_for_det)
                 count = len(boxes)
                 cam.last_candidate_count = count
@@ -347,6 +351,13 @@ def run() -> int:
                             cam.last_event_log = now
                     else:
                         cam.last_confirmed_count = 0
+                        if now - cam.last_candidate_log >= candidate_log_cooldown:
+                            log(
+                                f"[{cam.camera_id}] candidate_detected count={count} "
+                                f"score={best_score:.3f} motion={motion_score:.2f} "
+                                f"streak={cam.stable_positive_frames}/{confirm_frames}"
+                            )
+                            cam.last_candidate_log = now
                 else:
                     cam.stable_positive_frames = 0
                     cam.last_best_box = None
