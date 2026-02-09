@@ -42,7 +42,10 @@ async function drawSnapshotToCanvas(src: string, canvas: HTMLCanvasElement) {
     canvas.height = bitmap.height;
     const ctx = canvas.getContext("2d", { willReadFrequently: true });
     if (!ctx) throw new Error("no_capture_context");
+    // Improve visibility of distant/dark faces.
+    ctx.filter = "brightness(1.12) contrast(1.14) saturate(1.06)";
     ctx.drawImage(bitmap, 0, 0, canvas.width, canvas.height);
+    ctx.filter = "none";
   } finally {
     bitmap.close();
   }
@@ -82,10 +85,10 @@ function iou(a: { x: number; y: number; width: number; height: number }, b: { x:
 }
 
 function filterAndDedupeDetections(detections: any[], frameWidth: number, frameHeight: number) {
-  const minSidePx = Math.max(42, Math.floor(Math.min(frameWidth, frameHeight) * 0.06));
-  const minArea = frameWidth * frameHeight * 0.005;
-  const maxArea = frameWidth * frameHeight * 0.5;
-  const minScore = 0.22;
+  const minSidePx = Math.max(28, Math.floor(Math.min(frameWidth, frameHeight) * 0.045));
+  const minArea = frameWidth * frameHeight * 0.0025;
+  const maxArea = frameWidth * frameHeight * 0.65;
+  const minScore = 0.2;
 
   const filtered = detections.filter((det) => {
     const box = getDetBox(det);
@@ -127,6 +130,7 @@ export default function CameraTile({ camera }: { camera: CameraConfig }) {
   const [detectStatus, setDetectStatus] = useState("detection idle");
   const lastPixelRef = useRef<string | null>(null);
   const lastServerLogRef = useRef(0);
+  const stablePositiveFramesRef = useRef(0);
 
   useEffect(() => {
     let mounted = true;
@@ -195,8 +199,8 @@ export default function CameraTile({ camera }: { camera: CameraConfig }) {
         maxResults: 25,
       });
       const tinyOptions = new faceapi.TinyFaceDetectorOptions({
-        inputSize: 608,
-        scoreThreshold: 0.14,
+        inputSize: 736,
+        scoreThreshold: 0.1,
       });
 
       const loop = async () => {
@@ -217,7 +221,9 @@ export default function CameraTile({ camera }: { camera: CameraConfig }) {
               setDetectStatus("no frame context");
               throw new Error("no_capture_context");
             }
+            captureCtx.filter = "brightness(1.12) contrast(1.14) saturate(1.06)";
             captureCtx.drawImage(streamCanvas, 0, 0, captureCanvas.width, captureCanvas.height);
+            captureCtx.filter = "none";
           }
 
           const captureCtx = captureCanvas.getContext("2d", { willReadFrequently: true });
@@ -284,21 +290,31 @@ export default function CameraTile({ camera }: { camera: CameraConfig }) {
           });
           faceapi.draw.drawDetections(overlayCanvas, resized);
 
-          setFaceCount(count);
-          setFaceFound(count > 0);
+          if (count > 0) {
+            stablePositiveFramesRef.current += 1;
+          } else {
+            stablePositiveFramesRef.current = 0;
+          }
+          const confirmedCount = stablePositiveFramesRef.current >= 2 ? count : 0;
+          setFaceCount(confirmedCount);
+          setFaceFound(confirmedCount > 0);
           if (count === 0) {
             setDetectStatus(`searching (${frameInfo})`);
           } else {
-            setDetectStatus(`face detected (${frameInfo})`);
+            setDetectStatus(
+              confirmedCount > 0
+                ? `face detected (${frameInfo})`
+                : `candidate detected (${frameInfo})`,
+            );
           }
 
           const now = Date.now();
-          if (count > 0 && now - lastLoggedAt > 1500) {
-            console.log(`[camera] face_found count=${count}`);
+          if (confirmedCount > 0 && now - lastLoggedAt > 1500) {
+            console.log(`[camera] face_found count=${confirmedCount}`);
             lastLoggedAt = now;
           }
 
-          if (count > 0 && now - lastServerLogRef.current > 1000) {
+          if (confirmedCount > 0 && now - lastServerLogRef.current > 1000) {
             lastServerLogRef.current = now;
             void fetch("/api/detections/log", {
               method: "POST",
@@ -306,7 +322,7 @@ export default function CameraTile({ camera }: { camera: CameraConfig }) {
               body: JSON.stringify({
                 cameraId: camera.id,
                 cameraName: camera.name,
-                faces: count,
+                faces: confirmedCount,
                 status: "face_detected",
                 ts: new Date().toISOString(),
               }),
