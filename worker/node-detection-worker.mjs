@@ -269,23 +269,24 @@ async function main() {
   const frameTimeoutMs = Math.max(700, envInt("WORKER_FRAME_TIMEOUT_MS", 1800));
   const loopDelayMs = Math.max(20, envInt("WORKER_LOOP_DELAY_MS", 80));
   const heartbeatSeconds = Math.max(1, envFloat("WORKER_HEARTBEAT_SECONDS", 5));
-  const statusLogSeconds = Math.max(0.4, envFloat("WORKER_STATUS_LOG_SECONDS", 1.5));
+  const statusLogSeconds = Math.max(0.4, envFloat("WORKER_STATUS_LOG_SECONDS", 1.0));
   const detectionLogCooldownMs = Math.max(200, envInt("WORKER_DETECTION_LOG_COOLDOWN_MS", 500));
   const candidateLogCooldownMs = Math.max(200, envInt("WORKER_CANDIDATE_LOG_COOLDOWN_MS", 700));
-  const confirmFrames = Math.max(1, envInt("WORKER_CONFIRM_FRAMES", 2));
+  const confirmFrames = Math.max(1, envInt("WORKER_CONFIRM_FRAMES", 1));
   const motionThreshold = envFloat("WORKER_MOTION_THRESHOLD", 1.5);
-  const minConfirmScore = envFloat("WORKER_MIN_CONFIRM_SCORE", 0.32);
-  const tinyInputSize = envInt("WORKER_TINY_INPUT_SIZE", 704);
+  const minConfirmScore = envFloat("WORKER_MIN_CONFIRM_SCORE", 0.18);
+  const tinyInputSize = envInt("WORKER_TINY_INPUT_SIZE", 512);
   const tinyScoreThreshold = envFloat("WORKER_TINY_SCORE_THRESHOLD", 0.18);
   const ssdMinConfidence = envFloat("WORKER_SSD_MIN_CONFIDENCE", 0.35);
-  const useSsdFallback = envBool("WORKER_USE_SSD_FALLBACK", true);
-  const filterMinScore = envFloat("WORKER_FILTER_MIN_SCORE", 0.16);
-  const filterMinSidePx = envInt("WORKER_FILTER_MIN_SIDE_PX", 16);
-  const filterMinSideRatio = envFloat("WORKER_FILTER_MIN_SIDE_RATIO", 0.02);
-  const filterMinAreaRatio = envFloat("WORKER_FILTER_MIN_AREA_RATIO", 0.0009);
+  const useSsdFallback = envBool("WORKER_USE_SSD_FALLBACK", false);
+  const fastPassMode = envBool("WORKER_FAST_PASS_MODE", true);
+  const filterMinScore = envFloat("WORKER_FILTER_MIN_SCORE", 0.12);
+  const filterMinSidePx = envInt("WORKER_FILTER_MIN_SIDE_PX", 12);
+  const filterMinSideRatio = envFloat("WORKER_FILTER_MIN_SIDE_RATIO", 0.015);
+  const filterMinAreaRatio = envFloat("WORKER_FILTER_MIN_AREA_RATIO", 0.0005);
   const filterMaxAreaRatio = envFloat("WORKER_FILTER_MAX_AREA_RATIO", 0.72);
-  const filterMinAspect = envFloat("WORKER_FILTER_MIN_ASPECT", 0.58);
-  const filterMaxAspect = envFloat("WORKER_FILTER_MAX_ASPECT", 1.75);
+  const filterMinAspect = envFloat("WORKER_FILTER_MIN_ASPECT", 0.52);
+  const filterMaxAspect = envFloat("WORKER_FILTER_MAX_ASPECT", 1.9);
 
   const modelDir = path.join(rootDir, "public", "models");
   if (!fs.existsSync(modelDir)) {
@@ -404,7 +405,7 @@ async function main() {
           cam.candidate > 0 &&
           cam.streak >= confirmFrames &&
           maxScore >= minConfirmScore &&
-          motionGate;
+          (fastPassMode ? true : motionGate);
         cam.confirmed = isConfirmed ? cam.candidate : 0;
         if (isConfirmed) {
           cam.lastConfirmedAt = now;
