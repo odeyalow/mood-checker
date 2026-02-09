@@ -37,6 +37,7 @@ export default function CameraTile({ camera }: { camera: CameraConfig }) {
   const [faceCount, setFaceCount] = useState(0);
   const [detectStatus, setDetectStatus] = useState("detection idle");
   const lastPixelRef = useRef<string | null>(null);
+  const lastServerLogRef = useRef(0);
 
   useEffect(() => {
     let mounted = true;
@@ -101,12 +102,12 @@ export default function CameraTile({ camera }: { camera: CameraConfig }) {
       }
 
       const ssdOptions = new faceapi.SsdMobilenetv1Options({
-        minConfidence: 0.45,
+        minConfidence: 0.28,
         maxResults: 10,
       });
       const tinyOptions = new faceapi.TinyFaceDetectorOptions({
-        inputSize: 320,
-        scoreThreshold: 0.28,
+        inputSize: 416,
+        scoreThreshold: 0.16,
       });
 
       const loop = async () => {
@@ -146,15 +147,33 @@ export default function CameraTile({ camera }: { camera: CameraConfig }) {
 
           // Try multiple detection paths because some RTSP renderers draw into canvas
           // in a way that one path may fail intermittently.
-          let detections = await faceapi.detectAllFaces(streamCanvas, ssdOptions);
+          let detections = await faceapi.detectAllFaces(streamCanvas, tinyOptions);
+          if (!detections.length) {
+            detections = await faceapi.detectAllFaces(captureCanvas, tinyOptions);
+          }
+          if (!detections.length) {
+            detections = await faceapi.detectAllFaces(streamCanvas, ssdOptions);
+          }
           if (!detections.length) {
             detections = await faceapi.detectAllFaces(captureCanvas, ssdOptions);
           }
+
+          // Extra fallback for far faces: center crop + upscale.
           if (!detections.length) {
-            detections = await faceapi.detectAllFaces(streamCanvas, tinyOptions);
-          }
-          if (!detections.length) {
-            detections = await faceapi.detectAllFaces(captureCanvas, tinyOptions);
+            const sw = captureCanvas.width;
+            const sh = captureCanvas.height;
+            const cw = Math.floor(sw * 0.6);
+            const ch = Math.floor(sh * 0.6);
+            const sx = Math.floor((sw - cw) / 2);
+            const sy = Math.floor((sh - ch) / 2);
+            const zoomCanvas = document.createElement("canvas");
+            zoomCanvas.width = sw;
+            zoomCanvas.height = sh;
+            const zoomCtx = zoomCanvas.getContext("2d");
+            if (zoomCtx) {
+              zoomCtx.drawImage(captureCanvas, sx, sy, cw, ch, 0, 0, sw, sh);
+              detections = await faceapi.detectAllFaces(zoomCanvas, tinyOptions);
+            }
           }
           const count = Array.isArray(detections) ? detections.length : 0;
 
@@ -177,13 +196,30 @@ export default function CameraTile({ camera }: { camera: CameraConfig }) {
             console.log(`[camera] face_found count=${count}`);
             lastLoggedAt = now;
           }
+
+          if (count > 0 && now - lastServerLogRef.current > 1000) {
+            lastServerLogRef.current = now;
+            void fetch("/api/detections/log", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                cameraId: camera.id,
+                cameraName: camera.name,
+                faces: count,
+                status: "face_detected",
+                ts: new Date().toISOString(),
+              }),
+            }).catch(() => {
+              // Ignore transient network issues for non-critical logging.
+            });
+          }
         } catch (error) {
           console.error("[camera] detection error:", error);
         }
 
         timer = window.setTimeout(() => {
           void loop();
-        }, 250);
+        }, 180);
       };
 
       void loop();
