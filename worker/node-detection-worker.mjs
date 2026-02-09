@@ -133,11 +133,23 @@ function computeMotionScore(prev, next) {
   return sum / next.length;
 }
 
-function filterAndDedupeDetections(detections, frameWidth, frameHeight) {
-  const minSidePx = Math.max(26, Math.floor(Math.min(frameWidth, frameHeight) * 0.04));
-  const minArea = frameWidth * frameHeight * 0.0024;
-  const maxArea = frameWidth * frameHeight * 0.65;
-  const minScore = 0.28;
+function filterAndDedupeDetections(
+  detections,
+  frameWidth,
+  frameHeight,
+  {
+    minSidePxBase,
+    minSideRatio,
+    minAreaRatio,
+    maxAreaRatio,
+    minScore,
+    minAspect,
+    maxAspect,
+  },
+) {
+  const minSidePx = Math.max(minSidePxBase, Math.floor(Math.min(frameWidth, frameHeight) * minSideRatio));
+  const minArea = frameWidth * frameHeight * minAreaRatio;
+  const maxArea = frameWidth * frameHeight * maxAreaRatio;
 
   const filtered = detections.filter((det) => {
     const box = getBox(det);
@@ -145,7 +157,7 @@ function filterAndDedupeDetections(detections, frameWidth, frameHeight) {
     const score = getScore(det);
     const area = box.width * box.height;
     const ratio = box.width / Math.max(1, box.height);
-    const plausibleShape = ratio >= 0.72 && ratio <= 1.42;
+    const plausibleShape = ratio >= minAspect && ratio <= maxAspect;
     const plausibleSize =
       box.width >= minSidePx &&
       box.height >= minSidePx &&
@@ -263,10 +275,17 @@ async function main() {
   const confirmFrames = Math.max(1, envInt("WORKER_CONFIRM_FRAMES", 2));
   const motionThreshold = envFloat("WORKER_MOTION_THRESHOLD", 1.5);
   const minConfirmScore = envFloat("WORKER_MIN_CONFIRM_SCORE", 0.32);
-  const tinyInputSize = envInt("WORKER_TINY_INPUT_SIZE", 608);
-  const tinyScoreThreshold = envFloat("WORKER_TINY_SCORE_THRESHOLD", 0.24);
+  const tinyInputSize = envInt("WORKER_TINY_INPUT_SIZE", 704);
+  const tinyScoreThreshold = envFloat("WORKER_TINY_SCORE_THRESHOLD", 0.18);
   const ssdMinConfidence = envFloat("WORKER_SSD_MIN_CONFIDENCE", 0.35);
   const useSsdFallback = envBool("WORKER_USE_SSD_FALLBACK", true);
+  const filterMinScore = envFloat("WORKER_FILTER_MIN_SCORE", 0.16);
+  const filterMinSidePx = envInt("WORKER_FILTER_MIN_SIDE_PX", 16);
+  const filterMinSideRatio = envFloat("WORKER_FILTER_MIN_SIDE_RATIO", 0.02);
+  const filterMinAreaRatio = envFloat("WORKER_FILTER_MIN_AREA_RATIO", 0.0009);
+  const filterMaxAreaRatio = envFloat("WORKER_FILTER_MAX_AREA_RATIO", 0.72);
+  const filterMinAspect = envFloat("WORKER_FILTER_MIN_ASPECT", 0.58);
+  const filterMaxAspect = envFloat("WORKER_FILTER_MAX_ASPECT", 1.75);
 
   const modelDir = path.join(rootDir, "public", "models");
   if (!fs.existsSync(modelDir)) {
@@ -348,7 +367,15 @@ async function main() {
           cam.prevLuma = nextLuma;
         }
 
-        detections = filterAndDedupeDetections(detections, w, h);
+        detections = filterAndDedupeDetections(detections, w, h, {
+          minSidePxBase: filterMinSidePx,
+          minSideRatio: filterMinSideRatio,
+          minAreaRatio: filterMinAreaRatio,
+          maxAreaRatio: filterMaxAreaRatio,
+          minScore: filterMinScore,
+          minAspect: filterMinAspect,
+          maxAspect: filterMaxAspect,
+        });
         cam.candidate = detections.length;
 
         const { maxSide, maxScore } = largestFaceStats(detections);
