@@ -35,7 +35,7 @@ Notes:
 
 ## Node detection worker (browser-like)
 
-The worker uses `face-api.js` in Node and mirrors browser detection behavior.
+The worker uses `@vladmandic/face-api` in Node and mirrors browser detection behavior.
 At this stage it does not do matching and does not write to DB.
 
 Run manually:

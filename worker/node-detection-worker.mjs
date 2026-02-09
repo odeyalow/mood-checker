@@ -8,7 +8,7 @@ import process from "node:process";
 import { setTimeout as sleep } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import "@tensorflow/tfjs-node";
-import * as faceapi from "face-api.js";
+import * as faceapi from "@vladmandic/face-api";
 import { createCanvas, loadImage } from "@napi-rs/canvas";
 
 const rootDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
