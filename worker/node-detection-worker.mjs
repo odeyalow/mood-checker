@@ -348,7 +348,8 @@ async function main() {
         ctx.drawImage(image, 0, 0, w, h);
         const rgba = ctx.getImageData(0, 0, w, h).data;
         const rgb = rgbaToRgbTensorData(rgba);
-        const frameTensor = faceapi.tf.tensor3d(rgb, [h, w, 3], "float32");
+        // Keep dtype close to browser fromPixels() behavior used by face-api in client mode.
+        const frameTensor = faceapi.tf.tensor3d(rgb, [h, w, 3], "int32");
 
         let detections = [];
         try {
