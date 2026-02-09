@@ -165,6 +165,7 @@ export default function CameraTile({ camera }: { camera: CameraConfig }) {
   const [status, setStatus] = useState<"loading" | "ready" | "error">("loading");
   const [faceFound, setFaceFound] = useState(false);
   const [faceCount, setFaceCount] = useState(0);
+  const [confirmedFaceCount, setConfirmedFaceCount] = useState(0);
   const [detectStatus, setDetectStatus] = useState("detection idle");
   const lastPixelRef = useRef<string | null>(null);
   const lastServerLogRef = useRef(0);
@@ -342,23 +343,23 @@ export default function CameraTile({ camera }: { camera: CameraConfig }) {
               : null;
           const trackStable =
             bestCurrentBox && lastBestBoxRef.current
-              ? iou(bestCurrentBox, lastBestBoxRef.current) >= 0.12
+              ? iou(bestCurrentBox, lastBestBoxRef.current) >= 0.08
               : false;
           lastBestBoxRef.current = bestCurrentBox;
 
-          if (count > 0 && maxScore >= 0.33 && (trackStable || stablePositiveFramesRef.current === 0)) {
+          if (count > 0 && maxScore >= 0.3 && (trackStable || stablePositiveFramesRef.current === 0)) {
             stablePositiveFramesRef.current += 1;
-          } else if (count > 0 && maxScore >= 0.33) {
+          } else if (count > 0 && maxScore >= 0.3) {
             stablePositiveFramesRef.current = 1;
           } else {
             stablePositiveFramesRef.current = 0;
           }
 
-          const requiredFrames = maxSide >= 115 ? 2 : 3;
-          const minConfirmScore = maxSide >= 115 ? 0.4 : 0.5;
+          const requiredFrames = maxSide >= 140 ? 1 : maxSide >= 95 ? 2 : 3;
+          const minConfirmScore = maxSide >= 140 ? 0.34 : maxSide >= 95 ? 0.38 : 0.46;
           const recentConfirmed = Date.now() - lastConfirmedAtRef.current < 1800;
-          const hasMotion = motionScore >= 2.1;
-          const motionGate = hasMotion || recentConfirmed || maxScore >= 0.72;
+          const hasMotion = motionScore >= 1.5;
+          const motionGate = hasMotion || recentConfirmed || maxScore >= 0.65 || maxSide >= 150;
           const confirmedCount =
             stablePositiveFramesRef.current >= requiredFrames &&
             maxScore >= minConfirmScore &&
@@ -368,7 +369,8 @@ export default function CameraTile({ camera }: { camera: CameraConfig }) {
           if (confirmedCount > 0) {
             lastConfirmedAtRef.current = Date.now();
           }
-          setFaceCount(confirmedCount);
+          setFaceCount(count);
+          setConfirmedFaceCount(confirmedCount);
           setFaceFound(confirmedCount > 0);
           if (count === 0) {
             setDetectStatus(`searching (${frameInfo})`);
@@ -376,7 +378,7 @@ export default function CameraTile({ camera }: { camera: CameraConfig }) {
             setDetectStatus(
               confirmedCount > 0
                 ? `face detected (${frameInfo})`
-                : `candidate (${frameInfo}, score=${maxScore.toFixed(2)}, motion=${motionScore.toFixed(1)}, ${stablePositiveFramesRef.current}/${requiredFrames})`,
+                : `candidate (${frameInfo}, score=${maxScore.toFixed(2)}, motion=${motionScore.toFixed(1)}, c=${count}, ${stablePositiveFramesRef.current}/${requiredFrames})`,
             );
           }
 
@@ -447,7 +449,10 @@ export default function CameraTile({ camera }: { camera: CameraConfig }) {
           </div>
           <div>
             <Text type="secondary">
-              {faceFound ? `Face found: ${faceCount}` : `No faces: ${faceCount}`} - {detectStatus}
+              {faceFound
+                ? `Faces: ${faceCount} (confirmed: ${confirmedFaceCount})`
+                : `Faces: ${faceCount} (confirmed: 0)`}{" "}
+              - {detectStatus}
             </Text>
           </div>
         </div>
