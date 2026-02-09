@@ -191,6 +191,10 @@ class CameraState:
     last_best_box: Optional[Tuple[int, int, int, int]] = None
     last_confirmed_at: float = 0.0
     prev_small_gray: Optional[any] = None
+    last_candidate_count: int = 0
+    last_confirmed_count: int = 0
+    last_best_score: float = 0.0
+    last_motion_score: float = 0.0
 
     @property
     def camera_id(self) -> str:
@@ -242,12 +246,14 @@ def run() -> int:
     min_confirm_score = max(0.1, min(0.95, getenv_float("WORKER_MIN_CONFIRM_SCORE", 0.4)))
     motion_threshold = max(0.5, getenv_float("WORKER_MOTION_THRESHOLD", 2.1))
     track_iou_threshold = max(0.01, min(0.9, getenv_float("WORKER_TRACK_IOU_THRESHOLD", 0.12)))
+    status_log_seconds = max(0.3, getenv_float("WORKER_STATUS_LOG_SECONDS", 1.0))
 
     detector = Detector()
     cams = [CameraState(idx=i + 1, url=url) for i, url in enumerate(urls)]
     log(f"started cameras={len(cams)} frame_stride={frame_stride} max_width={max_width}")
 
     last_heartbeat = 0.0
+    last_status = 0.0
 
     try:
         while True:
@@ -286,6 +292,7 @@ def run() -> int:
                 frame_for_det = resize_for_detection(frame, max_width=max_width)
                 boxes = detector.detect(frame_for_det)
                 count = len(boxes)
+                cam.last_candidate_count = count
 
                 small = cv2.resize(frame_for_det, (96, 54), interpolation=cv2.INTER_AREA)
                 small_gray = cv2.cvtColor(small, cv2.COLOR_BGR2GRAY)
@@ -294,11 +301,13 @@ def run() -> int:
                     diff = cv2.absdiff(small_gray, cam.prev_small_gray)
                     motion_score = float(diff.mean())
                 cam.prev_small_gray = small_gray
+                cam.last_motion_score = motion_score
 
                 if count > 0:
                     best = max(boxes, key=lambda b: float(b[2] * b[3]) * float(b[4]))
                     best_box = (int(best[0]), int(best[1]), int(best[2]), int(best[3]))
                     best_score = float(best[4])
+                    cam.last_best_score = best_score
                     is_track_stable = (
                         cam.last_best_box is not None
                         and iou(best_box, cam.last_best_box) >= track_iou_threshold
@@ -323,6 +332,7 @@ def run() -> int:
                     )
                     if confirmed:
                         cam.last_confirmed_at = now
+                        cam.last_confirmed_count = count
                         faces_total += count
                         if now - cam.last_event_log >= detection_log_cooldown:
                             log(
@@ -330,13 +340,27 @@ def run() -> int:
                                 f"score={best_score:.3f} motion={motion_score:.2f}"
                             )
                             cam.last_event_log = now
+                    else:
+                        cam.last_confirmed_count = 0
                 else:
                     cam.stable_positive_frames = 0
                     cam.last_best_box = None
+                    cam.last_best_score = 0.0
+                    cam.last_confirmed_count = 0
 
             if now - last_heartbeat >= heartbeat_seconds:
                 log(f"heartbeat: cameras_ready={ready}/{len(cams)} faces_detected={faces_total}")
                 last_heartbeat = now
+
+            if now - last_status >= status_log_seconds:
+                for cam in cams:
+                    log(
+                        f"[{cam.camera_id}] status candidate={cam.last_candidate_count} "
+                        f"confirmed={cam.last_confirmed_count} "
+                        f"score={cam.last_best_score:.3f} motion={cam.last_motion_score:.2f} "
+                        f"streak={cam.stable_positive_frames}/{confirm_frames}"
+                    )
+                last_status = now
 
             time.sleep(0.03)
     except KeyboardInterrupt:
