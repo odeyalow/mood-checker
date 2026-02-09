@@ -212,7 +212,7 @@ export default function DashboardPage({
 
         <Col xs={24} lg={8}>
           <Card title={t.recentRecognitions} className="soft-card">
-            <Space direction="vertical" size={16} style={{ width: "100%" }}>
+            <Space orientation="vertical" size={16} style={{ width: "100%" }}>
               {loadError ? <Text type="danger">{loadError}</Text> : null}
               {recentEvents.map((item) => (
                 <div

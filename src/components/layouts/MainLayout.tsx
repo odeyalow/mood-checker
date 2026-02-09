@@ -100,6 +100,11 @@ export default function MainLayout({
       label: <Link href={`/${safeLocale}/dashboard`}>{t.menu.dashboard}</Link>,
     },
     {
+      key: "cameras",
+      icon: <VideoCameraOutlined />,
+      label: <Link href={`/${safeLocale}/cameras`}>{t.menu.cameras}</Link>,
+    },
+    {
       key: "top",
       icon: <TrophyOutlined />,
       label: <Link href={`/${safeLocale}/students/top`}>{t.menu.top}</Link>,

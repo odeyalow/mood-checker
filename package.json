@@ -28,6 +28,7 @@
     "next": "^16.1.4",
     "react": "^19.2.3",
     "react-dom": "^19.2.3",
+    "rtsp-relay": "^1.9.0",
     "playwright": "^1.55.0"
   },
   "devDependencies": {
