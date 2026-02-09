@@ -97,7 +97,11 @@ class Detector:
 
             det_size = getenv_int("WORKER_DET_SIZE", 960)
             model_name = os.getenv("WORKER_MODEL_NAME", "buffalo_l").strip() or "buffalo_l"
-            face_app = FaceAnalysis(name=model_name, providers=["CPUExecutionProvider"])
+            face_app = FaceAnalysis(
+                name=model_name,
+                providers=["CPUExecutionProvider"],
+                allowed_modules=["detection"],
+            )
             face_app.prepare(ctx_id=0, det_size=(det_size, det_size))
             self._face_app = face_app
             self.mode = "insightface"

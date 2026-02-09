@@ -33,7 +33,7 @@ module.exports = {
       autorestart: true,
       max_restarts: 50,
       restart_delay: 3000,
-      max_memory_restart: "700M",
+      max_memory_restart: "1200M",
       env: {
         NODE_ENV: "production",
         PYTHONUNBUFFERED: "1",
