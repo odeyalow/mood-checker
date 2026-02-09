@@ -69,6 +69,14 @@ app
         const handler = proxy({
           url,
           transport: "tcp",
+          additionalFlags: [
+            "-q",
+            "1",
+            "-r",
+            "20",
+            "-vf",
+            "eq=contrast=1.08:brightness=0.03:saturation=1.12,unsharp=5:5:0.8",
+          ],
           verbose: false,
         });
         handler(ws);

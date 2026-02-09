@@ -102,12 +102,12 @@ export default function CameraTile({ camera }: { camera: CameraConfig }) {
       }
 
       const ssdOptions = new faceapi.SsdMobilenetv1Options({
-        minConfidence: 0.28,
+        minConfidence: 0.2,
         maxResults: 10,
       });
       const tinyOptions = new faceapi.TinyFaceDetectorOptions({
-        inputSize: 416,
-        scoreThreshold: 0.16,
+        inputSize: 608,
+        scoreThreshold: 0.08,
       });
 
       const loop = async () => {
@@ -176,6 +176,7 @@ export default function CameraTile({ camera }: { camera: CameraConfig }) {
             }
           }
           const count = Array.isArray(detections) ? detections.length : 0;
+          const frameInfo = `${streamCanvas.width}x${streamCanvas.height}`;
 
           overlayCanvas.width = streamCanvas.width;
           overlayCanvas.height = streamCanvas.height;
@@ -190,9 +191,14 @@ export default function CameraTile({ camera }: { camera: CameraConfig }) {
 
           setFaceCount(count);
           setFaceFound(count > 0);
+          if (count === 0) {
+            setDetectStatus(`searching (${frameInfo})`);
+          } else {
+            setDetectStatus(`face detected (${frameInfo})`);
+          }
 
           const now = Date.now();
-          if (count > 0 && now - lastLoggedAt > 2000) {
+          if (count > 0 && now - lastLoggedAt > 1500) {
             console.log(`[camera] face_found count=${count}`);
             lastLoggedAt = now;
           }
@@ -219,7 +225,7 @@ export default function CameraTile({ camera }: { camera: CameraConfig }) {
 
         timer = window.setTimeout(() => {
           void loop();
-        }, 180);
+        }, 220);
       };
 
       void loop();
