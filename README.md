@@ -10,6 +10,21 @@ npm run build
 npm run start
 ```
 
+### Camera source via go2rtc (recommended)
+
+Set these in `.env` for camera page:
+
+```bash
+NEXT_PUBLIC_CAMERA_1_RTSP_URL=rtsp://127.0.0.1:8554/cam01_main
+NEXT_PUBLIC_CAMERA_1_NAME=Office Camera 1
+NEXT_PUBLIC_CAMERA_1_LOCATION=NVR LAN
+NEXT_PUBLIC_ENABLE_WEBCAM_TILE=false
+```
+
+Notes:
+- `NEXT_PUBLIC_CAMERA_1_RTSP_URL` is consumed by the browser camera page through your `/api/stream` proxy.
+- `NEXT_PUBLIC_ENABLE_WEBCAM_TILE=true` enables the local webcam tile for debugging.
+
 ## Recognition worker (without open browser tab)
 
 1. Install dependencies and browser runtime:

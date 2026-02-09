@@ -17,9 +17,26 @@ async function waitForPlayer(timeoutMs = 15000) {
   return null;
 }
 
+async function waitForFaceApi(timeoutMs = 15000) {
+  const started = Date.now();
+  while (Date.now() - started < timeoutMs) {
+    const faceapi = (window as any).faceapi;
+    if (faceapi) return faceapi;
+    await new Promise((r) => setTimeout(r, 200));
+  }
+  return null;
+}
+
 export default function CameraTile({ camera }: { camera: CameraConfig }) {
   const streamRef = useRef<HTMLCanvasElement | null>(null);
+  const captureRef = useRef<HTMLCanvasElement | null>(null);
+  const overlayRef = useRef<HTMLCanvasElement | null>(null);
+
   const [status, setStatus] = useState<"loading" | "ready" | "error">("loading");
+  const [faceFound, setFaceFound] = useState(false);
+  const [faceCount, setFaceCount] = useState(0);
+  const [detectStatus, setDetectStatus] = useState("detection idle");
+  const lastPixelRef = useRef<string | null>(null);
 
   useEffect(() => {
     let mounted = true;
@@ -47,19 +64,150 @@ export default function CameraTile({ camera }: { camera: CameraConfig }) {
       }
     }
 
-    startStream();
+    void startStream();
     return () => {
       mounted = false;
     };
   }, [camera.id, camera.rtspUrl]);
 
+  useEffect(() => {
+    let mounted = true;
+    let timer = 0;
+    let lastLoggedAt = 0;
+
+    async function startDetection() {
+      const streamCanvas = streamRef.current;
+      const captureCanvas = captureRef.current;
+      const overlayCanvas = overlayRef.current;
+      if (!streamCanvas || !captureCanvas || !overlayCanvas) return;
+
+      const faceapi = await waitForFaceApi();
+      if (!faceapi) {
+        console.warn("[camera] faceapi not loaded");
+        setDetectStatus("faceapi unavailable");
+        return;
+      }
+
+      try {
+        await Promise.all([
+          faceapi.nets.ssdMobilenetv1.loadFromUri("/models"),
+          faceapi.nets.tinyFaceDetector.loadFromUri("/models"),
+        ]);
+        setDetectStatus("detection active");
+      } catch (error) {
+        console.error("[camera] failed to load face models:", error);
+        setDetectStatus("model load error");
+        return;
+      }
+
+      const ssdOptions = new faceapi.SsdMobilenetv1Options({
+        minConfidence: 0.45,
+        maxResults: 10,
+      });
+      const tinyOptions = new faceapi.TinyFaceDetectorOptions({
+        inputSize: 320,
+        scoreThreshold: 0.28,
+      });
+
+      const loop = async () => {
+        if (!mounted) return;
+
+        try {
+          if (streamCanvas.width === 0 || streamCanvas.height === 0) {
+            setDetectStatus("no frames");
+            throw new Error("empty_frame");
+          }
+
+          captureCanvas.width = streamCanvas.width;
+          captureCanvas.height = streamCanvas.height;
+
+          const captureCtx = captureCanvas.getContext("2d", { willReadFrequently: true });
+          if (!captureCtx) {
+            setDetectStatus("no frame context");
+            throw new Error("no_capture_context");
+          }
+
+          captureCtx.drawImage(streamCanvas, 0, 0, captureCanvas.width, captureCanvas.height);
+
+          try {
+            const pixel = captureCtx.getImageData(0, 0, 1, 1).data;
+            const key = `${pixel[0]}-${pixel[1]}-${pixel[2]}-${pixel[3]}`;
+            if (lastPixelRef.current && lastPixelRef.current !== key) {
+              setDetectStatus("frame updates");
+            } else if (!lastPixelRef.current) {
+              setDetectStatus("first frame");
+            } else {
+              setDetectStatus("frame stable");
+            }
+            lastPixelRef.current = key;
+          } catch {
+            setDetectStatus("frame read failed");
+          }
+
+          // Try multiple detection paths because some RTSP renderers draw into canvas
+          // in a way that one path may fail intermittently.
+          let detections = await faceapi.detectAllFaces(streamCanvas, ssdOptions);
+          if (!detections.length) {
+            detections = await faceapi.detectAllFaces(captureCanvas, ssdOptions);
+          }
+          if (!detections.length) {
+            detections = await faceapi.detectAllFaces(streamCanvas, tinyOptions);
+          }
+          if (!detections.length) {
+            detections = await faceapi.detectAllFaces(captureCanvas, tinyOptions);
+          }
+          const count = Array.isArray(detections) ? detections.length : 0;
+
+          overlayCanvas.width = streamCanvas.width;
+          overlayCanvas.height = streamCanvas.height;
+          const overlayCtx = overlayCanvas.getContext("2d");
+          overlayCtx?.clearRect(0, 0, overlayCanvas.width, overlayCanvas.height);
+
+          const resized = faceapi.resizeResults(detections, {
+            width: overlayCanvas.width,
+            height: overlayCanvas.height,
+          });
+          faceapi.draw.drawDetections(overlayCanvas, resized);
+
+          setFaceCount(count);
+          setFaceFound(count > 0);
+
+          const now = Date.now();
+          if (count > 0 && now - lastLoggedAt > 2000) {
+            console.log(`[camera] face_found count=${count}`);
+            lastLoggedAt = now;
+          }
+        } catch (error) {
+          console.error("[camera] detection error:", error);
+        }
+
+        timer = window.setTimeout(() => {
+          void loop();
+        }, 250);
+      };
+
+      void loop();
+    }
+
+    if (status === "ready") {
+      void startDetection();
+    }
+
+    return () => {
+      mounted = false;
+      if (timer) window.clearTimeout(timer);
+    };
+  }, [status]);
+
   return (
     <Card className="camera-card" size="small">
       <div className="camera-media">
         <canvas ref={streamRef} className="camera-video" />
+        <canvas ref={captureRef} style={{ display: "none" }} />
+        <canvas ref={overlayRef} className="camera-overlay" />
         {status !== "ready" ? (
           <div className="camera-status">
-            <VideoCameraOutlined /> {status === "error" ? "Ошибка" : "Загрузка"}
+            <VideoCameraOutlined /> {status === "error" ? "Error" : "Loading"}
           </div>
         ) : null}
       </div>
@@ -69,8 +217,13 @@ export default function CameraTile({ camera }: { camera: CameraConfig }) {
           <div>
             <Text type="secondary">{camera.location || camera.id}</Text>
           </div>
+          <div>
+            <Text type="secondary">
+              {faceFound ? `Face found: ${faceCount}` : `No faces: ${faceCount}`} - {detectStatus}
+            </Text>
+          </div>
         </div>
-        <Tag color="geekblue">RTSP</Tag>
+        <Tag color={faceFound ? "green" : "geekblue"}>{faceFound ? "Face Found" : "RTSP"}</Tag>
       </div>
     </Card>
   );
