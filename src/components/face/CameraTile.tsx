@@ -42,8 +42,8 @@ async function drawSnapshotToCanvas(src: string, canvas: HTMLCanvasElement) {
     canvas.height = bitmap.height;
     const ctx = canvas.getContext("2d", { willReadFrequently: true });
     if (!ctx) throw new Error("no_capture_context");
-    // Improve visibility of distant/dark faces.
-    ctx.filter = "brightness(1.12) contrast(1.14) saturate(1.06)";
+    // Mild enhancement. Strong filters create phantom faces on textured backgrounds.
+    ctx.filter = "brightness(1.06) contrast(1.08) saturate(1.03)";
     ctx.drawImage(bitmap, 0, 0, canvas.width, canvas.height);
     ctx.filter = "none";
   } finally {
@@ -85,10 +85,10 @@ function iou(a: { x: number; y: number; width: number; height: number }, b: { x:
 }
 
 function filterAndDedupeDetections(detections: any[], frameWidth: number, frameHeight: number) {
-  const minSidePx = Math.max(24, Math.floor(Math.min(frameWidth, frameHeight) * 0.038));
-  const minArea = frameWidth * frameHeight * 0.0018;
+  const minSidePx = Math.max(26, Math.floor(Math.min(frameWidth, frameHeight) * 0.04));
+  const minArea = frameWidth * frameHeight * 0.0024;
   const maxArea = frameWidth * frameHeight * 0.65;
-  const minScore = 0.16;
+  const minScore = 0.28;
 
   const filtered = detections.filter((det) => {
     const box = getDetBox(det);
@@ -96,13 +96,18 @@ function filterAndDedupeDetections(detections: any[], frameWidth: number, frameH
     const score = getDetScore(det);
     const area = box.width * box.height;
     const ratio = box.width / Math.max(1, box.height);
-    const plausibleShape = ratio >= 0.65 && ratio <= 1.55;
+    const plausibleShape = ratio >= 0.72 && ratio <= 1.42;
     const plausibleSize =
       box.width >= minSidePx &&
       box.height >= minSidePx &&
       area >= minArea &&
       area <= maxArea;
-    return score >= minScore && plausibleShape && plausibleSize;
+    const notNearEdge =
+      box.x >= Math.max(2, Math.floor(frameWidth * 0.005)) &&
+      box.y >= Math.max(2, Math.floor(frameHeight * 0.005)) &&
+      box.x + box.width <= frameWidth - Math.max(2, Math.floor(frameWidth * 0.005)) &&
+      box.y + box.height <= frameHeight - Math.max(2, Math.floor(frameHeight * 0.005));
+    return score >= minScore && plausibleShape && plausibleSize && notNearEdge;
   });
 
   filtered.sort((a, b) => getDetScore(b) - getDetScore(a));
@@ -209,12 +214,12 @@ export default function CameraTile({ camera }: { camera: CameraConfig }) {
       }
 
       const ssdOptions = new faceapi.SsdMobilenetv1Options({
-        minConfidence: 0.28,
-        maxResults: 25,
+        minConfidence: 0.5,
+        maxResults: 12,
       });
       const tinyOptions = new faceapi.TinyFaceDetectorOptions({
         inputSize: 736,
-        scoreThreshold: 0.1,
+        scoreThreshold: 0.2,
       });
 
       const loop = async () => {
@@ -235,7 +240,7 @@ export default function CameraTile({ camera }: { camera: CameraConfig }) {
               setDetectStatus("no frame context");
               throw new Error("no_capture_context");
             }
-            captureCtx.filter = "brightness(1.12) contrast(1.14) saturate(1.06)";
+            captureCtx.filter = "brightness(1.06) contrast(1.08) saturate(1.03)";
             captureCtx.drawImage(streamCanvas, 0, 0, captureCanvas.width, captureCanvas.height);
             captureCtx.filter = "none";
           }
@@ -323,13 +328,17 @@ export default function CameraTile({ camera }: { camera: CameraConfig }) {
           });
           faceapi.draw.drawDetections(overlayCanvas, resized);
 
-          if (count > 0) {
+          if (count > 0 && maxScore >= 0.34) {
             stablePositiveFramesRef.current += 1;
           } else {
             stablePositiveFramesRef.current = 0;
           }
-          const requiredFrames = maxSide >= 110 && maxScore >= 0.45 ? 1 : 2;
-          const confirmedCount = stablePositiveFramesRef.current >= requiredFrames ? count : 0;
+          const requiredFrames = maxSide >= 130 && maxScore >= 0.55 ? 2 : 3;
+          const minConfirmScore = maxSide >= 130 ? 0.42 : 0.52;
+          const confirmedCount =
+            stablePositiveFramesRef.current >= requiredFrames && maxScore >= minConfirmScore
+              ? count
+              : 0;
           setFaceCount(confirmedCount);
           setFaceFound(confirmedCount > 0);
           if (count === 0) {
@@ -338,7 +347,7 @@ export default function CameraTile({ camera }: { camera: CameraConfig }) {
             setDetectStatus(
               confirmedCount > 0
                 ? `face detected (${frameInfo})`
-                : `candidate detected (${frameInfo}, ${stablePositiveFramesRef.current}/${requiredFrames})`,
+                : `candidate (${frameInfo}, score=${maxScore.toFixed(2)}, ${stablePositiveFramesRef.current}/${requiredFrames})`,
             );
           }
 
