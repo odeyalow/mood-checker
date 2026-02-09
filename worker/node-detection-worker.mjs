@@ -7,9 +7,8 @@ import path from "node:path";
 import process from "node:process";
 import { setTimeout as sleep } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
-import * as tf from "@tensorflow/tfjs-node";
+import "@tensorflow/tfjs-node";
 import * as faceapi from "face-api.js";
-import { createCanvas, loadImage, Image, ImageData } from "@napi-rs/canvas";
 
 const rootDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -115,11 +114,11 @@ function iou(a, b) {
   return union > 0 ? inter / union : 0;
 }
 
-function computeLumaBuffer(rgba) {
-  const luma = new Uint8Array(Math.floor(rgba.length / 4));
+function computeLumaBufferFromRgb(rgb) {
+  const luma = new Uint8Array(Math.floor(rgb.length / 3));
   let j = 0;
-  for (let i = 0; i < rgba.length; i += 4) {
-    luma[j++] = (77 * rgba[i] + 150 * rgba[i + 1] + 29 * rgba[i + 2]) >> 8;
+  for (let i = 0; i < rgb.length; i += 3) {
+    luma[j++] = (77 * rgb[i] + 150 * rgb[i + 1] + 29 * rgb[i + 2]) >> 8;
   }
   return luma;
 }
@@ -263,26 +262,7 @@ async function main() {
     process.exit(1);
   }
 
-  // face-api may call either env.createCanvasElement() or new Canvas().
-  // @napi-rs/canvas requires width/height, so we provide a safe wrapper.
-  function CanvasCompat(width = 1, height = 1) {
-    const w = Number.isFinite(Number(width)) && Number(width) > 0 ? Number(width) : 1;
-    const h = Number.isFinite(Number(height)) && Number(height) > 0 ? Number(height) : 1;
-    return createCanvas(w, h);
-  }
-
-  faceapi.env.monkeyPatch({
-    Canvas: CanvasCompat,
-    Image,
-    ImageData,
-    createCanvasElement: () => createCanvas(1, 1),
-    createImageElement: () => new Image(),
-  });
-  // Extra hard override for older face-api internals.
-  const env = faceapi.env.getEnv();
-  env.createCanvasElement = () => createCanvas(1, 1);
-  env.createImageElement = () => new Image();
-  tf.enableProdMode();
+  faceapi.tf.enableProdMode();
   await faceapi.nets.tinyFaceDetector.loadFromDisk(modelDir);
   let ssdLoaded = false;
   if (useSsdFallback) {
@@ -325,31 +305,34 @@ async function main() {
 
       try {
         const jpg = await fetchFrame(frameUrl, frameTimeoutMs);
-        const image = await loadImage(jpg);
-        const w = image.width;
-        const h = image.height;
-        if (!w || !h) throw new Error("invalid_image");
-
-        const captureCanvas = createCanvas(w, h);
-        const ctx = captureCanvas.getContext("2d");
-        ctx.filter = "brightness(1.06) contrast(1.08) saturate(1.03)";
-        ctx.drawImage(image, 0, 0, w, h);
-        ctx.filter = "none";
-
-        let detections = await faceapi.detectAllFaces(captureCanvas, tinyOptions);
-        if (!detections.length && ssdLoaded) {
-          detections = await faceapi.detectAllFaces(captureCanvas, ssdOptions);
+        const frameTensor = faceapi.tf.node.decodeImage(jpg, 3);
+        const shape = frameTensor.shape;
+        const h = Number(shape?.[0] ?? 0);
+        const w = Number(shape?.[1] ?? 0);
+        if (!w || !h) {
+          frameTensor.dispose();
+          throw new Error("invalid_image");
         }
+
+        let detections = [];
+        try {
+          detections = await faceapi.detectAllFaces(frameTensor, tinyOptions);
+          if (!detections.length && ssdLoaded) {
+            detections = await faceapi.detectAllFaces(frameTensor, ssdOptions);
+          }
+        } finally {
+          const resized = faceapi.tf.image.resizeBilinear(frameTensor, [54, 96], true);
+          const rgb = await resized.data();
+          resized.dispose();
+          frameTensor.dispose();
+
+          const nextLuma = computeLumaBufferFromRgb(rgb);
+          cam.motion = computeMotionScore(cam.prevLuma, nextLuma);
+          cam.prevLuma = nextLuma;
+        }
+
         detections = filterAndDedupeDetections(detections, w, h);
         cam.candidate = detections.length;
-
-        const motionCanvas = createCanvas(96, 54);
-        const motionCtx = motionCanvas.getContext("2d");
-        motionCtx.drawImage(captureCanvas, 0, 0, 96, 54);
-        const px = motionCtx.getImageData(0, 0, 96, 54).data;
-        const nextLuma = computeLumaBuffer(px);
-        cam.motion = computeMotionScore(cam.prevLuma, nextLuma);
-        cam.prevLuma = nextLuma;
 
         const { maxSide, maxScore } = largestFaceStats(detections);
         cam.score = maxScore;
