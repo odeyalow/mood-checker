@@ -1,6 +1,3 @@
-const pythonBin =
-  process.env.PYTHON_BIN || `${__dirname.replace(/\\/g, "/")}/.venv/bin/python`;
-
 module.exports = {
   apps: [
     {
@@ -25,8 +22,8 @@ module.exports = {
     },
     {
       name: "mood-checker-pyworker",
-      script: pythonBin,
-      args: "worker/py-recognition-worker.py",
+      script: "node",
+      args: "worker/node-detection-worker.mjs",
       cwd: __dirname,
       exec_mode: "fork",
       instances: 1,
@@ -36,11 +33,9 @@ module.exports = {
       max_memory_restart: "1200M",
       env: {
         NODE_ENV: "production",
-        PYTHONUNBUFFERED: "1",
       },
       env_production: {
         NODE_ENV: "production",
-        PYTHONUNBUFFERED: "1",
       },
     },
   ],

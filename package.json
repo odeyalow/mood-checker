@@ -26,10 +26,13 @@
     "create-user": "node scripts/create-user.mjs"
   },
   "dependencies": {
+    "@napi-rs/canvas": "^0.1.80",
     "@ant-design/icons": "^6.1.0",
     "@prisma/client": "^6.16.1",
+    "@tensorflow/tfjs-node": "^4.22.0",
     "antd": "^6.2.2",
     "bcryptjs": "^3.0.2",
+    "face-api.js": "^0.22.2",
     "jose": "^6.1.0",
     "next": "^16.1.4",
     "react": "^19.2.3",

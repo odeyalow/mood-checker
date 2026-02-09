@@ -33,21 +33,16 @@ Notes:
 - `NEXT_PUBLIC_ENABLE_WEBCAM_TILE=true` enables the local webcam tile for debugging.
 - `NEXT_PUBLIC_DETECTION_MODE=worker` disables browser face-api detection and shows worker live status under camera tiles.
 
-## Python detection worker (recommended for server)
+## Node detection worker (browser-like)
 
-The Python worker reads RTSP streams directly and logs face detections.
+The worker uses `face-api.js` in Node and mirrors browser detection behavior.
 At this stage it does not do matching and does not write to DB.
-
-Requirements in your Python venv:
-- `insightface`
-- `onnxruntime`
-- `opencv-python-headless`
-- `requests`
 
 Run manually:
 
 ```bash
-python worker/py-recognition-worker.py
+cp -n .env.worker.example .env.worker
+node worker/node-detection-worker.mjs
 ```
 
 ## Server quick start (after git pull)
@@ -56,10 +51,8 @@ python worker/py-recognition-worker.py
 cd /opt/mood-checker
 npm install
 npm run build
-. .venv/bin/activate
-pip install -r worker/requirements-cpu.txt --no-cache-dir
 cp -n .env.worker.example .env.worker
-PYTHON_BIN=/opt/mood-checker/.venv/bin/python npm run pm2:start:all
+npm run pm2:start:all
 npm run pm2:save
 ```
 
@@ -76,7 +69,7 @@ curl -s "http://127.0.0.1:3000/api/worker/status?cameraId=cam-01"
 ```
 
 Look for:
-- `detector=insightface ...`
+- `detector=face-api ...`
 - `heartbeat: cameras_ready=... faces_detected=...`
 - `[cam-01] face_detected count=...`
 
