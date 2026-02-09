@@ -6,7 +6,8 @@ import { VideoCameraOutlined } from "@ant-design/icons";
 import type { CameraConfig } from "@/lib/cameras";
 
 const { Text } = Typography;
-const DETECTION_MODE = process.env.NEXT_PUBLIC_DETECTION_MODE === "worker" ? "worker" : "browser";
+const DEFAULT_DETECTION_MODE: "browser" | "worker" =
+  process.env.NEXT_PUBLIC_DETECTION_MODE === "worker" ? "worker" : "browser";
 
 async function waitForPlayer(timeoutMs = 15000) {
   const started = Date.now();
@@ -158,7 +159,13 @@ function getLargestFaceStats(detections: any[]) {
   return { maxSide, maxScore };
 }
 
-export default function CameraTile({ camera }: { camera: CameraConfig }) {
+export default function CameraTile({
+  camera,
+  detectionMode = DEFAULT_DETECTION_MODE,
+}: {
+  camera: CameraConfig;
+  detectionMode?: "browser" | "worker";
+}) {
   const streamRef = useRef<HTMLCanvasElement | null>(null);
   const captureRef = useRef<HTMLCanvasElement | null>(null);
   const overlayRef = useRef<HTMLCanvasElement | null>(null);
@@ -175,6 +182,21 @@ export default function CameraTile({ camera }: { camera: CameraConfig }) {
   const lastConfirmedAtRef = useRef(0);
   const motionLumaRef = useRef<Uint8Array | null>(null);
   const frameSeqRef = useRef(0);
+
+  useEffect(() => {
+    const overlay = overlayRef.current;
+    if (!overlay) return;
+    const ctx = overlay.getContext("2d");
+    ctx?.clearRect(0, 0, overlay.width, overlay.height);
+    stablePositiveFramesRef.current = 0;
+    lastBestBoxRef.current = null;
+    lastConfirmedAtRef.current = 0;
+    motionLumaRef.current = null;
+    setFaceFound(false);
+    setFaceCount(0);
+    setConfirmedFaceCount(0);
+    setDetectStatus(detectionMode === "worker" ? "worker waiting status" : "detection idle");
+  }, [detectionMode]);
 
   useEffect(() => {
     let mounted = true;
@@ -209,7 +231,7 @@ export default function CameraTile({ camera }: { camera: CameraConfig }) {
   }, [camera.id, camera.rtspUrl]);
 
   useEffect(() => {
-    if (status !== "ready" || DETECTION_MODE !== "worker") return;
+    if (status !== "ready" || detectionMode !== "worker") return;
 
     let mounted = true;
     let timer = 0;
@@ -273,10 +295,10 @@ export default function CameraTile({ camera }: { camera: CameraConfig }) {
       mounted = false;
       if (timer) window.clearTimeout(timer);
     };
-  }, [status, camera.id]);
+  }, [status, camera.id, detectionMode]);
 
   useEffect(() => {
-    if (DETECTION_MODE === "worker") return;
+    if (detectionMode === "worker") return;
 
     let mounted = true;
     let timer = 0;
@@ -497,7 +519,7 @@ export default function CameraTile({ camera }: { camera: CameraConfig }) {
       mounted = false;
       if (timer) window.clearTimeout(timer);
     };
-  }, [status]);
+  }, [status, detectionMode]);
 
   return (
     <Card className="camera-card" size="small">
