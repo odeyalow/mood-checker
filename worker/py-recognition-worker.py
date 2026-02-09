@@ -124,13 +124,13 @@ class Detector:
         self.mode = "haar"
         log("detector=haar")
 
-    def detect(self, frame_bgr) -> List[Tuple[int, int, int, int]]:
+    def detect(self, frame_bgr) -> List[Tuple[int, int, int, int, float]]:
         fh, fw = frame_bgr.shape[:2]
         min_side_px = max(20, int(min(fw, fh) * self.min_side_ratio))
         max_side_px = max(min_side_px, int(min(fw, fh) * self.max_side_ratio))
         if self._face_app is not None:
             faces = self._face_app.get(frame_bgr)
-            boxes: List[Tuple[int, int, int, int]] = []
+            boxes: List[Tuple[int, int, int, int, float]] = []
             for f in faces:
                 bbox = getattr(f, "bbox", None)
                 det_score = float(getattr(f, "det_score", 1.0))
@@ -143,7 +143,7 @@ class Detector:
                 plausible_shape = self.min_aspect <= aspect <= self.max_aspect
                 plausible_size = min_side_px <= max(w, h) <= max_side_px
                 if w > 0 and h > 0 and det_score >= self.min_score and plausible_shape and plausible_size:
-                    boxes.append((x1, y1, w, h))
+                    boxes.append((x1, y1, w, h, det_score))
             return boxes
 
         if self._haar is None:
@@ -155,7 +155,27 @@ class Detector:
             minNeighbors=6,
             minSize=(28, 28),
         )
-        return [(int(x), int(y), int(w), int(h)) for (x, y, w, h) in detections]
+        return [(int(x), int(y), int(w), int(h), 1.0) for (x, y, w, h) in detections]
+
+
+def iou(a: Tuple[int, int, int, int], b: Tuple[int, int, int, int]) -> float:
+    ax, ay, aw, ah = a
+    bx, by, bw, bh = b
+    ax2 = ax + aw
+    ay2 = ay + ah
+    bx2 = bx + bw
+    by2 = by + bh
+    ix1 = max(ax, bx)
+    iy1 = max(ay, by)
+    ix2 = min(ax2, bx2)
+    iy2 = min(ay2, by2)
+    iw = max(0, ix2 - ix1)
+    ih = max(0, iy2 - iy1)
+    inter = iw * ih
+    if inter <= 0:
+        return 0.0
+    union = aw * ah + bw * bh - inter
+    return (inter / union) if union > 0 else 0.0
 
 
 @dataclass
@@ -167,6 +187,10 @@ class CameraState:
     last_event_log: float = 0.0
     last_reconnect_log: float = 0.0
     last_open_attempt: float = 0.0
+    stable_positive_frames: int = 0
+    last_best_box: Optional[Tuple[int, int, int, int]] = None
+    last_confirmed_at: float = 0.0
+    prev_small_gray: Optional[any] = None
 
     @property
     def camera_id(self) -> str:
@@ -214,6 +238,10 @@ def run() -> int:
     detection_log_cooldown = max(0.2, getenv_float("WORKER_DETECTION_LOG_COOLDOWN_SECONDS", 0.5))
     max_width = max(320, getenv_int("WORKER_MAX_WIDTH", 960))
     grab_flush = max(0, getenv_int("WORKER_GRAB_FLUSH", 1))
+    confirm_frames = max(1, getenv_int("WORKER_CONFIRM_FRAMES", 2))
+    min_confirm_score = max(0.1, min(0.95, getenv_float("WORKER_MIN_CONFIRM_SCORE", 0.4)))
+    motion_threshold = max(0.5, getenv_float("WORKER_MOTION_THRESHOLD", 2.1))
+    track_iou_threshold = max(0.01, min(0.9, getenv_float("WORKER_TRACK_IOU_THRESHOLD", 0.12)))
 
     detector = Detector()
     cams = [CameraState(idx=i + 1, url=url) for i, url in enumerate(urls)]
@@ -258,11 +286,53 @@ def run() -> int:
                 frame_for_det = resize_for_detection(frame, max_width=max_width)
                 boxes = detector.detect(frame_for_det)
                 count = len(boxes)
-                faces_total += count
 
-                if count > 0 and now - cam.last_event_log >= detection_log_cooldown:
-                    log(f"[{cam.camera_id}] face_detected count={count}")
-                    cam.last_event_log = now
+                small = cv2.resize(frame_for_det, (96, 54), interpolation=cv2.INTER_AREA)
+                small_gray = cv2.cvtColor(small, cv2.COLOR_BGR2GRAY)
+                motion_score = 0.0
+                if cam.prev_small_gray is not None:
+                    diff = cv2.absdiff(small_gray, cam.prev_small_gray)
+                    motion_score = float(diff.mean())
+                cam.prev_small_gray = small_gray
+
+                if count > 0:
+                    best = max(boxes, key=lambda b: float(b[2] * b[3]) * float(b[4]))
+                    best_box = (int(best[0]), int(best[1]), int(best[2]), int(best[3]))
+                    best_score = float(best[4])
+                    is_track_stable = (
+                        cam.last_best_box is not None
+                        and iou(best_box, cam.last_best_box) >= track_iou_threshold
+                    )
+                    cam.last_best_box = best_box
+
+                    if best_score >= max(0.2, min_confirm_score - 0.08) and (
+                        is_track_stable or cam.stable_positive_frames == 0
+                    ):
+                        cam.stable_positive_frames += 1
+                    elif best_score >= max(0.2, min_confirm_score - 0.08):
+                        cam.stable_positive_frames = 1
+                    else:
+                        cam.stable_positive_frames = 0
+
+                    recent_confirm = (now - cam.last_confirmed_at) < 1.8
+                    motion_gate = motion_score >= motion_threshold or recent_confirm or best_score >= 0.72
+                    confirmed = (
+                        cam.stable_positive_frames >= confirm_frames
+                        and best_score >= min_confirm_score
+                        and motion_gate
+                    )
+                    if confirmed:
+                        cam.last_confirmed_at = now
+                        faces_total += count
+                        if now - cam.last_event_log >= detection_log_cooldown:
+                            log(
+                                f"[{cam.camera_id}] face_detected count={count} "
+                                f"score={best_score:.3f} motion={motion_score:.2f}"
+                            )
+                            cam.last_event_log = now
+                else:
+                    cam.stable_positive_frames = 0
+                    cam.last_best_box = None
 
             if now - last_heartbeat >= heartbeat_seconds:
                 log(f"heartbeat: cameras_ready={ready}/{len(cams)} faces_detected={faces_total}")

@@ -84,6 +84,25 @@ function iou(a: { x: number; y: number; width: number; height: number }, b: { x:
   return union > 0 ? inter / union : 0;
 }
 
+function computeLumaBuffer(data: Uint8ClampedArray) {
+  const luma = new Uint8Array(Math.floor(data.length / 4));
+  let j = 0;
+  for (let i = 0; i < data.length; i += 4) {
+    // Perceived luminance approximation (BT.601) in integer math.
+    luma[j++] = (77 * data[i] + 150 * data[i + 1] + 29 * data[i + 2]) >> 8;
+  }
+  return luma;
+}
+
+function computeMotionScore(prev: Uint8Array | null, next: Uint8Array) {
+  if (!prev || prev.length !== next.length) return 0;
+  let sum = 0;
+  for (let i = 0; i < next.length; i += 1) {
+    sum += Math.abs(next[i] - prev[i]);
+  }
+  return sum / next.length;
+}
+
 function filterAndDedupeDetections(detections: any[], frameWidth: number, frameHeight: number) {
   const minSidePx = Math.max(26, Math.floor(Math.min(frameWidth, frameHeight) * 0.04));
   const minArea = frameWidth * frameHeight * 0.0024;
@@ -150,6 +169,10 @@ export default function CameraTile({ camera }: { camera: CameraConfig }) {
   const lastPixelRef = useRef<string | null>(null);
   const lastServerLogRef = useRef(0);
   const stablePositiveFramesRef = useRef(0);
+  const lastBestBoxRef = useRef<{ x: number; y: number; width: number; height: number } | null>(null);
+  const lastConfirmedAtRef = useRef(0);
+  const motionLumaRef = useRef<Uint8Array | null>(null);
+  const frameSeqRef = useRef(0);
 
   useEffect(() => {
     let mounted = true;
@@ -214,13 +237,17 @@ export default function CameraTile({ camera }: { camera: CameraConfig }) {
       }
 
       const ssdOptions = new faceapi.SsdMobilenetv1Options({
-        minConfidence: 0.5,
+        minConfidence: 0.52,
         maxResults: 12,
       });
       const tinyOptions = new faceapi.TinyFaceDetectorOptions({
-        inputSize: 736,
-        scoreThreshold: 0.2,
+        inputSize: 608,
+        scoreThreshold: 0.24,
       });
+      const motionCanvas = document.createElement("canvas");
+      motionCanvas.width = 96;
+      motionCanvas.height = 54;
+      const motionCtx = motionCanvas.getContext("2d", { willReadFrequently: true });
 
       const loop = async () => {
         if (!mounted) return;
@@ -266,47 +293,11 @@ export default function CameraTile({ camera }: { camera: CameraConfig }) {
             setDetectStatus("frame read failed");
           }
 
-          // Try multiple detection paths because some RTSP renderers draw into canvas
-          // in a way that one path may fail intermittently.
+          frameSeqRef.current += 1;
           let detections = await faceapi.detectAllFaces(captureCanvas, tinyOptions);
-          if (!detections.length) {
+          // SSD is slower; run it periodically only when tiny sees nothing.
+          if (!detections.length && frameSeqRef.current % 3 === 0) {
             detections = await faceapi.detectAllFaces(captureCanvas, ssdOptions);
-          }
-
-          // Extra fallback for far faces: multiple crops + upscale.
-          if (!detections.length) {
-            const sw = captureCanvas.width;
-            const sh = captureCanvas.height;
-            const zoomCanvas = document.createElement("canvas");
-            zoomCanvas.width = sw;
-            zoomCanvas.height = sh;
-            const zoomCtx = zoomCanvas.getContext("2d");
-            if (zoomCtx) {
-              const crops = [
-                // Center crop
-                { sx: Math.floor(sw * 0.2), sy: Math.floor(sh * 0.2), cw: Math.floor(sw * 0.6), ch: Math.floor(sh * 0.6) },
-                // Left-focused crop
-                { sx: 0, sy: Math.floor(sh * 0.15), cw: Math.floor(sw * 0.65), ch: Math.floor(sh * 0.7) },
-                // Right-focused crop
-                { sx: Math.floor(sw * 0.35), sy: Math.floor(sh * 0.15), cw: Math.floor(sw * 0.65), ch: Math.floor(sh * 0.7) },
-              ];
-              for (const crop of crops) {
-                zoomCtx.clearRect(0, 0, sw, sh);
-                zoomCtx.drawImage(
-                  captureCanvas,
-                  crop.sx,
-                  crop.sy,
-                  crop.cw,
-                  crop.ch,
-                  0,
-                  0,
-                  sw,
-                  sh,
-                );
-                detections = await faceapi.detectAllFaces(zoomCanvas, tinyOptions);
-                if (detections.length) break;
-              }
-            }
           }
           const cleanedDetections = Array.isArray(detections)
             ? filterAndDedupeDetections(detections, captureCanvas.width, captureCanvas.height)
@@ -327,18 +318,56 @@ export default function CameraTile({ camera }: { camera: CameraConfig }) {
             height: overlayCanvas.height,
           });
           faceapi.draw.drawDetections(overlayCanvas, resized);
+          let motionScore = 0;
+          if (motionCtx) {
+            motionCtx.drawImage(captureCanvas, 0, 0, motionCanvas.width, motionCanvas.height);
+            const motionPixels = motionCtx.getImageData(
+              0,
+              0,
+              motionCanvas.width,
+              motionCanvas.height,
+            ).data;
+            const nextLuma = computeLumaBuffer(motionPixels);
+            motionScore = computeMotionScore(motionLumaRef.current, nextLuma);
+            motionLumaRef.current = nextLuma;
+          }
 
-          if (count > 0 && maxScore >= 0.34) {
+          const bestCurrentBox =
+            count > 0
+              ? getDetBox(
+                  cleanedDetections.reduce((best, curr) =>
+                    getDetScore(curr) > getDetScore(best) ? curr : best,
+                  )
+                )
+              : null;
+          const trackStable =
+            bestCurrentBox && lastBestBoxRef.current
+              ? iou(bestCurrentBox, lastBestBoxRef.current) >= 0.12
+              : false;
+          lastBestBoxRef.current = bestCurrentBox;
+
+          if (count > 0 && maxScore >= 0.33 && (trackStable || stablePositiveFramesRef.current === 0)) {
             stablePositiveFramesRef.current += 1;
+          } else if (count > 0 && maxScore >= 0.33) {
+            stablePositiveFramesRef.current = 1;
           } else {
             stablePositiveFramesRef.current = 0;
           }
-          const requiredFrames = maxSide >= 130 && maxScore >= 0.55 ? 2 : 3;
-          const minConfirmScore = maxSide >= 130 ? 0.42 : 0.52;
+
+          const requiredFrames = maxSide >= 115 ? 2 : 3;
+          const minConfirmScore = maxSide >= 115 ? 0.4 : 0.5;
+          const recentConfirmed = Date.now() - lastConfirmedAtRef.current < 1800;
+          const hasMotion = motionScore >= 2.1;
+          const motionGate = hasMotion || recentConfirmed || maxScore >= 0.72;
           const confirmedCount =
-            stablePositiveFramesRef.current >= requiredFrames && maxScore >= minConfirmScore
+            stablePositiveFramesRef.current >= requiredFrames &&
+            maxScore >= minConfirmScore &&
+            motionGate
               ? count
               : 0;
+          if (confirmedCount > 0) {
+            lastConfirmedAtRef.current = Date.now();
+          }
           setFaceCount(confirmedCount);
           setFaceFound(confirmedCount > 0);
           if (count === 0) {
@@ -347,7 +376,7 @@ export default function CameraTile({ camera }: { camera: CameraConfig }) {
             setDetectStatus(
               confirmedCount > 0
                 ? `face detected (${frameInfo})`
-                : `candidate (${frameInfo}, score=${maxScore.toFixed(2)}, ${stablePositiveFramesRef.current}/${requiredFrames})`,
+                : `candidate (${frameInfo}, score=${maxScore.toFixed(2)}, motion=${motionScore.toFixed(1)}, ${stablePositiveFramesRef.current}/${requiredFrames})`,
             );
           }
 
@@ -382,7 +411,7 @@ export default function CameraTile({ camera }: { camera: CameraConfig }) {
 
         timer = window.setTimeout(() => {
           void loop();
-        }, 180);
+        }, 120);
       };
 
       void loop();
