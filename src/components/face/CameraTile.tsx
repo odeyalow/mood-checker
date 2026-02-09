@@ -48,6 +48,74 @@ async function drawSnapshotToCanvas(src: string, canvas: HTMLCanvasElement) {
   }
 }
 
+function getDetBox(det: any) {
+  const box = det?.box || det?.detection?.box;
+  if (!box) return null;
+  return {
+    x: Number(box.x ?? 0),
+    y: Number(box.y ?? 0),
+    width: Number(box.width ?? 0),
+    height: Number(box.height ?? 0),
+  };
+}
+
+function getDetScore(det: any) {
+  const score = det?.score ?? det?.detection?.score;
+  return Number.isFinite(score) ? Number(score) : 0;
+}
+
+function iou(a: { x: number; y: number; width: number; height: number }, b: { x: number; y: number; width: number; height: number }) {
+  const ax2 = a.x + a.width;
+  const ay2 = a.y + a.height;
+  const bx2 = b.x + b.width;
+  const by2 = b.y + b.height;
+  const ix1 = Math.max(a.x, b.x);
+  const iy1 = Math.max(a.y, b.y);
+  const ix2 = Math.min(ax2, bx2);
+  const iy2 = Math.min(ay2, by2);
+  const iw = Math.max(0, ix2 - ix1);
+  const ih = Math.max(0, iy2 - iy1);
+  const inter = iw * ih;
+  if (inter <= 0) return 0;
+  const union = a.width * a.height + b.width * b.height - inter;
+  return union > 0 ? inter / union : 0;
+}
+
+function filterAndDedupeDetections(detections: any[], frameWidth: number, frameHeight: number) {
+  const minSidePx = Math.max(42, Math.floor(Math.min(frameWidth, frameHeight) * 0.06));
+  const minArea = frameWidth * frameHeight * 0.005;
+  const maxArea = frameWidth * frameHeight * 0.5;
+  const minScore = 0.22;
+
+  const filtered = detections.filter((det) => {
+    const box = getDetBox(det);
+    if (!box) return false;
+    const score = getDetScore(det);
+    const area = box.width * box.height;
+    const ratio = box.width / Math.max(1, box.height);
+    const plausibleShape = ratio >= 0.65 && ratio <= 1.55;
+    const plausibleSize =
+      box.width >= minSidePx &&
+      box.height >= minSidePx &&
+      area >= minArea &&
+      area <= maxArea;
+    return score >= minScore && plausibleShape && plausibleSize;
+  });
+
+  filtered.sort((a, b) => getDetScore(b) - getDetScore(a));
+  const deduped: any[] = [];
+  for (const det of filtered) {
+    const box = getDetBox(det);
+    if (!box) continue;
+    const overlaps = deduped.some((kept) => {
+      const keptBox = getDetBox(kept);
+      return keptBox ? iou(box, keptBox) > 0.45 : false;
+    });
+    if (!overlaps) deduped.push(det);
+  }
+  return deduped;
+}
+
 export default function CameraTile({ camera }: { camera: CameraConfig }) {
   const streamRef = useRef<HTMLCanvasElement | null>(null);
   const captureRef = useRef<HTMLCanvasElement | null>(null);
@@ -123,12 +191,12 @@ export default function CameraTile({ camera }: { camera: CameraConfig }) {
       }
 
       const ssdOptions = new faceapi.SsdMobilenetv1Options({
-        minConfidence: 0.2,
-        maxResults: 10,
+        minConfidence: 0.28,
+        maxResults: 25,
       });
       const tinyOptions = new faceapi.TinyFaceDetectorOptions({
         inputSize: 608,
-        scoreThreshold: 0.08,
+        scoreThreshold: 0.14,
       });
 
       const loop = async () => {
@@ -197,7 +265,10 @@ export default function CameraTile({ camera }: { camera: CameraConfig }) {
               detections = await faceapi.detectAllFaces(zoomCanvas, tinyOptions);
             }
           }
-          const count = Array.isArray(detections) ? detections.length : 0;
+          const cleanedDetections = Array.isArray(detections)
+            ? filterAndDedupeDetections(detections, captureCanvas.width, captureCanvas.height)
+            : [];
+          const count = cleanedDetections.length;
           const frameInfo = `${captureCanvas.width}x${captureCanvas.height}`;
 
           const overlayWidth = streamCanvas.width || captureCanvas.width;
@@ -207,7 +278,7 @@ export default function CameraTile({ camera }: { camera: CameraConfig }) {
           const overlayCtx = overlayCanvas.getContext("2d");
           overlayCtx?.clearRect(0, 0, overlayCanvas.width, overlayCanvas.height);
 
-          const resized = faceapi.resizeResults(detections, {
+          const resized = faceapi.resizeResults(cleanedDetections, {
             width: overlayCanvas.width,
             height: overlayCanvas.height,
           });
