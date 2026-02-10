@@ -19,18 +19,24 @@ async function waitForPlayer(timeoutMs = 15000) {
 
 export default function CameraTile({
   camera,
+  labels,
 }: {
   camera: CameraConfig;
+  labels: {
+    loading: string;
+    error: string;
+    recognized: string;
+    noRecognitions: string;
+    emotion: string;
+  };
 }) {
   const streamRef = useRef<HTMLCanvasElement | null>(null);
 
   const [status, setStatus] = useState<"loading" | "ready" | "error">("loading");
-  const [matchedNames, setMatchedNames] = useState<string[]>([]);
-  const [topEmotion, setTopEmotion] = useState<string>("");
+  const [people, setPeople] = useState<{ name: string; emotion?: string }[]>([]);
 
   useEffect(() => {
-    setMatchedNames([]);
-    setTopEmotion("");
+    setPeople([]);
   }, []);
 
   useEffect(() => {
@@ -85,20 +91,30 @@ export default function CameraTile({
             matchDistance?: number;
             emotionSummary?: string;
             topEmotion?: string;
+            people?: { name: string; emotion?: string }[];
           } | null;
         };
 
         const ws = payload.status;
         if (ws) {
-          setMatchedNames(Array.isArray(ws.matchedNames) ? ws.matchedNames : []);
-          setTopEmotion(typeof ws.topEmotion === "string" ? ws.topEmotion : "");
+          if (Array.isArray(ws.people)) {
+            setPeople(
+              ws.people
+                .map((p) => ({
+                  name: String(p?.name ?? "").trim(),
+                  emotion: typeof p?.emotion === "string" ? p.emotion : "",
+                }))
+                .filter((p) => p.name),
+            );
+          } else {
+            const names = Array.isArray(ws.matchedNames) ? ws.matchedNames : [];
+            setPeople(names.map((name) => ({ name: String(name), emotion: "" })));
+          }
         } else {
-          setMatchedNames([]);
-          setTopEmotion("");
+          setPeople([]);
         }
       } catch {
-        setMatchedNames([]);
-        setTopEmotion("");
+        setPeople([]);
       }
 
       timer = window.setTimeout(() => {
@@ -119,7 +135,7 @@ export default function CameraTile({
         <canvas ref={streamRef} className="camera-video" />
         {status !== "ready" ? (
           <div className="camera-status">
-            <VideoCameraOutlined /> {status === "error" ? "Error" : "Loading"}
+            <VideoCameraOutlined /> {status === "error" ? labels.error : labels.loading}
           </div>
         ) : null}
       </div>
@@ -129,19 +145,25 @@ export default function CameraTile({
           <div>
             <Text type="secondary">{camera.location || camera.id}</Text>
           </div>
-          <div>
-            <Text type="secondary">
-              {matchedNames.length ? `Recognized: ${matchedNames.join(", ")}` : "Recognized: -"}
-            </Text>
-          </div>
-          <div>
-            <Text type="secondary">
-              {topEmotion ? `Emotion: ${topEmotion}` : "Emotion: -"}
-            </Text>
-          </div>
+          {people.length ? (
+            <div className="camera-people">
+              {people.map((person) => (
+                <div key={`${person.name}-${person.emotion || "none"}`} className="camera-person">
+                  <Text type="secondary">{person.name}</Text>
+                  <Text type="secondary">
+                    {person.emotion ? person.emotion : labels.emotion}
+                  </Text>
+                </div>
+              ))}
+            </div>
+          ) : (
+            <div className="camera-empty">
+              <Text type="secondary">{labels.noRecognitions}</Text>
+            </div>
+          )}
         </div>
-        <Tag color={matchedNames.length ? "green" : "geekblue"}>
-          {matchedNames.length ? "Recognized" : "RTSP"}
+        <Tag color={people.length ? "green" : "geekblue"}>
+          {people.length ? labels.recognized : "RTSP"}
         </Tag>
       </div>
     </Card>

@@ -254,6 +254,7 @@ function createState(cameraId, src) {
     streak: 0,
     matchedNames: [],
     matchDistance: 0,
+    people: [],
     emotionSummary: "",
     topEmotion: "",
     lastConfirmedAt: 0,
@@ -530,33 +531,39 @@ async function main() {
           cam.lastCandidateLogAt = now;
         }
 
-        const shouldSnapshot = cam.confirmed > 0 && now - cam.lastSnapshotAt >= snapshotCooldownMs;
+        const needMatch = Boolean(matcher) && now - cam.lastMatchAt >= matchIntervalMs;
+        const needEmotion = enableEmotions && now - cam.lastEmotionAt >= emotionIntervalMs;
+        const shouldSnapshot =
+          cam.confirmed > 0 &&
+          (needMatch || needEmotion) &&
+          now - cam.lastSnapshotAt >= snapshotCooldownMs;
+
         if (shouldSnapshot) {
           cam.lastSnapshotAt = now;
-        }
-
-        if (matcher && shouldSnapshot && now - cam.lastMatchAt >= matchIntervalMs) {
-          cam.lastMatchAt = now;
           try {
-            const matchTensor = faceapi.tf.tensor3d(rgb, [h, w, 3], "int32");
-            let descriptorDetections = [];
-            try {
-              descriptorDetections = await faceapi
-                .detectAllFaces(matchTensor, tinyOptions)
-                .withFaceLandmarks(true)
-                .withFaceDescriptors();
+            const snapTensor = faceapi.tf.tensor3d(rgb, [h, w, 3], "int32");
+            let results = [];
+            const runDetect = async (options) => {
+              let task = faceapi.detectAllFaces(snapTensor, options);
+              if (matcher) {
+                task = task.withFaceLandmarks(true).withFaceDescriptors();
+              }
+              if (enableEmotions) {
+                task = task.withFaceExpressions();
+              }
+              return task;
+            };
 
-              if ((!descriptorDetections || !descriptorDetections.length) && ssdLoaded) {
-                descriptorDetections = await faceapi
-                  .detectAllFaces(matchTensor, ssdOptions)
-                  .withFaceLandmarks(true)
-                  .withFaceDescriptors();
+            try {
+              results = await runDetect(tinyOptions);
+              if ((!results || !results.length) && ssdLoaded) {
+                results = await runDetect(ssdOptions);
               }
             } finally {
-              matchTensor.dispose();
+              snapTensor.dispose();
             }
 
-            descriptorDetections = filterAndDedupeDetections(descriptorDetections || [], w, h, {
+            results = filterAndDedupeDetections(results || [], w, h, {
               minSidePxBase: filterMinSidePx,
               minSideRatio: filterMinSideRatio,
               minAreaRatio: filterMinAreaRatio,
@@ -566,93 +573,81 @@ async function main() {
               maxAspect: filterMaxAspect,
             });
 
-            const labelToDistance = new Map();
-            for (const det of descriptorDetections) {
-              const best = matcher.findBestMatch(det.descriptor);
-              if (!best || best.label === "unknown") continue;
-              const prev = labelToDistance.get(best.label);
-              if (prev === undefined || best.distance < prev) {
-                labelToDistance.set(best.label, best.distance);
-              }
-            }
-
-            const sorted = [...labelToDistance.entries()].sort((a, b) => a[1] - b[1]);
-            cam.matchedNames = sorted.map(([name]) => name);
-            cam.matchDistance = sorted.length ? Number(sorted[0][1]) : 0;
-
-            if (cam.matchedNames.length && now - cam.lastMatchLogAt >= matchLogCooldownMs) {
-              log(
-                `[${cam.cameraId}] matched names=${cam.matchedNames.join(",")} ` +
-                  `distance=${cam.matchDistance.toFixed(3)}`,
-              );
-              cam.lastMatchLogAt = now;
-            }
-          } catch (err) {
-            cam.matchedNames = [];
-            cam.matchDistance = 0;
-            if (now - cam.lastErrLogAt >= 2000) {
-              log(`[${cam.cameraId}] match error: ${String(err)}`);
-              cam.lastErrLogAt = now;
-            }
-          }
-        }
-
-        if (enableEmotions && shouldSnapshot && now - cam.lastEmotionAt >= emotionIntervalMs) {
-          cam.lastEmotionAt = now;
-          try {
-            const emotionTensor = faceapi.tf.tensor3d(rgb, [h, w, 3], "int32");
-            let results = [];
-            try {
-              results = await faceapi.detectAllFaces(emotionTensor, tinyOptions).withFaceExpressions();
-              if ((!results || !results.length) && ssdLoaded) {
-                results = await faceapi
-                  .detectAllFaces(emotionTensor, ssdOptions)
-                  .withFaceExpressions();
-              }
-            } finally {
-              emotionTensor.dispose();
-            }
-
-            if (results && results.length) {
-              const best = results.reduce((a, b) =>
-                (a?.detection?.score ?? 0) >= (b?.detection?.score ?? 0) ? a : b,
-              );
-              const expressions = best?.expressions ?? {};
-              const keys = ["happy", "sad", "angry", "fearful", "disgusted", "surprised"];
-              const parts = keys.map((k) => {
-                const v = Number(expressions[k] ?? 0);
-                return `${k} ${(v * 100).toFixed(0)}%`;
-              });
-              cam.emotionSummary = parts.join(", ");
-
-              let topKey = "";
-              let topVal = -1;
-              for (const k of keys) {
-                const v = Number(expressions[k] ?? 0);
-                if (v > topVal) {
-                  topVal = v;
-                  topKey = k;
+            const keys = ["happy", "sad", "angry", "fearful", "disgusted", "surprised"];
+            const people = [];
+            let bestDistance = 0;
+            for (const det of results) {
+              let name = "unknown";
+              let distance = 0;
+              if (matcher && det?.descriptor) {
+                const best = matcher.findBestMatch(det.descriptor);
+                if (best && best.label !== "unknown") {
+                  name = best.label;
+                  distance = Number(best.distance) || 0;
+                  if (!bestDistance || distance < bestDistance) bestDistance = distance;
                 }
               }
-              cam.topEmotion = topKey ? `${topKey} ${(topVal * 100).toFixed(0)}%` : "";
 
+              let emotionLabel = "";
+              if (enableEmotions && det?.expressions) {
+                let topKey = "";
+                let topVal = -1;
+                for (const k of keys) {
+                  const v = Number(det.expressions[k] ?? 0);
+                  if (v > topVal) {
+                    topVal = v;
+                    topKey = k;
+                  }
+                }
+                emotionLabel = topKey ? `${topKey} ${(topVal * 100).toFixed(0)}%` : "";
+              }
+
+              if (name !== "unknown") {
+                people.push({ name, emotion: emotionLabel });
+              }
+            }
+
+            cam.people = people;
+            cam.matchedNames = people.map((p) => p.name);
+            cam.matchDistance = people.length ? Number(bestDistance || 0) : 0;
+
+            if (needMatch) {
+              cam.lastMatchAt = now;
+              if (cam.matchedNames.length && now - cam.lastMatchLogAt >= matchLogCooldownMs) {
+                log(
+                  `[${cam.cameraId}] matched names=${cam.matchedNames.join(",")} ` +
+                    `distance=${cam.matchDistance.toFixed(3)}`,
+                );
+                cam.lastMatchLogAt = now;
+              }
+            }
+
+            if (needEmotion) {
+              cam.lastEmotionAt = now;
+              cam.emotionSummary = people
+                .map((p) => `${p.name}:${p.emotion || "-"}`)
+                .join(", ");
+              cam.topEmotion = people.length ? people[0].emotion || "" : "";
               if (cam.topEmotion && now - cam.lastEmotionLogAt >= 1500) {
                 log(`[${cam.cameraId}] emotion top=${cam.topEmotion}`);
                 cam.lastEmotionLogAt = now;
               }
-            } else {
-              cam.emotionSummary = "";
-              cam.topEmotion = "";
             }
           } catch (err) {
+            cam.matchedNames = [];
+            cam.matchDistance = 0;
+            cam.people = [];
             cam.emotionSummary = "";
             cam.topEmotion = "";
             if (now - cam.lastErrLogAt >= 2000) {
-              log(`[${cam.cameraId}] emotion error: ${String(err)}`);
+              log(`[${cam.cameraId}] snapshot error: ${String(err)}`);
               cam.lastErrLogAt = now;
             }
           }
-        } else if (!enableEmotions || cam.candidate === 0) {
+        } else if ((!enableEmotions && !matcher) || cam.candidate === 0) {
+          cam.matchedNames = [];
+          cam.matchDistance = 0;
+          cam.people = [];
           cam.emotionSummary = "";
           cam.topEmotion = "";
         }
@@ -700,6 +695,7 @@ async function main() {
           requiredFrames: confirmFrames,
           matchedNames: cam.matchedNames,
           matchDistance: Number(cam.matchDistance.toFixed(3)),
+          people: cam.people,
           emotionSummary: cam.emotionSummary,
           topEmotion: cam.topEmotion,
         };

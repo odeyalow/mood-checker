@@ -12,6 +12,7 @@ type WorkerStatusCamera = {
   matchDistance?: number;
   emotionSummary?: string;
   topEmotion?: string;
+  people?: { name: string; emotion?: string }[];
 };
 
 type WorkerStatusPayload = {

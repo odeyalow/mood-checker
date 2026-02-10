@@ -85,6 +85,10 @@ body {
   background: #ffffff;
 }
 
+.camera-footer {
+  padding-top: 10px;
+}
+
 .camera-media {
   position: relative;
   width: 100%;
