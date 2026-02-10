@@ -254,13 +254,17 @@ function createState(cameraId, src) {
     streak: 0,
     matchedNames: [],
     matchDistance: 0,
+    emotionSummary: "",
+    topEmotion: "",
     lastConfirmedAt: 0,
     lastMatchAt: 0,
+    lastEmotionAt: 0,
     lastBestBox: null,
     prevLuma: null,
     lastCandidateLogAt: 0,
     lastConfirmLogAt: 0,
     lastMatchLogAt: 0,
+    lastEmotionLogAt: 0,
     lastErrLogAt: 0,
   };
 }
@@ -306,6 +310,8 @@ async function main() {
   const matchThreshold = envFloat("WORKER_MATCH_THRESHOLD", 0.52);
   const matchIntervalMs = Math.max(150, envInt("WORKER_MATCH_INTERVAL_MS", 250));
   const matchLogCooldownMs = Math.max(300, envInt("WORKER_MATCH_LOG_COOLDOWN_MS", 1000));
+  const enableEmotions = envBool("WORKER_ENABLE_EMOTIONS", true);
+  const emotionIntervalMs = Math.max(150, envInt("WORKER_EMOTION_INTERVAL_MS", 350));
   const knownDir = process.env.WORKER_KNOWN_DIR || path.join(rootDir, "public", "known");
   const knownListFile = process.env.WORKER_KNOWN_LIST_FILE || path.join(knownDir, "images.json");
 
@@ -394,6 +400,12 @@ async function main() {
     }
   } else {
     log("matching=off reason=env_disabled");
+  }
+
+  if (enableEmotions) {
+    await faceapi.nets.faceExpressionNet.loadFromDisk(modelDir);
+  } else {
+    log("emotions=off reason=env_disabled");
   }
 
   log(
@@ -578,6 +590,67 @@ async function main() {
             }
           }
         }
+
+        const canEmotion = cam.candidate > 0 && cam.score >= 0.12;
+        if (enableEmotions && canEmotion && now - cam.lastEmotionAt >= emotionIntervalMs) {
+          cam.lastEmotionAt = now;
+          try {
+            const emotionTensor = faceapi.tf.tensor3d(rgb, [h, w, 3], "int32");
+            let results = [];
+            try {
+              results = await faceapi.detectAllFaces(emotionTensor, tinyOptions).withFaceExpressions();
+              if ((!results || !results.length) && ssdLoaded) {
+                results = await faceapi
+                  .detectAllFaces(emotionTensor, ssdOptions)
+                  .withFaceExpressions();
+              }
+            } finally {
+              emotionTensor.dispose();
+            }
+
+            if (results && results.length) {
+              const best = results.reduce((a, b) =>
+                (a?.detection?.score ?? 0) >= (b?.detection?.score ?? 0) ? a : b,
+              );
+              const expressions = best?.expressions ?? {};
+              const keys = ["happy", "sad", "angry", "fearful", "disgusted", "surprised"];
+              const parts = keys.map((k) => {
+                const v = Number(expressions[k] ?? 0);
+                return `${k} ${(v * 100).toFixed(0)}%`;
+              });
+              cam.emotionSummary = parts.join(", ");
+
+              let topKey = "";
+              let topVal = -1;
+              for (const k of keys) {
+                const v = Number(expressions[k] ?? 0);
+                if (v > topVal) {
+                  topVal = v;
+                  topKey = k;
+                }
+              }
+              cam.topEmotion = topKey ? `${topKey} ${(topVal * 100).toFixed(0)}%` : "";
+
+              if (cam.topEmotion && now - cam.lastEmotionLogAt >= 1500) {
+                log(`[${cam.cameraId}] emotion top=${cam.topEmotion}`);
+                cam.lastEmotionLogAt = now;
+              }
+            } else {
+              cam.emotionSummary = "";
+              cam.topEmotion = "";
+            }
+          } catch (err) {
+            cam.emotionSummary = "";
+            cam.topEmotion = "";
+            if (now - cam.lastErrLogAt >= 2000) {
+              log(`[${cam.cameraId}] emotion error: ${String(err)}`);
+              cam.lastErrLogAt = now;
+            }
+          }
+        } else if (!enableEmotions || cam.candidate === 0) {
+          cam.emotionSummary = "";
+          cam.topEmotion = "";
+        }
       } catch (err) {
         cam.candidate = 0;
         cam.confirmed = 0;
@@ -585,6 +658,8 @@ async function main() {
         cam.streak = 0;
         cam.matchedNames = [];
         cam.matchDistance = 0;
+        cam.emotionSummary = "";
+        cam.topEmotion = "";
         if (now - cam.lastErrLogAt >= 2000) {
           log(`[${cam.cameraId}] frame error: ${String(err)}`);
           cam.lastErrLogAt = now;
@@ -608,7 +683,8 @@ async function main() {
         log(
           `[${cam.cameraId}] status candidate=${cam.candidate} confirmed=${cam.confirmed} ` +
             `score=${cam.score.toFixed(3)} motion=${cam.motion.toFixed(2)} ` +
-            `streak=${cam.streak}/${confirmFrames} names=${cam.matchedNames.join("|") || "-"}`,
+            `streak=${cam.streak}/${confirmFrames} names=${cam.matchedNames.join("|") || "-"} ` +
+            `emotion=${cam.topEmotion || "-"}`,
         );
         payload.cameras[cam.cameraId] = {
           candidate: cam.candidate,
@@ -619,6 +695,8 @@ async function main() {
           requiredFrames: confirmFrames,
           matchedNames: cam.matchedNames,
           matchDistance: Number(cam.matchDistance.toFixed(3)),
+          emotionSummary: cam.emotionSummary,
+          topEmotion: cam.topEmotion,
         };
       }
       try {

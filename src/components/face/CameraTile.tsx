@@ -263,6 +263,7 @@ export default function CameraTile({
   const [confirmedFaceCount, setConfirmedFaceCount] = useState(0);
   const [matchedNames, setMatchedNames] = useState<string[]>([]);
   const [emotionSummary, setEmotionSummary] = useState<string>("");
+  const [topEmotion, setTopEmotion] = useState<string>("");
   const [detectStatus, setDetectStatus] = useState("detection idle");
   const lastPixelRef = useRef<string | null>(null);
   const lastServerLogRef = useRef(0);
@@ -291,6 +292,7 @@ export default function CameraTile({
     setConfirmedFaceCount(0);
     setMatchedNames([]);
     setEmotionSummary("");
+    setTopEmotion("");
     setDetectStatus(detectionMode === "worker" ? "worker waiting status" : "detection idle");
   }, [detectionMode]);
 
@@ -350,6 +352,8 @@ export default function CameraTile({
             requiredFrames?: number;
             matchedNames?: string[];
             matchDistance?: number;
+            emotionSummary?: string;
+            topEmotion?: string;
           } | null;
         };
 
@@ -370,6 +374,8 @@ export default function CameraTile({
           setConfirmedFaceCount(confirmed);
           setFaceFound(confirmed > 0);
           setMatchedNames(Array.isArray(ws.matchedNames) ? ws.matchedNames : []);
+          setEmotionSummary(typeof ws.emotionSummary === "string" ? ws.emotionSummary : "");
+          setTopEmotion(typeof ws.topEmotion === "string" ? ws.topEmotion : "");
           setDetectStatus(
             `worker candidate=${candidate} confirmed=${confirmed} score=${score.toFixed(2)} motion=${motion.toFixed(1)} streak=${streak}/${required}` +
               (ageSec !== null ? ` age=${ageSec.toFixed(1)}s` : ""),
@@ -379,10 +385,14 @@ export default function CameraTile({
           setConfirmedFaceCount(0);
           setFaceFound(false);
           setMatchedNames([]);
+          setEmotionSummary("");
+          setTopEmotion("");
           setDetectStatus("worker waiting status");
         }
       } catch {
         setMatchedNames([]);
+        setEmotionSummary("");
+        setTopEmotion("");
         setDetectStatus("worker status unavailable");
       }
 
@@ -682,11 +692,26 @@ export default function CameraTile({
                       return `${k} ${(v * 100).toFixed(0)}%`;
                     });
                     if (mounted) setEmotionSummary(parts.join(", "));
+
+                    let topKey = "";
+                    let topVal = -1;
+                    for (const k of keys) {
+                      const v = Number(expressions[k] ?? 0);
+                      if (v > topVal) {
+                        topVal = v;
+                        topKey = k;
+                      }
+                    }
+                    if (mounted) {
+                      setTopEmotion(topKey ? `${topKey} ${(topVal * 100).toFixed(0)}%` : "");
+                    }
                   } else if (mounted) {
                     setEmotionSummary("");
+                    setTopEmotion("");
                   }
                 } catch (error) {
                   if (mounted) setEmotionSummary("");
+                  if (mounted) setTopEmotion("");
                   console.warn("[camera] emotion error:", error);
                 } finally {
                   lastEmotionAtRef.current = Date.now();
@@ -696,6 +721,7 @@ export default function CameraTile({
             }
           } else if (count === 0) {
             setEmotionSummary((prev) => (prev ? "" : prev));
+            setTopEmotion((prev) => (prev ? "" : prev));
           }
 
           setFaceCount(count);
@@ -808,7 +834,18 @@ export default function CameraTile({
                   : "Emotions: disabled"}
               </Text>
             </div>
-          ) : null}
+          ) : (
+            <div>
+              <Text type="secondary">
+                {emotionSummary ? `Emotions: ${emotionSummary}` : "Emotions: -"}
+              </Text>
+            </div>
+          )}
+          <div>
+            <Text type="secondary">
+              {topEmotion ? `Top emotion: ${topEmotion}` : "Top emotion: -"}
+            </Text>
+          </div>
         </div>
         <Tag color={faceFound ? "green" : "geekblue"}>{faceFound ? "Face Found" : "RTSP"}</Tag>
       </div>

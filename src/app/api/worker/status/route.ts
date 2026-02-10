@@ -10,6 +10,8 @@ type WorkerStatusCamera = {
   requiredFrames: number;
   matchedNames?: string[];
   matchDistance?: number;
+  emotionSummary?: string;
+  topEmotion?: string;
 };
 
 type WorkerStatusPayload = {
