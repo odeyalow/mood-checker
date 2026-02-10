@@ -672,7 +672,7 @@ export default function CameraTile({
                     .withFaceExpressions();
                   if (results && results.length) {
                     // Pick highest detection score face.
-                    const best = results.reduce((a, b) =>
+                    const best = results.reduce((a: any, b: any) =>
                       (a?.detection?.score ?? 0) >= (b?.detection?.score ?? 0) ? a : b,
                     );
                     const expressions = best?.expressions ?? {};
