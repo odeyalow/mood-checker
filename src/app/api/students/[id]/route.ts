@@ -7,9 +7,10 @@ export const revalidate = 0;
 
 export async function GET(
   _request: Request,
-  { params }: { params: { id: string } },
+  { params }: { params: Promise<{ id: string }> },
 ) {
-  const studentId = decodeURIComponent(params.id || "").trim();
+  const { id } = await params;
+  const studentId = decodeURIComponent(id || "").trim();
   if (!studentId) {
     return NextResponse.json({ error: "not_found" }, { status: 404 });
   }
