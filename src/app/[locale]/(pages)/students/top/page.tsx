@@ -151,7 +151,7 @@ export default function TopNegativePage({
                 title: t.student,
                 dataIndex: "name",
                 render: (_value: string, row: LeaderboardItem) => (
-                  <Link href={`/${safeLocale}/students/${row.id}`}>{row.name}</Link>
+                  <Link href={`/${safeLocale}/students/${encodeURIComponent(row.id)}`}>{row.name}</Link>
                 ),
               },
               {

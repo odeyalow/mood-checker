@@ -205,7 +205,7 @@ export default function MainLayout({
               placeholder={t.searchPlaceholder}
               filterOption={false}
               onSearch={handleStudentSearch}
-              onSelect={(id) => router.push(`/${safeLocale}/students/${id}`)}
+              onSelect={(id) => router.push(`/${safeLocale}/students/${encodeURIComponent(id)}`)}
               options={studentOptions}
               loading={searchLoading}
               style={{ width: 240 }}

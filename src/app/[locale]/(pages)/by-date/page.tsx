@@ -226,7 +226,7 @@ export default function ByDatePage({
                 title: t.student,
                 dataIndex: "name",
                 render: (_value: string, row: DateStatsResponse["students"][number]) => (
-                  <Link href={`/${safeLocale}/students/${row.id}`}>{row.name}</Link>
+                  <Link href={`/${safeLocale}/students/${encodeURIComponent(row.id)}`}>{row.name}</Link>
                 ),
               },
               {

@@ -64,3 +64,26 @@ export function bucketStartUtc(date: Date, minutes = 60) {
 export function toIso(date: Date) {
   return date.toISOString();
 }
+
+export function hourStartUtc(date: Date) {
+  const d = new Date(date);
+  d.setUTCMinutes(0, 0, 0);
+  return d;
+}
+
+export function buildHourlyBuckets(from: Date, to: Date, maxBuckets = 24 * 14) {
+  const start = hourStartUtc(from);
+  const end = hourStartUtc(to);
+  const out: string[] = [];
+  const cursor = new Date(start);
+
+  while (cursor <= end && out.length < maxBuckets) {
+    out.push(cursor.toISOString());
+    cursor.setUTCHours(cursor.getUTCHours() + 1);
+  }
+
+  if (!out.length) {
+    out.push(hourStartUtc(new Date()).toISOString());
+  }
+  return out;
+}

@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
-import { addMoodCount, bucketStartUtc, toIso } from "@/lib/stats";
+import { addMoodCount, bucketStartUtc, buildHourlyBuckets, toIso } from "@/lib/stats";
 
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
@@ -33,15 +33,26 @@ export async function GET() {
     entry.students.add(item.name);
   }
 
-  const points = [...buckets.values()]
-    .sort((a, b) => (a.bucketStart < b.bucketStart ? -1 : 1))
-    .map((bucket) => ({
+  const keys = buildHourlyBuckets(since24h, now);
+  const points = keys.map((key) => {
+    const bucket = buckets.get(key);
+    if (!bucket) {
+      return {
+        bucketStart: key,
+        totalStudents: 0,
+        positiveCount: 0,
+        neutralCount: 0,
+        negativeCount: 0,
+      };
+    }
+    return {
       bucketStart: bucket.bucketStart,
       totalStudents: bucket.students.size,
       positiveCount: bucket.positive,
       neutralCount: bucket.neutral,
       negativeCount: bucket.negative,
-    }));
+    };
+  });
 
   const latestSnapshot = await prisma.emotionSnapshot.findFirst({
     orderBy: { bucketStart: "desc" },

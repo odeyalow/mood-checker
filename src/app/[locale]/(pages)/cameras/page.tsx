@@ -43,7 +43,7 @@ export default function CamerasPage({
   const t = TEXT[safeLocale];
 
   return (
-    <MainLayout title={t.title} locale={locale}>
+    <MainLayout title={t.title} locale={safeLocale}>
       <FaceScripts includeFaceApi={false} />
       <Card className="soft-card">
         <Space orientation="vertical" size={12} style={{ width: "100%" }}>

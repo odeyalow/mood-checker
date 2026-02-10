@@ -309,6 +309,21 @@ export default function StudentPage({
                 <Text type="secondary">{data.stats24h.ruleText}</Text>
               </Space>
             </Card>
+
+            <Card title={t.recentRecognitions} style={{ marginTop: 16 }} className="soft-card">
+              <List
+                dataSource={data.recent}
+                locale={{ emptyText: t.noData }}
+                renderItem={(item) => (
+                  <List.Item>
+                    <Space>
+                      <Text strong>{formatDateTime(item.detectedAt, safeLocale)}</Text>
+                      <Tag color={moodColor(item.mood)}>{item.mood}</Tag>
+                    </Space>
+                  </List.Item>
+                )}
+              />
+            </Card>
           </Col>
 
           <Col xs={24} lg={16}>
@@ -353,21 +368,6 @@ export default function StudentPage({
 
             <Card title={t.dynamics24h} style={{ marginTop: 16 }} className="soft-card">
               <EmotionTimelineChart points={data.dynamicsPoints} locale={safeLocale} />
-            </Card>
-
-            <Card title={t.recentRecognitions} style={{ marginTop: 16 }} className="soft-card">
-              <List
-                dataSource={data.recent}
-                locale={{ emptyText: t.noData }}
-                renderItem={(item) => (
-                  <List.Item>
-                    <Space>
-                      <Text strong>{formatDateTime(item.detectedAt, safeLocale)}</Text>
-                      <Tag color={moodColor(item.mood)}>{item.mood}</Tag>
-                    </Space>
-                  </List.Item>
-                )}
-              />
             </Card>
 
             <Card title={t.statsByDate} style={{ marginTop: 16 }} className="soft-card">
@@ -425,20 +425,6 @@ export default function StudentPage({
                 </Row>
 
                 <EmotionTimelineChart points={dateStats?.points ?? []} locale={safeLocale} />
-
-                <List
-                  header={t.recentInRange}
-                  dataSource={dateStats?.recent ?? []}
-                  locale={{ emptyText: t.noData }}
-                  renderItem={(item) => (
-                    <List.Item>
-                      <Space>
-                        <Text strong>{formatDateTime(item.detectedAt, safeLocale)}</Text>
-                        <Tag color={moodColor(item.mood)}>{item.mood}</Tag>
-                      </Space>
-                    </List.Item>
-                  )}
-                />
               </Space>
             </Card>
           </Col>

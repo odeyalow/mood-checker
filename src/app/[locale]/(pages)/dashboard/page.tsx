@@ -81,6 +81,7 @@ type EmotionPoint = {
   negativeCount: number;
 };
 const DASHBOARD_POLL_INTERVAL_MS = 10_000;
+const DASHBOARD_RECENT_LIMIT = 13;
 
 function formatDetectedAt(value: string, locale: AppLocale) {
   const date = new Date(value);
@@ -125,7 +126,7 @@ export default function DashboardPage({
     async function loadDashboardData() {
       try {
         const [recentResponse, statsResponse, dynamicsResponse] = await Promise.all([
-          fetch("/api/recognitions?limit=3", { cache: "no-store" }),
+          fetch(`/api/recognitions?limit=${DASHBOARD_RECENT_LIMIT}`, { cache: "no-store" }),
           fetch("/api/dashboard-stats", { cache: "no-store" }),
           fetch("/api/emotion-dynamics", { cache: "no-store" }),
         ]);
@@ -172,19 +173,31 @@ export default function DashboardPage({
       <Row gutter={[16, 16]}>
         <Col xs={24} lg={16}>
           <Row gutter={[16, 16]}>
-            <Col xs={24} md={12} lg={6}>
-              <Card className="soft-card">
+            <Col xs={24} md={12} lg={6} style={{ display: "flex" }}>
+              <Card
+                className="soft-card"
+                style={{ width: "100%", height: "100%" }}
+                styles={{ body: { display: "flex", flexDirection: "column", gap: 8, height: "100%" } }}
+              >
                 <Statistic title={t.activeCameras} value={stats?.connectedCameras ?? 0} />
               </Card>
             </Col>
-            <Col xs={24} md={12} lg={6}>
-              <Card className="soft-card">
+            <Col xs={24} md={12} lg={6} style={{ display: "flex" }}>
+              <Card
+                className="soft-card"
+                style={{ width: "100%", height: "100%" }}
+                styles={{ body: { display: "flex", flexDirection: "column", gap: 8, height: "100%" } }}
+              >
                 <Statistic title={t.recognitions} value={stats?.recognitionsLast24h ?? 0} />
                 <Text type="secondary">{t.in24h}</Text>
               </Card>
             </Col>
-            <Col xs={24} md={12} lg={6}>
-              <Card className="soft-card">
+            <Col xs={24} md={12} lg={6} style={{ display: "flex" }}>
+              <Card
+                className="soft-card"
+                style={{ width: "100%", height: "100%" }}
+                styles={{ body: { display: "flex", flexDirection: "column", gap: 8, height: "100%" } }}
+              >
                 <Statistic
                   title={t.negative}
                   value={stats?.negativePercent ?? 0}
@@ -194,8 +207,12 @@ export default function DashboardPage({
                 <Text type="secondary">{deltaText(stats?.negativeDeltaVsPrevDay ?? 0, safeLocale)}</Text>
               </Card>
             </Col>
-            <Col xs={24} md={12} lg={6}>
-              <Card className="soft-card">
+            <Col xs={24} md={12} lg={6} style={{ display: "flex" }}>
+              <Card
+                className="soft-card"
+                style={{ width: "100%", height: "100%" }}
+                styles={{ body: { display: "flex", flexDirection: "column", gap: 8, height: "100%" } }}
+              >
                 <Statistic title={t.riskZone} value={stats?.riskZoneCount ?? 0} />
                 <Text type="secondary">{t.in24h}</Text>
               </Card>

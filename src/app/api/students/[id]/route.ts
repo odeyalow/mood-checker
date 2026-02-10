@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
-import { addMoodCount, bucketStartUtc, computeRiskStats } from "@/lib/stats";
+import { addMoodCount, bucketStartUtc, buildHourlyBuckets, computeRiskStats } from "@/lib/stats";
 
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
@@ -45,9 +45,18 @@ export async function GET(
     dynamicsPointsMap.set(key, entry);
   }
 
-  const dynamicsPoints = [...dynamicsPointsMap.values()].sort((a, b) =>
-    a.bucketStart < b.bucketStart ? -1 : 1,
-  );
+  const dynamicsPoints = buildHourlyBuckets(since24h, now).map((bucketStart) => {
+    const point = dynamicsPointsMap.get(bucketStart);
+    if (!point) {
+      return {
+        bucketStart,
+        positive: 0,
+        neutral: 0,
+        negative: 0,
+      };
+    }
+    return point;
+  });
 
   return NextResponse.json({
     student: {
