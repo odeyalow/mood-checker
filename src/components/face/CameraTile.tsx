@@ -10,6 +10,11 @@ const DEFAULT_DETECTION_MODE: "browser" | "worker" =
   process.env.NEXT_PUBLIC_DETECTION_MODE === "worker" ? "worker" : "browser";
 const BROWSER_USE_SSD_FALLBACK = process.env.NEXT_PUBLIC_BROWSER_USE_SSD_FALLBACK === "true";
 const BROWSER_ENABLE_MATCHING = process.env.NEXT_PUBLIC_BROWSER_ENABLE_MATCHING !== "false";
+const BROWSER_ENABLE_EMOTIONS = process.env.NEXT_PUBLIC_BROWSER_ENABLE_EMOTIONS !== "false";
+const BROWSER_EMOTION_INTERVAL_MS = (() => {
+  const v = Number(process.env.NEXT_PUBLIC_BROWSER_EMOTION_INTERVAL_MS ?? "300");
+  return Number.isFinite(v) ? v : 300;
+})();
 const BROWSER_MATCH_THRESHOLD = (() => {
   const v = Number(process.env.NEXT_PUBLIC_BROWSER_MATCH_THRESHOLD ?? "0.52");
   return Number.isFinite(v) ? v : 0.52;
@@ -257,6 +262,7 @@ export default function CameraTile({
   const [faceCount, setFaceCount] = useState(0);
   const [confirmedFaceCount, setConfirmedFaceCount] = useState(0);
   const [matchedNames, setMatchedNames] = useState<string[]>([]);
+  const [emotionSummary, setEmotionSummary] = useState<string>("");
   const [detectStatus, setDetectStatus] = useState("detection idle");
   const lastPixelRef = useRef<string | null>(null);
   const lastServerLogRef = useRef(0);
@@ -268,6 +274,8 @@ export default function CameraTile({
   const matcherRef = useRef<KnownMatcher | null>(null);
   const matchInFlightRef = useRef(false);
   const lastMatchAtRef = useRef(0);
+  const emotionInFlightRef = useRef(false);
+  const lastEmotionAtRef = useRef(0);
 
   useEffect(() => {
     const overlay = overlayRef.current;
@@ -282,6 +290,7 @@ export default function CameraTile({
     setFaceCount(0);
     setConfirmedFaceCount(0);
     setMatchedNames([]);
+    setEmotionSummary("");
     setDetectStatus(detectionMode === "worker" ? "worker waiting status" : "detection idle");
   }, [detectionMode]);
 
@@ -417,6 +426,9 @@ export default function CameraTile({
         if (BROWSER_ENABLE_MATCHING) {
           modelLoads.push(faceapi.nets.faceLandmark68TinyNet.loadFromUri("/models"));
           modelLoads.push(faceapi.nets.faceRecognitionNet.loadFromUri("/models"));
+        }
+        if (BROWSER_ENABLE_EMOTIONS) {
+          modelLoads.push(faceapi.nets.faceExpressionNet.loadFromUri("/models"));
         }
         await Promise.all(modelLoads);
         setDetectStatus("detection active");
@@ -636,6 +648,56 @@ export default function CameraTile({
             setMatchedNames((prev) => (prev.length ? [] : prev));
           }
 
+          if (
+            BROWSER_ENABLE_EMOTIONS &&
+            count > 0 &&
+            !emotionInFlightRef.current &&
+            nowMs - lastEmotionAtRef.current >= BROWSER_EMOTION_INTERVAL_MS
+          ) {
+            emotionInFlightRef.current = true;
+            const emotionCanvas = document.createElement("canvas");
+            emotionCanvas.width = captureCanvas.width;
+            emotionCanvas.height = captureCanvas.height;
+            const emotionCtx = emotionCanvas.getContext("2d");
+            if (!emotionCtx) {
+              emotionInFlightRef.current = false;
+              lastEmotionAtRef.current = Date.now();
+            } else {
+              emotionCtx.drawImage(captureCanvas, 0, 0, emotionCanvas.width, emotionCanvas.height);
+
+              void (async () => {
+                try {
+                  const results = await faceapi
+                    .detectAllFaces(emotionCanvas, tinyOptions)
+                    .withFaceExpressions();
+                  if (results && results.length) {
+                    // Pick highest detection score face.
+                    const best = results.reduce((a, b) =>
+                      (a?.detection?.score ?? 0) >= (b?.detection?.score ?? 0) ? a : b,
+                    );
+                    const expressions = best?.expressions ?? {};
+                    const keys = ["happy", "sad", "angry", "fearful", "disgusted", "surprised"];
+                    const parts = keys.map((k) => {
+                      const v = Number(expressions[k] ?? 0);
+                      return `${k} ${(v * 100).toFixed(0)}%`;
+                    });
+                    if (mounted) setEmotionSummary(parts.join(", "));
+                  } else if (mounted) {
+                    setEmotionSummary("");
+                  }
+                } catch (error) {
+                  if (mounted) setEmotionSummary("");
+                  console.warn("[camera] emotion error:", error);
+                } finally {
+                  lastEmotionAtRef.current = Date.now();
+                  emotionInFlightRef.current = false;
+                }
+              })();
+            }
+          } else if (count === 0) {
+            setEmotionSummary((prev) => (prev ? "" : prev));
+          }
+
           setFaceCount(count);
           setConfirmedFaceCount(confirmedCount);
           setFaceFound(confirmedCount > 0);
@@ -736,6 +798,17 @@ export default function CameraTile({
                   : "In frame: unknown"}
             </Text>
           </div>
+          {detectionMode === "browser" ? (
+            <div>
+              <Text type="secondary">
+                {BROWSER_ENABLE_EMOTIONS
+                  ? emotionSummary
+                    ? `Emotions: ${emotionSummary}`
+                    : "Emotions: -"
+                  : "Emotions: disabled"}
+              </Text>
+            </div>
+          ) : null}
         </div>
         <Tag color={faceFound ? "green" : "geekblue"}>{faceFound ? "Face Found" : "RTSP"}</Tag>
       </div>
