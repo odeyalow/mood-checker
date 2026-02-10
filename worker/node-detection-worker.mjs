@@ -268,6 +268,7 @@ function createState(cameraId, src) {
     lastMatchLogAt: 0,
     lastEmotionLogAt: 0,
     lastErrLogAt: 0,
+    lastDbSentAt: new Map(),
   };
 }
 
@@ -315,6 +316,8 @@ async function main() {
   const enableEmotions = envBool("WORKER_ENABLE_EMOTIONS", true);
   const emotionIntervalMs = Math.max(150, envInt("WORKER_EMOTION_INTERVAL_MS", 350));
   const snapshotCooldownMs = Math.max(300, envInt("WORKER_SNAPSHOT_COOLDOWN_MS", 1200));
+  const dbEndpoint = (process.env.WORKER_DB_ENDPOINT || "http://127.0.0.1:3000/api/recognitions").trim();
+  const dbCooldownMs = Math.max(1000, envInt("WORKER_DB_COOLDOWN_MS", 4000));
   const knownDir = process.env.WORKER_KNOWN_DIR || path.join(rootDir, "public", "known");
   const knownListFile = process.env.WORKER_KNOWN_LIST_FILE || path.join(knownDir, "images.json");
 
@@ -610,6 +613,33 @@ async function main() {
             cam.people = people;
             cam.matchedNames = people.map((p) => p.name);
             cam.matchDistance = people.length ? Number(bestDistance || 0) : 0;
+
+            if (enableMatching && enableEmotions && people.length) {
+              for (const person of people) {
+                const moodLabel = String(person.emotion || "").split(" ")[0];
+                if (!moodLabel) continue;
+                const lastSent = cam.lastDbSentAt.get(person.name) ?? 0;
+                if (now - lastSent < dbCooldownMs) continue;
+                cam.lastDbSentAt.set(person.name, now);
+                try {
+                  await fetch(dbEndpoint, {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({
+                      name: person.name,
+                      mood: moodLabel,
+                      detectedAt: new Date().toISOString(),
+                      cameraId: cam.cameraId,
+                    }),
+                  });
+                } catch (err) {
+                  if (now - cam.lastErrLogAt >= 2000) {
+                    log(`[${cam.cameraId}] db send error: ${String(err)}`);
+                    cam.lastErrLogAt = now;
+                  }
+                }
+              }
+            }
 
             if (needMatch) {
               cam.lastMatchAt = now;

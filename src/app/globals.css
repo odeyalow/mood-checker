@@ -86,7 +86,8 @@ body {
 }
 
 .camera-footer {
-  padding-top: 10px;
+  padding-top: 12px;
+  padding-bottom: 6px;
 }
 
 .camera-media {

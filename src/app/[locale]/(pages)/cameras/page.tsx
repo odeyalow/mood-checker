@@ -15,12 +15,12 @@ const TEXT = {
     noRecognitions: "Распознаний нет",
     emotionPlaceholder: "-",
   },
-  kk: {
+  kz: {
     title: "Камералар",
     loading: "Жүктелуде",
     error: "Қате",
     recognized: "Танылды",
-    noRecognitions: "Танулар жоқ",
+    noRecognitions: "Танылу жоқ",
     emotionPlaceholder: "-",
   },
   en: {
@@ -39,7 +39,7 @@ export default function CamerasPage({
   params: Promise<{ locale: string }>;
 }) {
   const { locale } = use(params);
-  const safeLocale = locale === "ru" || locale === "kk" || locale === "en" ? locale : "ru";
+  const safeLocale = locale === "ru" || locale === "kz" || locale === "en" ? locale : "ru";
   const t = TEXT[safeLocale];
 
   return (

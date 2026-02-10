@@ -1,11 +1,89 @@
 import { NextResponse } from "next/server";
+import { prisma } from "@/lib/prisma";
+import { addMoodCount, bucketStartUtc, computeRiskStats } from "@/lib/stats";
 
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
 
-export async function GET() {
-  return NextResponse.json(
-    { error: "student_not_found" },
-    { status: 404 },
+function parseRange(request: Request) {
+  const url = new URL(request.url);
+  const daysParam = url.searchParams.get("days");
+  const fromParam = url.searchParams.get("from");
+  const toParam = url.searchParams.get("to");
+
+  const now = new Date();
+  if (fromParam && toParam) {
+    const from = new Date(fromParam);
+    const to = new Date(toParam);
+    if (!Number.isNaN(from.getTime()) && !Number.isNaN(to.getTime())) {
+      return { from, to };
+    }
+  }
+
+  const days = daysParam ? Number(daysParam) : 2;
+  const safeDays = Number.isFinite(days) ? Math.max(1, Math.min(14, days)) : 2;
+  const from = new Date(now.getTime() - safeDays * 24 * 60 * 60 * 1000);
+  return { from, to: now };
+}
+
+export async function GET(
+  request: Request,
+  { params }: { params: { id: string } },
+) {
+  const studentId = decodeURIComponent(params.id || "").trim();
+  if (!studentId) {
+    return NextResponse.json({ error: "not_found" }, { status: 404 });
+  }
+
+  const { from, to } = parseRange(request);
+  const items = await prisma.recognition.findMany({
+    where: { name: studentId, detectedAt: { gte: from, lte: to } },
+    orderBy: { detectedAt: "desc" },
+  });
+
+  const counts = { positive: 0, neutral: 0, negative: 0 };
+  items.forEach((item) => addMoodCount(counts, item.mood));
+  const stats = computeRiskStats(counts);
+
+  const pointsMap = new Map();
+  for (const item of items) {
+    const bucket = bucketStartUtc(new Date(item.detectedAt));
+    const key = bucket.toISOString();
+    const entry = pointsMap.get(key) || {
+      bucketStart: key,
+      positive: 0,
+      neutral: 0,
+      negative: 0,
+    };
+    addMoodCount(entry, item.mood);
+    pointsMap.set(key, entry);
+  }
+
+  const points = [...pointsMap.values()].sort((a, b) =>
+    a.bucketStart < b.bucketStart ? -1 : 1,
   );
+
+  return NextResponse.json({
+    stats: {
+      riskCount: counts.negative,
+      riskByRule: stats.riskByRule,
+      riskScore: stats.riskPercent,
+      negativePercent: stats.negativePercent,
+      recognitionsCount: items.length,
+      positiveCount: counts.positive,
+      neutralCount: counts.neutral,
+      negativeCount: counts.negative,
+    },
+    points: points.map((p) => ({
+      bucketStart: p.bucketStart,
+      positiveCount: p.positive,
+      neutralCount: p.neutral,
+      negativeCount: p.negative,
+    })),
+    recent: items.slice(0, 30).map((item) => ({
+      id: item.id,
+      mood: item.mood,
+      detectedAt: item.detectedAt.toISOString(),
+    })),
+  });
 }
