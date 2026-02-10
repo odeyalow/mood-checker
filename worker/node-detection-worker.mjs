@@ -258,6 +258,7 @@ function createState(cameraId, src) {
     topEmotion: "",
     lastConfirmedAt: 0,
     lastMatchAt: 0,
+    lastSnapshotAt: 0,
     lastEmotionAt: 0,
     lastBestBox: null,
     prevLuma: null,
@@ -312,6 +313,7 @@ async function main() {
   const matchLogCooldownMs = Math.max(300, envInt("WORKER_MATCH_LOG_COOLDOWN_MS", 1000));
   const enableEmotions = envBool("WORKER_ENABLE_EMOTIONS", true);
   const emotionIntervalMs = Math.max(150, envInt("WORKER_EMOTION_INTERVAL_MS", 350));
+  const snapshotCooldownMs = Math.max(300, envInt("WORKER_SNAPSHOT_COOLDOWN_MS", 1200));
   const knownDir = process.env.WORKER_KNOWN_DIR || path.join(rootDir, "public", "known");
   const knownListFile = process.env.WORKER_KNOWN_LIST_FILE || path.join(knownDir, "images.json");
 
@@ -528,8 +530,12 @@ async function main() {
           cam.lastCandidateLogAt = now;
         }
 
-        const canFastMatch = cam.candidate > 0 && cam.score >= 0.12;
-        if (matcher && (cam.confirmed > 0 || canFastMatch) && now - cam.lastMatchAt >= matchIntervalMs) {
+        const shouldSnapshot = cam.confirmed > 0 && now - cam.lastSnapshotAt >= snapshotCooldownMs;
+        if (shouldSnapshot) {
+          cam.lastSnapshotAt = now;
+        }
+
+        if (matcher && shouldSnapshot && now - cam.lastMatchAt >= matchIntervalMs) {
           cam.lastMatchAt = now;
           try {
             const matchTensor = faceapi.tf.tensor3d(rgb, [h, w, 3], "int32");
@@ -591,8 +597,7 @@ async function main() {
           }
         }
 
-        const canEmotion = cam.candidate > 0 && cam.score >= 0.12;
-        if (enableEmotions && canEmotion && now - cam.lastEmotionAt >= emotionIntervalMs) {
+        if (enableEmotions && shouldSnapshot && now - cam.lastEmotionAt >= emotionIntervalMs) {
           cam.lastEmotionAt = now;
           try {
             const emotionTensor = faceapi.tf.tensor3d(rgb, [h, w, 3], "int32");
