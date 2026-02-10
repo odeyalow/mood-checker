@@ -289,7 +289,7 @@ async function main() {
   const candidateLogCooldownMs = Math.max(200, envInt("WORKER_CANDIDATE_LOG_COOLDOWN_MS", 700));
   const confirmFrames = Math.max(1, envInt("WORKER_CONFIRM_FRAMES", 1));
   const motionThreshold = envFloat("WORKER_MOTION_THRESHOLD", 1.5);
-  const minConfirmScore = envFloat("WORKER_MIN_CONFIRM_SCORE", 0.18);
+  const minConfirmScore = envFloat("WORKER_MIN_CONFIRM_SCORE", 0.14);
   const tinyInputSize = envInt("WORKER_TINY_INPUT_SIZE", 512);
   const tinyScoreThreshold = envFloat("WORKER_TINY_SCORE_THRESHOLD", 0.18);
   const ssdMinConfidence = envFloat("WORKER_SSD_MIN_CONFIDENCE", 0.35);
@@ -516,7 +516,8 @@ async function main() {
           cam.lastCandidateLogAt = now;
         }
 
-        if (matcher && cam.confirmed > 0 && now - cam.lastMatchAt >= matchIntervalMs) {
+        const canFastMatch = cam.candidate > 0 && cam.score >= 0.12;
+        if (matcher && (cam.confirmed > 0 || canFastMatch) && now - cam.lastMatchAt >= matchIntervalMs) {
           cam.lastMatchAt = now;
           try {
             const matchTensor = faceapi.tf.tensor3d(rgb, [h, w, 3], "int32");

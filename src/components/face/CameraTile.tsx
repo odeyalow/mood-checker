@@ -560,7 +560,7 @@ export default function CameraTile({
           }
 
           const requiredFrames = 1;
-          const minConfirmScore = 0.18;
+          const minConfirmScore = 0.14;
           const confirmedCount =
             stablePositiveFramesRef.current >= requiredFrames &&
             maxScore >= minConfirmScore &&
@@ -578,7 +578,7 @@ export default function CameraTile({
             count > 0 &&
             matcherRef.current &&
             !matchInFlightRef.current &&
-            nowMs - lastMatchAtRef.current >= 250
+            nowMs - lastMatchAtRef.current >= 150
           ) {
             matchInFlightRef.current = true;
             const matchingCanvas = document.createElement("canvas");
