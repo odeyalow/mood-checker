@@ -130,31 +130,34 @@ export default function DashboardPage({
           fetch("/api/dashboard-stats", { cache: "no-store" }),
           fetch("/api/emotion-dynamics", { cache: "no-store" }),
         ]);
-
-        if (!recentResponse.ok || !statsResponse.ok || !dynamicsResponse.ok) {
-          if (active) {
-            const status = !recentResponse.ok
-              ? recentResponse.status
-              : !statsResponse.ok
-                ? statsResponse.status
-                : dynamicsResponse.status;
-            setLoadError(`${t.loadError} (${status})`);
-          }
-          return;
-        }
-
         const [recentData, statsData, dynamicsData] = await Promise.all([
-          recentResponse.json(),
-          statsResponse.json(),
-          dynamicsResponse.json(),
+          recentResponse.ok ? recentResponse.json() : null,
+          statsResponse.ok ? statsResponse.json() : null,
+          dynamicsResponse.ok ? dynamicsResponse.json() : null,
         ]);
 
-        if (active) {
-          if (Array.isArray(recentData.items)) setRecentEvents(recentData.items);
-          if (Array.isArray(dynamicsData.points)) setEmotionPoints(dynamicsData.points);
+        if (!active) return;
+
+        if (Array.isArray(recentData?.items)) setRecentEvents(recentData.items);
+        else setRecentEvents([]);
+
+        if (Array.isArray(dynamicsData?.points)) setEmotionPoints(dynamicsData.points);
+        else setEmotionPoints([]);
+
+        if (statsData) {
           setStats(statsData);
-          setLoadError(null);
+        } else {
+          setStats({
+            connectedCameras: 0,
+            recognitionsLast24h: 0,
+            negativePercent: 0,
+            negativeDeltaVsPrevDay: 0,
+            riskZoneCount: 0,
+          });
         }
+
+        if (!recentResponse.ok) setLoadError(`${t.loadError} (${recentResponse.status})`);
+        else setLoadError(null);
       } catch {
         if (active) setLoadError(t.connectionError);
       }
