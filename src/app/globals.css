@@ -143,6 +143,24 @@ body {
   color: #94a3b8;
 }
 
+.camera-zoom {
+  margin-top: 10px;
+  display: grid;
+  gap: 6px;
+}
+
+.camera-zoom-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.camera-zoom-range {
+  width: 100%;
+  accent-color: #1d4ed8;
+  cursor: pointer;
+}
+
 .chart-placeholder {
   height: 220px;
   border-radius: 16px;

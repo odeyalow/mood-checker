@@ -6,12 +6,41 @@ import { VideoCameraOutlined } from "@ant-design/icons";
 import type { CameraConfig } from "@/lib/cameras";
 
 const { Text } = Typography;
+const MIN_ZOOM = 1;
+const MAX_ZOOM = 4;
+const ZOOM_STEP = 0.1;
+
+type RtspPlayer = {
+  destroy?: () => void;
+};
+
+type PlayerLoader = (options: {
+  url: string;
+  canvas: HTMLCanvasElement;
+  audio?: boolean;
+  disableGl?: boolean;
+}) => Promise<RtspPlayer>;
+
+function safeDestroyPlayer(player: RtspPlayer | null) {
+  if (!player?.destroy) return;
+  try {
+    player.destroy();
+  } catch (error) {
+    console.error("[camera] player destroy error:", error);
+  }
+}
+
+function clampZoom(value: number | undefined): number {
+  if (typeof value !== "number" || !Number.isFinite(value)) return MIN_ZOOM;
+  const clamped = Math.min(Math.max(value, MIN_ZOOM), MAX_ZOOM);
+  return Number(clamped.toFixed(1));
+}
 
 async function waitForPlayer(timeoutMs = 15000) {
   const started = Date.now();
   while (Date.now() - started < timeoutMs) {
-    const loadPlayer = (window as any).loadPlayer;
-    if (typeof loadPlayer === "function") return loadPlayer;
+    const loadPlayer = window.loadPlayer;
+    if (typeof loadPlayer === "function") return loadPlayer as PlayerLoader;
     await new Promise((r) => setTimeout(r, 200));
   }
   return null;
@@ -31,45 +60,81 @@ export default function CameraTile({
   };
 }) {
   const streamRef = useRef<HTMLCanvasElement | null>(null);
+  const playerRef = useRef<RtspPlayer | null>(null);
+  const streamTokenRef = useRef(0);
 
   const [status, setStatus] = useState<"loading" | "ready" | "error">("loading");
   const [people, setPeople] = useState<{ name: string; emotion?: string }[]>([]);
+  const [zoomInput, setZoomInput] = useState<number>(clampZoom(camera.digitalZoom));
+  const [appliedZoom, setAppliedZoom] = useState<number>(clampZoom(camera.digitalZoom));
 
   useEffect(() => {
     setPeople([]);
   }, []);
 
   useEffect(() => {
+    const initialZoom = clampZoom(camera.digitalZoom);
+    setZoomInput(initialZoom);
+    setAppliedZoom(initialZoom);
+  }, [camera.id, camera.digitalZoom]);
+
+  useEffect(() => {
+    const timer = window.setTimeout(() => {
+      setAppliedZoom(zoomInput);
+    }, 220);
+    return () => {
+      window.clearTimeout(timer);
+    };
+  }, [zoomInput]);
+
+  useEffect(() => {
     let mounted = true;
+    const streamToken = ++streamTokenRef.current;
 
     async function startStream() {
       const canvas = streamRef.current;
       if (!canvas) return;
 
+      setStatus("loading");
+      safeDestroyPlayer(playerRef.current);
+      playerRef.current = null;
+
       try {
-        const loadPlayer = (await waitForPlayer()) as
-          | ((options: { url: string; canvas: HTMLCanvasElement; audio?: boolean }) => Promise<any>)
-          | null;
+        const loadPlayer = await waitForPlayer();
         if (!loadPlayer) throw new Error("rtsp_player_missing");
+        if (!mounted || streamTokenRef.current !== streamToken) return;
 
         const wsProto = location.protocol === "https:" ? "wss://" : "ws://";
+        const zoomQuery =
+          appliedZoom > MIN_ZOOM
+            ? `&zoom=${encodeURIComponent(appliedZoom.toFixed(1))}`
+            : "";
         const url =
           `${wsProto}${location.host}/api/stream?url=${encodeURIComponent(camera.rtspUrl)}` +
-          `&client=${encodeURIComponent(`${camera.id}-${Date.now()}`)}`;
+          `&client=${encodeURIComponent(`${camera.id}-${Date.now()}`)}${zoomQuery}`;
 
-        await loadPlayer({ url, canvas, audio: false });
-        if (mounted) setStatus("ready");
+        const player = await loadPlayer({ url, canvas, audio: false });
+        if (!mounted || streamTokenRef.current !== streamToken) {
+          safeDestroyPlayer(player);
+          return;
+        }
+        playerRef.current = player;
+        setStatus("ready");
       } catch (error) {
         console.error("[camera] stream error:", error);
-        if (mounted) setStatus("error");
+        if (mounted && streamTokenRef.current === streamToken) {
+          setStatus("error");
+        }
       }
     }
 
     void startStream();
     return () => {
       mounted = false;
+      safeDestroyPlayer(playerRef.current);
+      playerRef.current = null;
     };
-  }, [camera.id, camera.rtspUrl]);
+  }, [camera.id, camera.rtspUrl, appliedZoom]);
 
   useEffect(() => {
     if (status !== "ready") return;
@@ -144,6 +209,26 @@ export default function CameraTile({
           <Text strong>{camera.name}</Text>
           <div>
             <Text type="secondary">{camera.location || camera.id}</Text>
+          </div>
+          <div className="camera-zoom">
+            <div className="camera-zoom-head">
+              <Text type="secondary">Zoom</Text>
+              <Text type="secondary">{`x${zoomInput.toFixed(1)}`}</Text>
+            </div>
+            <input
+              className="camera-zoom-range"
+              type="range"
+              min={MIN_ZOOM}
+              max={MAX_ZOOM}
+              step={ZOOM_STEP}
+              value={zoomInput}
+              onChange={(event) => {
+                const nextZoom = Number.parseFloat(event.target.value);
+                if (!Number.isFinite(nextZoom)) return;
+                setZoomInput(clampZoom(nextZoom));
+              }}
+              aria-label={`${camera.name} zoom`}
+            />
           </div>
           {people.length ? (
             <div className="camera-people">

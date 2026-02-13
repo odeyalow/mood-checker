@@ -27,6 +27,33 @@ function isIgnorableWsError(error) {
   );
 }
 
+function parseZoomParam(rawZoom) {
+  const value = Array.isArray(rawZoom) ? rawZoom[0] : rawZoom;
+  if (typeof value !== "string" || value.trim() === "") return 1;
+
+  const parsed = Number.parseFloat(value);
+  if (!Number.isFinite(parsed)) return 1;
+
+  return Math.min(Math.max(parsed, 1), 4);
+}
+
+function buildVideoFilter(zoom) {
+  const filters = [
+    "eq=contrast=1.08:brightness=0.03:saturation=1.12",
+    "unsharp=5:5:0.8",
+  ];
+
+  if (zoom > 1) {
+    const safeZoom = Number(zoom.toFixed(2));
+    filters.push(
+      `crop=iw/${safeZoom}:ih/${safeZoom}:(iw-iw/${safeZoom})/2:(ih-ih/${safeZoom})/2`,
+      "scale=iw:ih",
+    );
+  }
+
+  return filters.join(",");
+}
+
 const handleFatalError = (error) => {
   if (isIgnorableWsError(error)) {
     return;
@@ -59,6 +86,7 @@ app
 
       const rawUrl = req.query?.url;
       const url = Array.isArray(rawUrl) ? rawUrl[0] : rawUrl;
+      const zoom = parseZoomParam(req.query?.zoom);
 
       if (typeof url !== "string" || !url.startsWith("rtsp://")) {
         ws.close(1008, "invalid_rtsp_url");
@@ -75,7 +103,7 @@ app
             "-r",
             "20",
             "-vf",
-            "eq=contrast=1.08:brightness=0.03:saturation=1.12,unsharp=5:5:0.8",
+            buildVideoFilter(zoom),
           ],
           verbose: false,
         });
