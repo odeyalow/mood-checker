@@ -65,8 +65,7 @@ export default function CameraTile({
 
   const [status, setStatus] = useState<"loading" | "ready" | "error">("loading");
   const [people, setPeople] = useState<{ name: string; emotion?: string }[]>([]);
-  const [zoomInput, setZoomInput] = useState<number>(clampZoom(camera.digitalZoom));
-  const [appliedZoom, setAppliedZoom] = useState<number>(clampZoom(camera.digitalZoom));
+  const [zoomValue, setZoomValue] = useState<number>(clampZoom(camera.digitalZoom));
 
   useEffect(() => {
     setPeople([]);
@@ -74,18 +73,8 @@ export default function CameraTile({
 
   useEffect(() => {
     const initialZoom = clampZoom(camera.digitalZoom);
-    setZoomInput(initialZoom);
-    setAppliedZoom(initialZoom);
+    setZoomValue(initialZoom);
   }, [camera.id, camera.digitalZoom]);
-
-  useEffect(() => {
-    const timer = window.setTimeout(() => {
-      setAppliedZoom(zoomInput);
-    }, 220);
-    return () => {
-      window.clearTimeout(timer);
-    };
-  }, [zoomInput]);
 
   useEffect(() => {
     let mounted = true;
@@ -105,13 +94,9 @@ export default function CameraTile({
         if (!mounted || streamTokenRef.current !== streamToken) return;
 
         const wsProto = location.protocol === "https:" ? "wss://" : "ws://";
-        const zoomQuery =
-          appliedZoom > MIN_ZOOM
-            ? `&zoom=${encodeURIComponent(appliedZoom.toFixed(1))}`
-            : "";
         const url =
           `${wsProto}${location.host}/api/stream?url=${encodeURIComponent(camera.rtspUrl)}` +
-          `&client=${encodeURIComponent(`${camera.id}-${Date.now()}`)}${zoomQuery}`;
+          `&client=${encodeURIComponent(`${camera.id}-${Date.now()}`)}`;
 
         const player = await loadPlayer({ url, canvas, audio: false });
         if (!mounted || streamTokenRef.current !== streamToken) {
@@ -134,7 +119,7 @@ export default function CameraTile({
       safeDestroyPlayer(playerRef.current);
       playerRef.current = null;
     };
-  }, [camera.id, camera.rtspUrl, appliedZoom]);
+  }, [camera.id, camera.rtspUrl]);
 
   useEffect(() => {
     if (status !== "ready") return;
@@ -197,7 +182,15 @@ export default function CameraTile({
   return (
     <Card className="camera-card" size="small">
       <div className="camera-media">
-        <canvas ref={streamRef} className="camera-video" />
+        <canvas
+          ref={streamRef}
+          className="camera-video"
+          style={{
+            transform: zoomValue > MIN_ZOOM ? `scale(${zoomValue})` : "scale(1)",
+            transformOrigin: "center center",
+            transition: "transform 0.16s ease-out",
+          }}
+        />
         {status !== "ready" ? (
           <div className="camera-status">
             <VideoCameraOutlined /> {status === "error" ? labels.error : labels.loading}
@@ -213,7 +206,7 @@ export default function CameraTile({
           <div className="camera-zoom">
             <div className="camera-zoom-head">
               <Text type="secondary">Zoom</Text>
-              <Text type="secondary">{`x${zoomInput.toFixed(1)}`}</Text>
+              <Text type="secondary">{`x${zoomValue.toFixed(1)}`}</Text>
             </div>
             <input
               className="camera-zoom-range"
@@ -221,11 +214,11 @@ export default function CameraTile({
               min={MIN_ZOOM}
               max={MAX_ZOOM}
               step={ZOOM_STEP}
-              value={zoomInput}
+              value={zoomValue}
               onChange={(event) => {
                 const nextZoom = Number.parseFloat(event.target.value);
                 if (!Number.isFinite(nextZoom)) return;
-                setZoomInput(clampZoom(nextZoom));
+                setZoomValue(clampZoom(nextZoom));
               }}
               aria-label={`${camera.name} zoom`}
             />
