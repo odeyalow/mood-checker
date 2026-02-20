@@ -9,6 +9,9 @@ const { Text } = Typography;
 const MIN_ZOOM = 1;
 const MAX_ZOOM = 4;
 const ZOOM_STEP = 0.1;
+const STREAM_START_TIMEOUT_MS = 12000;
+const STREAM_RETRY_DELAY_MS = 3000;
+const STREAM_DISCONNECT_THRESHOLD_MS = 5000;
 
 type RtspPlayer = {
   destroy?: () => void;
@@ -19,6 +22,8 @@ type PlayerLoader = (options: {
   canvas: HTMLCanvasElement;
   audio?: boolean;
   disableGl?: boolean;
+  disconnectThreshold?: number;
+  onDisconnect?: (player: RtspPlayer) => void;
 }) => Promise<RtspPlayer>;
 
 function safeDestroyPlayer(player: RtspPlayer | null) {
@@ -46,6 +51,28 @@ async function waitForPlayer(timeoutMs = 15000) {
   return null;
 }
 
+function loadPlayerWithTimeout(
+  loadPlayer: PlayerLoader,
+  options: Parameters<PlayerLoader>[0],
+  timeoutMs = STREAM_START_TIMEOUT_MS,
+): Promise<RtspPlayer> {
+  return new Promise((resolve, reject) => {
+    const timeoutId = window.setTimeout(() => {
+      reject(new Error("rtsp_stream_start_timeout"));
+    }, timeoutMs);
+
+    loadPlayer(options)
+      .then((player) => {
+        window.clearTimeout(timeoutId);
+        resolve(player);
+      })
+      .catch((error) => {
+        window.clearTimeout(timeoutId);
+        reject(error);
+      });
+  });
+}
+
 export default function CameraTile({
   camera,
   labels,
@@ -62,6 +89,7 @@ export default function CameraTile({
   const streamRef = useRef<HTMLCanvasElement | null>(null);
   const playerRef = useRef<RtspPlayer | null>(null);
   const streamTokenRef = useRef(0);
+  const reconnectTimerRef = useRef<number | null>(null);
 
   const [status, setStatus] = useState<"loading" | "ready" | "error">("loading");
   const [people, setPeople] = useState<{ name: string; emotion?: string }[]>([]);
@@ -78,9 +106,28 @@ export default function CameraTile({
 
   useEffect(() => {
     let mounted = true;
+    let attemptSeq = 0;
     const streamToken = ++streamTokenRef.current;
 
+    function clearReconnectTimer() {
+      if (reconnectTimerRef.current === null) return;
+      window.clearTimeout(reconnectTimerRef.current);
+      reconnectTimerRef.current = null;
+    }
+
+    function scheduleReconnect(delayMs = STREAM_RETRY_DELAY_MS) {
+      if (!mounted || streamTokenRef.current !== streamToken) return;
+      clearReconnectTimer();
+      reconnectTimerRef.current = window.setTimeout(() => {
+        if (!mounted || streamTokenRef.current !== streamToken) return;
+        void startStream();
+      }, delayMs);
+    }
+
     async function startStream() {
+      const attemptId = ++attemptSeq;
+      clearReconnectTimer();
+
       const canvas = streamRef.current;
       if (!canvas) return;
 
@@ -98,8 +145,25 @@ export default function CameraTile({
           `${wsProto}${location.host}/api/stream?url=${encodeURIComponent(camera.rtspUrl)}` +
           `&client=${encodeURIComponent(`${camera.id}-${Date.now()}`)}`;
 
-        const player = await loadPlayer({ url, canvas, audio: false });
-        if (!mounted || streamTokenRef.current !== streamToken) {
+        const player = await loadPlayerWithTimeout(loadPlayer, {
+          url,
+          canvas,
+          audio: false,
+          disconnectThreshold: STREAM_DISCONNECT_THRESHOLD_MS,
+          onDisconnect: () => {
+            if (!mounted || streamTokenRef.current !== streamToken) return;
+            safeDestroyPlayer(playerRef.current);
+            playerRef.current = null;
+            setStatus("error");
+            scheduleReconnect();
+          },
+        });
+
+        if (
+          !mounted ||
+          streamTokenRef.current !== streamToken ||
+          attemptSeq !== attemptId
+        ) {
           safeDestroyPlayer(player);
           return;
         }
@@ -107,8 +171,9 @@ export default function CameraTile({
         setStatus("ready");
       } catch (error) {
         console.error("[camera] stream error:", error);
-        if (mounted && streamTokenRef.current === streamToken) {
+        if (mounted && streamTokenRef.current === streamToken && attemptSeq === attemptId) {
           setStatus("error");
+          scheduleReconnect();
         }
       }
     }
@@ -116,6 +181,7 @@ export default function CameraTile({
     void startStream();
     return () => {
       mounted = false;
+      clearReconnectTimer();
       safeDestroyPlayer(playerRef.current);
       playerRef.current = null;
     };
