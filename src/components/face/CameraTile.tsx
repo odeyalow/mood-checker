@@ -149,6 +149,7 @@ export default function CameraTile({
           url,
           canvas,
           audio: false,
+          disableGl: true,
           disconnectThreshold: STREAM_DISCONNECT_THRESHOLD_MS,
           onDisconnect: () => {
             if (!mounted || streamTokenRef.current !== streamToken) return;
