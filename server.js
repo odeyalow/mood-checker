@@ -38,20 +38,12 @@ function parseZoomParam(rawZoom) {
 }
 
 function buildVideoFilter(zoom) {
-  const filters = [
-    "eq=contrast=1.08:brightness=0.03:saturation=1.12",
-    "unsharp=5:5:0.8",
-  ];
-
-  if (zoom > 1) {
-    const safeZoom = Number(zoom.toFixed(2));
-    filters.push(
-      `crop=iw/${safeZoom}:ih/${safeZoom}:(iw-iw/${safeZoom})/2:(ih-ih/${safeZoom})/2`,
-      "scale=iw:ih",
-    );
-  }
-
-  return filters.join(",");
+  if (zoom <= 1) return "";
+  const safeZoom = Number(zoom.toFixed(2));
+  return [
+    `crop=iw/${safeZoom}:ih/${safeZoom}:(iw-iw/${safeZoom})/2:(ih-ih/${safeZoom})/2`,
+    "scale=iw:ih",
+  ].join(",");
 }
 
 const handleFatalError = (error) => {
@@ -94,17 +86,16 @@ app
       }
 
       try {
+        const filter = buildVideoFilter(zoom);
+        const additionalFlags = ["-q", "1", "-r", "20"];
+        if (filter) {
+          additionalFlags.push("-vf", filter);
+        }
+
         const handler = proxy({
           url,
           transport: "tcp",
-          additionalFlags: [
-            "-q",
-            "1",
-            "-r",
-            "20",
-            "-vf",
-            buildVideoFilter(zoom),
-          ],
+          additionalFlags,
           verbose: false,
         });
         handler(ws);
