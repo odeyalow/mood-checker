@@ -16,11 +16,11 @@ function parseDigitalZoom(rawValue: string | undefined): number | undefined {
 
 const camera1Rtsp =
   process.env.NEXT_PUBLIC_CAMERA_1_RTSP_URL ||
-  "rtsp://danil:danil_2004@192.168.0.241:554/cam/realmonitor?channel=1&subtype=0&unicast=true&proto=Onvif";
-const camera1Go2rtcSrc = process.env.NEXT_PUBLIC_CAMERA_1_GO2RTC_SRC || "cam02_main";
+  "rtsp://admin:123456@192.168.0.120:554/cam/realmonitor?channel=1&subtype=0&unicast=true&proto=Onvif";
+const camera1Go2rtcSrc = process.env.NEXT_PUBLIC_CAMERA_1_GO2RTC_SRC || "cam01_main";
 
 const camera1Name = process.env.NEXT_PUBLIC_CAMERA_1_NAME || "Camera 1";
-const camera1Location = process.env.NEXT_PUBLIC_CAMERA_1_LOCATION || "192.168.0.241";
+const camera1Location = process.env.NEXT_PUBLIC_CAMERA_1_LOCATION || "192.168.0.120";
 const camera1DigitalZoom = parseDigitalZoom(process.env.NEXT_PUBLIC_CAMERA_1_DIGITAL_ZOOM);
 
 const camera2Rtsp =
