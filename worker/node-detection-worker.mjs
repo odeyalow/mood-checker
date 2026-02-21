@@ -209,6 +209,35 @@ function largestFaceStats(detections) {
   return { maxSide, maxScore };
 }
 
+function getFaceSide(det) {
+  const box = getBox(det);
+  if (!box) return 0;
+  return Math.max(Number(box.width) || 0, Number(box.height) || 0);
+}
+
+function computeMatchCandidates(labeledDescriptors, descriptor) {
+  if (!Array.isArray(labeledDescriptors) || !labeledDescriptors.length || !descriptor) return [];
+  const ranked = [];
+  for (const item of labeledDescriptors) {
+    const label = String(item?.label ?? "").trim();
+    const descriptors = Array.isArray(item?.descriptors) ? item.descriptors : [];
+    if (!label || !descriptors.length) continue;
+
+    let minDistance = Number.POSITIVE_INFINITY;
+    for (const known of descriptors) {
+      const dist = Number(faceapi.euclideanDistance(descriptor, known));
+      if (Number.isFinite(dist) && dist < minDistance) minDistance = dist;
+    }
+
+    if (Number.isFinite(minDistance)) {
+      ranked.push({ label, distance: minDistance });
+    }
+  }
+
+  ranked.sort((a, b) => a.distance - b.distance);
+  return ranked;
+}
+
 function rgbaToRgbTensorData(rgba) {
   const rgb = new Uint8Array(Math.floor((rgba.length / 4) * 3));
   let j = 0;
@@ -257,9 +286,12 @@ function createState(cameraId, src) {
     people: [],
     emotionSummary: "",
     topEmotion: "",
+    snapshotUrl: "",
+    lastRecognitionAt: 0,
     lastConfirmedAt: 0,
     lastMatchAt: 0,
     lastSnapshotAt: 0,
+    lastSnapshotSavedAt: 0,
     lastEmotionAt: 0,
     lastBestBox: null,
     prevLuma: null,
@@ -311,6 +343,8 @@ async function main() {
   const filterMaxAspect = envFloat("WORKER_FILTER_MAX_ASPECT", 1.9);
   const enableMatching = envBool("WORKER_ENABLE_MATCHING", true);
   const matchThreshold = envFloat("WORKER_MATCH_THRESHOLD", 0.52);
+  const matchMinMargin = Math.max(0, envFloat("WORKER_MATCH_MIN_MARGIN", 0.035));
+  const matchMinFaceSidePx = Math.max(0, envInt("WORKER_MATCH_MIN_FACE_SIDE_PX", 26));
   const matchIntervalMs = Math.max(150, envInt("WORKER_MATCH_INTERVAL_MS", 250));
   const matchLogCooldownMs = Math.max(300, envInt("WORKER_MATCH_LOG_COOLDOWN_MS", 1000));
   const enableEmotions = envBool("WORKER_ENABLE_EMOTIONS", true);
@@ -318,8 +352,19 @@ async function main() {
   const snapshotCooldownMs = Math.max(300, envInt("WORKER_SNAPSHOT_COOLDOWN_MS", 1200));
   const dbEndpoint = (process.env.WORKER_DB_ENDPOINT || "http://127.0.0.1:3000/api/recognitions").trim();
   const dbCooldownMs = Math.max(1000, envInt("WORKER_DB_COOLDOWN_MS", 4000));
+  const saveSnapshots = envBool("WORKER_SAVE_SNAPSHOTS", true);
+  const snapshotSaveCooldownMs = Math.max(200, envInt("WORKER_SNAPSHOT_SAVE_COOLDOWN_MS", 500));
+  const snapshotDir = process.env.WORKER_SNAPSHOT_DIR || path.join(rootDir, "public", "_worker-snaps");
+  const snapshotPublicBase = (process.env.WORKER_SNAPSHOT_PUBLIC_BASE || "/_worker-snaps").replace(
+    /\/+$/,
+    "",
+  );
   const knownDir = process.env.WORKER_KNOWN_DIR || path.join(rootDir, "public", "known");
   const knownListFile = process.env.WORKER_KNOWN_LIST_FILE || path.join(knownDir, "images.json");
+
+  if (saveSnapshots) {
+    await fsp.mkdir(snapshotDir, { recursive: true }).catch(() => {});
+  }
 
   const modelDir = path.join(rootDir, "public", "models");
   if (!fs.existsSync(modelDir)) {
@@ -330,6 +375,7 @@ async function main() {
   faceapi.tf.enableProdMode();
   await faceapi.nets.tinyFaceDetector.loadFromDisk(modelDir);
   let matcher = null;
+  let knownLabeledDescriptors = [];
   let ssdLoaded = false;
   if (useSsdFallback) {
     try {
@@ -399,8 +445,12 @@ async function main() {
     }
 
     if (labeledDescriptors.length) {
+      knownLabeledDescriptors = labeledDescriptors;
       matcher = new faceapi.FaceMatcher(labeledDescriptors, matchThreshold);
-      log(`matching=on known=${labeledDescriptors.length} threshold=${matchThreshold}`);
+      log(
+        `matching=on known=${labeledDescriptors.length} threshold=${matchThreshold} ` +
+          `min_margin=${matchMinMargin} min_face_px=${matchMinFaceSidePx}`,
+      );
     } else {
       log("matching=off reason=no_known_descriptors");
     }
@@ -551,7 +601,7 @@ async function main() {
               if (matcher) {
                 task = task.withFaceLandmarks(true).withFaceDescriptors();
               }
-              if (enableEmotions) {
+              if (enableEmotions && needEmotion) {
                 task = task.withFaceExpressions();
               }
               return task;
@@ -583,11 +633,22 @@ async function main() {
               let name = "unknown";
               let distance = 0;
               if (matcher && det?.descriptor) {
-                const best = matcher.findBestMatch(det.descriptor);
-                if (best && best.label !== "unknown") {
-                  name = best.label;
-                  distance = Number(best.distance) || 0;
-                  if (!bestDistance || distance < bestDistance) bestDistance = distance;
+                const faceSide = getFaceSide(det);
+                if (faceSide >= matchMinFaceSidePx) {
+                  const ranked = computeMatchCandidates(knownLabeledDescriptors, det.descriptor);
+                  const best = ranked[0];
+                  const second = ranked[1];
+                  const margin = second ? second.distance - best.distance : Number.POSITIVE_INFINITY;
+                  const accepted =
+                    Boolean(best) &&
+                    best.distance <= matchThreshold &&
+                    margin >= matchMinMargin;
+
+                  if (accepted) {
+                    name = best.label;
+                    distance = Number(best.distance) || 0;
+                    if (!bestDistance || distance < bestDistance) bestDistance = distance;
+                  }
                 }
               }
 
@@ -606,13 +667,38 @@ async function main() {
               }
 
               if (name !== "unknown") {
-                people.push({ name, emotion: emotionLabel });
+                people.push({
+                  name,
+                  emotion: emotionLabel,
+                  distance: Number(distance.toFixed(3)),
+                });
               }
             }
 
             cam.people = people;
             cam.matchedNames = people.map((p) => p.name);
             cam.matchDistance = people.length ? Number(bestDistance || 0) : 0;
+            if (people.length) {
+              cam.lastRecognitionAt = now;
+            }
+
+            if (
+              saveSnapshots &&
+              people.length &&
+              now - cam.lastSnapshotSavedAt >= snapshotSaveCooldownMs
+            ) {
+              try {
+                const snapshotFile = path.join(snapshotDir, `${cam.cameraId}.jpg`);
+                await fsp.writeFile(snapshotFile, jpg);
+                cam.snapshotUrl = `${snapshotPublicBase}/${cam.cameraId}.jpg?v=${now}`;
+                cam.lastSnapshotSavedAt = now;
+              } catch (err) {
+                if (now - cam.lastErrLogAt >= 2000) {
+                  log(`[${cam.cameraId}] snapshot save error: ${String(err)}`);
+                  cam.lastErrLogAt = now;
+                }
+              }
+            }
 
             if (enableMatching && enableEmotions && people.length) {
               for (const person of people) {
@@ -728,6 +814,8 @@ async function main() {
           people: cam.people,
           emotionSummary: cam.emotionSummary,
           topEmotion: cam.topEmotion,
+          snapshotUrl: cam.snapshotUrl,
+          lastRecognitionAt: cam.lastRecognitionAt ? new Date(cam.lastRecognitionAt).toISOString() : "",
         };
       }
       try {

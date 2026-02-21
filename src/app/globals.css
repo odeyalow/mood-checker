@@ -143,6 +143,28 @@ body {
   color: #94a3b8;
 }
 
+.camera-evidence {
+  margin-top: 10px;
+  border: 1px solid #e2e8f0;
+  border-radius: 10px;
+  overflow: hidden;
+  background: #f8fafc;
+}
+
+.camera-evidence-image {
+  width: 100%;
+  max-height: 120px;
+  object-fit: cover;
+  display: block;
+}
+
+.camera-evidence-meta {
+  padding: 6px 8px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
 .camera-zoom {
   margin-top: 10px;
   display: grid;

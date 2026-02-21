@@ -41,6 +41,12 @@ function clampZoom(value: number | undefined): number {
   return Number(clamped.toFixed(1));
 }
 
+function formatRecognitionTime(raw: string) {
+  const date = new Date(raw);
+  if (Number.isNaN(date.getTime())) return raw;
+  return date.toLocaleTimeString();
+}
+
 async function waitForPlayer(timeoutMs = 15000) {
   const started = Date.now();
   while (Date.now() - started < timeoutMs) {
@@ -92,12 +98,16 @@ export default function CameraTile({
   const reconnectTimerRef = useRef<number | null>(null);
 
   const [status, setStatus] = useState<"loading" | "ready" | "error">("loading");
-  const [people, setPeople] = useState<{ name: string; emotion?: string }[]>([]);
+  const [people, setPeople] = useState<{ name: string; emotion?: string; distance?: number }[]>([]);
+  const [snapshotUrl, setSnapshotUrl] = useState("");
+  const [lastRecognitionAt, setLastRecognitionAt] = useState("");
   const [zoomValue, setZoomValue] = useState<number>(clampZoom(camera.digitalZoom));
 
   useEffect(() => {
     setPeople([]);
-  }, []);
+    setSnapshotUrl("");
+    setLastRecognitionAt("");
+  }, [camera.id]);
 
   useEffect(() => {
     const initialZoom = clampZoom(camera.digitalZoom);
@@ -208,7 +218,9 @@ export default function CameraTile({
             matchDistance?: number;
             emotionSummary?: string;
             topEmotion?: string;
-            people?: { name: string; emotion?: string }[];
+            people?: { name: string; emotion?: string; distance?: number }[];
+            snapshotUrl?: string;
+            lastRecognitionAt?: string;
           } | null;
         };
 
@@ -220,6 +232,7 @@ export default function CameraTile({
                 .map((p) => ({
                   name: String(p?.name ?? "").trim(),
                   emotion: typeof p?.emotion === "string" ? p.emotion : "",
+                  distance: Number.isFinite(p?.distance) ? Number(p.distance) : undefined,
                 }))
                 .filter((p) => p.name),
             );
@@ -227,16 +240,19 @@ export default function CameraTile({
             const names = Array.isArray(ws.matchedNames) ? ws.matchedNames : [];
             setPeople(names.map((name) => ({ name: String(name), emotion: "" })));
           }
+          setSnapshotUrl(typeof ws.snapshotUrl === "string" ? ws.snapshotUrl : "");
+          setLastRecognitionAt(
+            typeof ws.lastRecognitionAt === "string" ? ws.lastRecognitionAt : "",
+          );
         } else {
           setPeople([]);
+          setLastRecognitionAt("");
         }
-      } catch {
-        setPeople([]);
-      }
+      } catch {}
 
       timer = window.setTimeout(() => {
         void poll();
-      }, 700);
+      }, 250);
     };
 
     void poll();
@@ -296,7 +312,8 @@ export default function CameraTile({
                 <div key={`${person.name}-${person.emotion || "none"}`} className="camera-person">
                   <Text type="secondary">{person.name}</Text>
                   <Text type="secondary">
-                    {person.emotion ? person.emotion : labels.emotion}
+                    {person.emotion ? person.emotion : labels.emotion}{" "}
+                    {typeof person.distance === "number" ? `(${person.distance.toFixed(3)})` : ""}
                   </Text>
                 </div>
               ))}
@@ -306,6 +323,17 @@ export default function CameraTile({
               <Text type="secondary">{labels.noRecognitions}</Text>
             </div>
           )}
+          {snapshotUrl ? (
+            <div className="camera-evidence">
+              <img className="camera-evidence-image" src={snapshotUrl} alt={`${camera.name} snapshot`} />
+              <div className="camera-evidence-meta">
+                <Text type="secondary">Worker snapshot</Text>
+                {lastRecognitionAt ? (
+                  <Text type="secondary">{formatRecognitionTime(lastRecognitionAt)}</Text>
+                ) : null}
+              </div>
+            </div>
+          ) : null}
         </div>
         <Tag color={people.length ? "green" : "geekblue"}>
           {people.length ? labels.recognized : "RTSP"}
