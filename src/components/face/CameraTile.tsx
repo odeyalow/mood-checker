@@ -221,11 +221,13 @@ export default function CameraTile({
             score?: number;
             motion?: number;
             streak?: number;
-            requiredFrames?: number;
-            matchedNames?: string[];
-            matchDistance?: number;
-            emotionSummary?: string;
-            topEmotion?: string;
+          requiredFrames?: number;
+          matchedNames?: string[];
+          matchDistance?: number;
+          personInFrame?: boolean;
+          faceInFrame?: boolean;
+          emotionSummary?: string;
+          topEmotion?: string;
           people?: { name: string; emotion?: string; distance?: number }[];
           snapshotUrl?: string;
           lastRecognitionAt?: string;
@@ -252,9 +254,10 @@ export default function CameraTile({
             .join(", ");
           const candidate = Number.isFinite(ws.candidate) ? Number(ws.candidate) : 0;
           const confirmed = Number.isFinite(ws.confirmed) ? Number(ws.confirmed) : 0;
-          const hasFace = candidate > 0 || confirmed > 0;
-          const motion = Number.isFinite(ws.motion) ? Number(ws.motion) : 0;
-          const hasPerson = hasFace || motion >= 0.8;
+          const hasPerson =
+            typeof ws.personInFrame === "boolean" ? ws.personInFrame : candidate > 0;
+          const hasFace =
+            typeof ws.faceInFrame === "boolean" ? ws.faceInFrame : confirmed > 0;
           const emotion =
             typeof ws.topEmotion === "string" && ws.topEmotion.trim().length > 0
               ? ws.topEmotion.trim()

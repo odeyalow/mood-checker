@@ -10,6 +10,8 @@ type WorkerStatusCamera = {
   requiredFrames: number;
   matchedNames?: string[];
   matchDistance?: number;
+  personInFrame?: boolean;
+  faceInFrame?: boolean;
   emotionSummary?: string;
   topEmotion?: string;
   people?: { name: string; emotion?: string; distance?: number }[];

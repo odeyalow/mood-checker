@@ -326,8 +326,8 @@ async function main() {
 
   const frameApiBase =
     (process.env.WORKER_FRAME_API_BASE || "http://127.0.0.1:3000/api/camera/frame").replace(/\/+$/, "");
-  const frameTimeoutMs = Math.max(700, envInt("WORKER_FRAME_TIMEOUT_MS", 1800));
-  const loopDelayMs = Math.max(20, envInt("WORKER_LOOP_DELAY_MS", 80));
+  const frameTimeoutMs = Math.max(500, envInt("WORKER_FRAME_TIMEOUT_MS", 1200));
+  const loopDelayMs = Math.max(15, envInt("WORKER_LOOP_DELAY_MS", 50));
   const heartbeatSeconds = Math.max(1, envFloat("WORKER_HEARTBEAT_SECONDS", 5));
   const statusLogSeconds = Math.max(0.4, envFloat("WORKER_STATUS_LOG_SECONDS", 1.5));
   const detectionLogCooldownMs = Math.max(200, envInt("WORKER_DETECTION_LOG_COOLDOWN_MS", 500));
@@ -351,11 +351,12 @@ async function main() {
   const matchThreshold = envFloat("WORKER_MATCH_THRESHOLD", 0.52);
   const matchMinMargin = Math.max(0, envFloat("WORKER_MATCH_MIN_MARGIN", 0.035));
   const matchMinFaceSidePx = Math.max(0, envInt("WORKER_MATCH_MIN_FACE_SIDE_PX", 26));
-  const matchIntervalMs = Math.max(150, envInt("WORKER_MATCH_INTERVAL_MS", 250));
+  const matchIntervalMs = Math.max(120, envInt("WORKER_MATCH_INTERVAL_MS", 180));
   const matchLogCooldownMs = Math.max(300, envInt("WORKER_MATCH_LOG_COOLDOWN_MS", 1000));
   const enableEmotions = envBool("WORKER_ENABLE_EMOTIONS", true);
-  const emotionIntervalMs = Math.max(150, envInt("WORKER_EMOTION_INTERVAL_MS", 350));
-  const snapshotCooldownMs = Math.max(300, envInt("WORKER_SNAPSHOT_COOLDOWN_MS", 1200));
+  const emotionIntervalMs = Math.max(150, envInt("WORKER_EMOTION_INTERVAL_MS", 300));
+  const snapshotCooldownMs = Math.max(150, envInt("WORKER_SNAPSHOT_COOLDOWN_MS", 450));
+  const recognitionHoldMs = Math.max(0, envInt("WORKER_RECOGNITION_HOLD_MS", 1200));
   const dbEndpoint = (process.env.WORKER_DB_ENDPOINT || "http://127.0.0.1:3000/api/recognitions").trim();
   const dbCooldownMs = Math.max(1000, envInt("WORKER_DB_COOLDOWN_MS", 4000));
   const saveSnapshots = envBool("WORKER_SAVE_SNAPSHOTS", true);
@@ -576,6 +577,12 @@ async function main() {
         if (!isConfirmed) {
           cam.matchedNames = [];
           cam.matchDistance = 0;
+          if (now - cam.lastConfirmedAt >= recognitionHoldMs) {
+            cam.people = [];
+            cam.emotionSummary = "";
+            cam.topEmotion = "";
+            cam.lastRecognitionAt = 0;
+          }
         }
         if (isConfirmed) {
           cam.lastConfirmedAt = now;
@@ -786,8 +793,10 @@ async function main() {
         cam.streak = 0;
         cam.matchedNames = [];
         cam.matchDistance = 0;
+        cam.people = [];
         cam.emotionSummary = "";
         cam.topEmotion = "";
+        cam.lastRecognitionAt = 0;
         cam.frameOk = false;
         cam.lastFrameError = String(err);
         if (now - cam.lastErrLogAt >= 2000) {
@@ -810,8 +819,8 @@ async function main() {
         cameras: {},
       };
       for (const cam of states) {
-        const hasFace = cam.candidate > 0 || cam.confirmed > 0;
-        const hasPerson = hasFace || cam.motion >= motionThreshold;
+        const hasPerson = cam.candidate > 0 && cam.score >= minConfirmScore;
+        const hasFace = cam.confirmed > 0;
         const who = cam.matchedNames.length ? cam.matchedNames.join(", ") : "не определен";
         const emotion = cam.topEmotion || "нет";
         const frameState = cam.frameOk
@@ -831,6 +840,8 @@ async function main() {
           requiredFrames: confirmFrames,
           matchedNames: cam.matchedNames,
           matchDistance: Number(cam.matchDistance.toFixed(3)),
+          personInFrame: hasPerson,
+          faceInFrame: hasFace,
           people: cam.people,
           emotionSummary: cam.emotionSummary,
           topEmotion: cam.topEmotion,
