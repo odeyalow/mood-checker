@@ -12,6 +12,7 @@ type WorkerStatusCamera = {
   matchDistance?: number;
   personInFrame?: boolean;
   faceInFrame?: boolean;
+  workerZoom?: number;
   emotionSummary?: string;
   topEmotion?: string;
   people?: { name: string; emotion?: string; distance?: number }[];
@@ -22,6 +23,8 @@ type WorkerStatusCamera = {
   lastFrameBytes?: number;
   frameWidth?: number;
   frameHeight?: number;
+  workerFrameWidth?: number;
+  workerFrameHeight?: number;
   frameError?: string;
 };
 

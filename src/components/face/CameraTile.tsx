@@ -9,6 +9,7 @@ const { Text } = Typography;
 const MIN_ZOOM = 1;
 const MAX_ZOOM = 4;
 const ZOOM_STEP = 0.1;
+const WORKER_ZOOM_PRESETS = [1, 2, 3, 4, 5];
 const STREAM_START_TIMEOUT_MS = 12000;
 const STREAM_RETRY_DELAY_MS = 3000;
 const STREAM_DISCONNECT_THRESHOLD_MS = 5000;
@@ -26,6 +27,32 @@ type PlayerLoader = (options: {
   onDisconnect?: (player: RtspPlayer) => void;
 }) => Promise<RtspPlayer>;
 
+type WorkerPerson = {
+  name: string;
+  emotion?: string;
+  distance?: number;
+};
+
+type WorkerStatus = {
+  candidate?: number;
+  confirmed?: number;
+  personInFrame?: boolean;
+  faceInFrame?: boolean;
+  matchedNames?: string[];
+  topEmotion?: string;
+  people?: WorkerPerson[];
+  snapshotUrl?: string;
+  lastRecognitionAt?: string;
+  frameOk?: boolean;
+  lastFrameAt?: string;
+  frameWidth?: number;
+  frameHeight?: number;
+  workerFrameWidth?: number;
+  workerFrameHeight?: number;
+  frameError?: string;
+  workerZoom?: number;
+};
+
 function safeDestroyPlayer(player: RtspPlayer | null) {
   if (!player?.destroy) return;
   try {
@@ -41,10 +68,30 @@ function clampZoom(value: number | undefined): number {
   return Number(clamped.toFixed(1));
 }
 
+function clampWorkerZoom(value: number | undefined): number {
+  if (typeof value !== "number" || !Number.isFinite(value)) return 1;
+  const clamped = Math.min(5, Math.max(1, value));
+  return Number(clamped.toFixed(1));
+}
+
 function formatRecognitionTime(raw: string) {
   const date = new Date(raw);
   if (Number.isNaN(date.getTime())) return raw;
   return date.toLocaleTimeString();
+}
+
+function namesFromStatus(status: WorkerStatus): string[] {
+  if (Array.isArray(status.people)) {
+    return status.people
+      .map((person) => String(person?.name ?? "").trim())
+      .filter((name) => name.length > 0);
+  }
+  if (Array.isArray(status.matchedNames)) {
+    return status.matchedNames
+      .map((name) => String(name ?? "").trim())
+      .filter((name) => name.length > 0);
+  }
+  return [];
 }
 
 async function waitForPlayer(timeoutMs = 15000) {
@@ -52,7 +99,7 @@ async function waitForPlayer(timeoutMs = 15000) {
   while (Date.now() - started < timeoutMs) {
     const loadPlayer = window.loadPlayer;
     if (typeof loadPlayer === "function") return loadPlayer as PlayerLoader;
-    await new Promise((r) => setTimeout(r, 200));
+    await new Promise((resolve) => setTimeout(resolve, 200));
   }
   return null;
 }
@@ -98,16 +145,21 @@ export default function CameraTile({
   const reconnectTimerRef = useRef<number | null>(null);
 
   const [status, setStatus] = useState<"loading" | "ready" | "error">("loading");
-  const [people, setPeople] = useState<{ name: string; emotion?: string; distance?: number }[]>([]);
+  const [people, setPeople] = useState<WorkerPerson[]>([]);
   const [snapshotUrl, setSnapshotUrl] = useState("");
+  const [snapshotWho, setSnapshotWho] = useState("");
   const [lastRecognitionAt, setLastRecognitionAt] = useState("");
   const [workerDebugLine, setWorkerDebugLine] = useState("ожидание данных воркера...");
   const [zoomValue, setZoomValue] = useState<number>(clampZoom(camera.digitalZoom));
+  const [workerZoom, setWorkerZoom] = useState(1);
+  const [workerZoomSaving, setWorkerZoomSaving] = useState(false);
 
   useEffect(() => {
     setPeople([]);
     setSnapshotUrl("");
+    setSnapshotWho("");
     setLastRecognitionAt("");
+    setWorkerZoom(1);
     setWorkerDebugLine("ожидание данных воркера...");
   }, [camera.id]);
 
@@ -172,11 +224,7 @@ export default function CameraTile({
           },
         });
 
-        if (
-          !mounted ||
-          streamTokenRef.current !== streamToken ||
-          attemptSeq !== attemptId
-        ) {
+        if (!mounted || streamTokenRef.current !== streamToken || attemptSeq !== attemptId) {
           safeDestroyPlayer(player);
           return;
         }
@@ -210,102 +258,59 @@ export default function CameraTile({
         const res = await fetch(`/api/worker/status?cameraId=${encodeURIComponent(camera.id)}`, {
           cache: "no-store",
         });
-        const payload = (await res.json()) as {
-          ts?: string;
-          now?: string;
-          statusFileMtime?: string;
-          cameraId?: string;
-          status?: {
-            candidate?: number;
-            confirmed?: number;
-            score?: number;
-            motion?: number;
-            streak?: number;
-          requiredFrames?: number;
-          matchedNames?: string[];
-          matchDistance?: number;
-          personInFrame?: boolean;
-          faceInFrame?: boolean;
-          emotionSummary?: string;
-          topEmotion?: string;
-          people?: { name: string; emotion?: string; distance?: number }[];
-          snapshotUrl?: string;
-          lastRecognitionAt?: string;
-          frameOk?: boolean;
-          lastFrameAt?: string;
-          lastFrameBytes?: number;
-          frameWidth?: number;
-          frameHeight?: number;
-          frameError?: string;
-        } | null;
-      };
-
+        const payload = (await res.json()) as { status?: WorkerStatus | null };
         const ws = payload.status;
+
         if (ws) {
-          const names = Array.isArray(ws.matchedNames) ? ws.matchedNames : [];
-          const peopleNames = Array.isArray(ws.people)
-            ? ws.people
-                .map((p) => String(p?.name ?? "").trim())
-                .filter((name) => name.length > 0)
-            : [];
-          const who = (peopleNames.length ? peopleNames : names)
-            .map((name) => String(name).trim())
-            .filter((name) => name.length > 0)
-            .join(", ");
-          const candidate = Number.isFinite(ws.candidate) ? Number(ws.candidate) : 0;
-          const confirmed = Number.isFinite(ws.confirmed) ? Number(ws.confirmed) : 0;
+          const names = namesFromStatus(ws);
+          const who = names.join(", ");
           const hasPerson =
-            typeof ws.personInFrame === "boolean" ? ws.personInFrame : candidate > 0;
+            typeof ws.personInFrame === "boolean" ? ws.personInFrame : Number(ws.candidate ?? 0) > 0;
           const hasFace =
-            typeof ws.faceInFrame === "boolean" ? ws.faceInFrame : confirmed > 0;
+            typeof ws.faceInFrame === "boolean" ? ws.faceInFrame : Number(ws.confirmed ?? 0) > 0;
           const emotion =
             typeof ws.topEmotion === "string" && ws.topEmotion.trim().length > 0
               ? ws.topEmotion.trim()
               : "нет";
+          const zoom = clampWorkerZoom(Number(ws.workerZoom ?? 1));
           const frameOk = ws.frameOk === true;
-          const frameHasSize =
-            Number.isFinite(ws.frameWidth) &&
-            Number(ws.frameWidth) > 0 &&
-            Number.isFinite(ws.frameHeight) &&
-            Number(ws.frameHeight) > 0;
-          const frameAt =
-            typeof ws.lastFrameAt === "string" && ws.lastFrameAt
-              ? new Date(ws.lastFrameAt).getTime()
-              : 0;
+          const frameAt = ws.lastFrameAt ? new Date(ws.lastFrameAt).getTime() : 0;
           const frameAgeSec = frameAt ? Math.max(0, Math.round((Date.now() - frameAt) / 1000)) : 0;
-          const frameState = frameOk && frameHasSize ? "есть" : "нет";
-          const frameInfo = frameOk && frameHasSize
-            ? `${Number(ws.frameWidth)}x${Number(ws.frameHeight)}, ${frameAgeSec}с назад`
-            : typeof ws.frameError === "string" && ws.frameError.trim()
-              ? ws.frameError.trim()
-              : "нет данных";
-          const ts = new Date().toLocaleTimeString();
+          const sourceW = Number(ws.frameWidth ?? 0);
+          const sourceH = Number(ws.frameHeight ?? 0);
+          const workerW = Number(ws.workerFrameWidth ?? 0);
+          const workerH = Number(ws.workerFrameHeight ?? 0);
+          const frameState = frameOk ? "есть" : "нет";
+          const frameInfo =
+            frameOk && sourceW > 0 && sourceH > 0
+              ? `${sourceW}x${sourceH} -> ${workerW || sourceW}x${workerH || sourceH}, ${frameAgeSec}с назад`
+              : ws.frameError || "нет данных";
+
+          setWorkerZoom(zoom);
           setWorkerDebugLine(
-            `[${ts}] человек в кадре: ${hasPerson ? "есть" : "нет"} | ` +
+            `[${new Date().toLocaleTimeString()}] человек в кадре: ${hasPerson ? "есть" : "нет"} | ` +
               `лицо: ${hasFace ? "есть" : "нет"} | ` +
               `кто: ${who || "не определен"} | ` +
-              `эмоция: ${emotion} | кадр: ${frameState} (${frameInfo})`,
+              `эмоция: ${emotion} | worker zoom: x${zoom.toFixed(1)} | кадр: ${frameState} (${frameInfo})`,
           );
 
-          if (Array.isArray(ws.people)) {
-            setPeople(
-              ws.people
-                .map((p) => ({
-                  name: String(p?.name ?? "").trim(),
-                  emotion: typeof p?.emotion === "string" ? p.emotion : "",
-                  distance: Number.isFinite(p?.distance) ? Number(p.distance) : undefined,
+          const nextPeople = Array.isArray(ws.people)
+            ? ws.people
+                .map((person) => ({
+                  name: String(person?.name ?? "").trim(),
+                  emotion: typeof person?.emotion === "string" ? person.emotion : "",
+                  distance: Number.isFinite(person?.distance) ? Number(person.distance) : undefined,
                 }))
-                .filter((p) => p.name),
-            );
-          } else {
-            setPeople(names.map((name) => ({ name: String(name), emotion: "" })));
-          }
+                .filter((person) => person.name)
+            : names.map((name) => ({ name, emotion: "" }));
+          setPeople(nextPeople);
+
+          setSnapshotWho(who || "не определен");
           setSnapshotUrl(typeof ws.snapshotUrl === "string" ? ws.snapshotUrl : "");
-          setLastRecognitionAt(
-            typeof ws.lastRecognitionAt === "string" ? ws.lastRecognitionAt : "",
-          );
+          setLastRecognitionAt(typeof ws.lastRecognitionAt === "string" ? ws.lastRecognitionAt : "");
         } else {
           setPeople([]);
+          setSnapshotWho("");
           setLastRecognitionAt("");
           setWorkerDebugLine(`[${new Date().toLocaleTimeString()}] данные воркера: нет`);
         }
@@ -328,6 +333,26 @@ export default function CameraTile({
     };
   }, [camera.id]);
 
+  async function setWorkerZoomRemote(nextZoom: number) {
+    setWorkerZoomSaving(true);
+    try {
+      const res = await fetch("/api/worker/zoom", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ cameraId: camera.id, zoom: nextZoom }),
+      });
+      if (!res.ok) throw new Error(`zoom_http_${res.status}`);
+      setWorkerZoom(clampWorkerZoom(nextZoom));
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "zoom_update_failed";
+      setWorkerDebugLine(
+        `[${new Date().toLocaleTimeString()}] ошибка установки worker zoom: ${message}`,
+      );
+    } finally {
+      setWorkerZoomSaving(false);
+    }
+  }
+
   return (
     <Card className="camera-card" size="small">
       <div className="camera-media">
@@ -346,15 +371,17 @@ export default function CameraTile({
           </div>
         ) : null}
       </div>
+
       <div className="camera-footer">
         <div>
           <Text strong>{camera.name}</Text>
           <div>
             <Text type="secondary">{camera.location || camera.id}</Text>
           </div>
+
           <div className="camera-zoom">
             <div className="camera-zoom-head">
-              <Text type="secondary">Zoom</Text>
+              <Text type="secondary">Zoom (UI)</Text>
               <Text type="secondary">{`x${zoomValue.toFixed(1)}`}</Text>
             </div>
             <input
@@ -369,9 +396,32 @@ export default function CameraTile({
                 if (!Number.isFinite(nextZoom)) return;
                 setZoomValue(clampZoom(nextZoom));
               }}
-              aria-label={`${camera.name} zoom`}
+              aria-label={`${camera.name} ui zoom`}
             />
           </div>
+
+          <div className="camera-worker-zoom">
+            <div className="camera-zoom-head">
+              <Text type="secondary">Zoom (worker)</Text>
+              <Text type="secondary">{`x${workerZoom.toFixed(1)}`}</Text>
+            </div>
+            <div className="camera-worker-zoom-buttons">
+              {WORKER_ZOOM_PRESETS.map((value) => (
+                <button
+                  key={value}
+                  type="button"
+                  className={`camera-worker-zoom-button ${Math.abs(workerZoom - value) < 0.05 ? "active" : ""}`}
+                  disabled={workerZoomSaving}
+                  onClick={() => {
+                    void setWorkerZoomRemote(value);
+                  }}
+                >
+                  {value}x
+                </button>
+              ))}
+            </div>
+          </div>
+
           {people.length ? (
             <div className="camera-people">
               {people.map((person) => (
@@ -386,21 +436,27 @@ export default function CameraTile({
               <Text type="secondary">{labels.noRecognitions}</Text>
             </div>
           )}
+
           {snapshotUrl ? (
             <div className="camera-evidence">
               <img className="camera-evidence-image" src={snapshotUrl} alt={`${camera.name} snapshot`} />
               <div className="camera-evidence-meta">
-                <Text type="secondary">Worker snapshot</Text>
+                <Text type="secondary">Снимок воркера</Text>
                 {lastRecognitionAt ? (
                   <Text type="secondary">{formatRecognitionTime(lastRecognitionAt)}</Text>
                 ) : null}
               </div>
+              <div className="camera-evidence-meta">
+                <Text type="secondary">{`На снимке: ${snapshotWho || "не определен"}`}</Text>
+              </div>
             </div>
           ) : null}
+
           <div className="camera-debug-line">
             <Text type="secondary">{workerDebugLine}</Text>
           </div>
         </div>
+
         <Tag color={people.length ? "green" : "geekblue"}>
           {people.length ? labels.recognized : "RTSP"}
         </Tag>
@@ -408,3 +464,4 @@ export default function CameraTile({
     </Card>
   );
 }
+

@@ -32,6 +32,8 @@ GO2RTC_BASE_URL=http://127.0.0.1:1984
 GO2RTC_FRAME_WIDTH=1280
 GO2RTC_FRAME_HEIGHT=720
 GO2RTC_FRAME_QUALITY=92
+# Optional defaults for worker-only zoom (x1..x5)
+# WORKER_CAMERA_ZOOMS=cam-01=1,cam-02=2
 ```
 
 Notes:
@@ -75,6 +77,14 @@ Worker status API used by UI in worker mode:
 
 ```bash
 curl -s "http://127.0.0.1:3000/api/worker/status?cameraId=cam-01"
+```
+
+Worker zoom API (camera-specific, does not affect UI stream):
+
+```bash
+curl -s -X POST "http://127.0.0.1:3000/api/worker/zoom" \
+  -H "Content-Type: application/json" \
+  -d '{"cameraId":"cam-02","zoom":2}'
 ```
 
 Look for:

@@ -1,4 +1,4 @@
-#!/usr/bin/env node
+﻿#!/usr/bin/env node
 /* Detection-only worker using the same model family/logic as browser face-api. */
 
 import fs from "node:fs";
@@ -91,6 +91,25 @@ function parseCameraSources() {
     }
   }
   return list;
+}
+
+function parseWorkerZoomDefaults() {
+  const raw = (process.env.WORKER_CAMERA_ZOOMS ?? "").trim();
+  const map = {};
+  if (!raw) return map;
+
+  for (const part of raw.split(",")) {
+    const entry = part.trim();
+    if (!entry) continue;
+    const eq = entry.indexOf("=");
+    if (eq <= 0) continue;
+    const cameraId = entry.slice(0, eq).trim();
+    const zoom = clampWorkerZoom(entry.slice(eq + 1).trim(), Number.NaN);
+    if (!cameraId || !Number.isFinite(zoom)) continue;
+    map[cameraId] = zoom;
+  }
+
+  return map;
 }
 
 function getBox(det) {
@@ -249,6 +268,24 @@ function rgbaToRgbTensorData(rgba) {
   return rgb;
 }
 
+function clampWorkerZoom(value, fallback = 1) {
+  const parsed =
+    typeof value === "number" ? value : Number.parseFloat(String(value ?? "").trim());
+  if (!Number.isFinite(parsed)) return fallback;
+  return Math.min(5, Math.max(1, Number(parsed.toFixed(2))));
+}
+
+async function readWorkerZoomState(filePath) {
+  try {
+    const raw = await fsp.readFile(filePath, "utf-8");
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return {};
+    return parsed;
+  } catch {
+    return {};
+  }
+}
+
 async function fetchFrame(frameUrl, timeoutMs) {
   const url = new URL(frameUrl);
   url.searchParams.set("t", String(Date.now()));
@@ -278,6 +315,7 @@ function createState(cameraId, src) {
   return {
     cameraId,
     src,
+    workerZoom: 1,
     candidate: 0,
     confirmed: 0,
     score: 0,
@@ -294,6 +332,8 @@ function createState(cameraId, src) {
     lastFrameBytes: 0,
     lastFrameWidth: 0,
     lastFrameHeight: 0,
+    workerFrameWidth: 0,
+    workerFrameHeight: 0,
     lastFrameError: "",
     lastRecognitionAt: 0,
     lastConfirmedAt: 0,
@@ -331,6 +371,9 @@ async function main() {
   const statusFile = process.env.WORKER_STATUS_FILE || "/tmp/mood-checker-worker-status.json";
   const statusDir = path.dirname(statusFile);
   await fsp.mkdir(statusDir, { recursive: true }).catch(() => {});
+  const workerZoomStateFile = process.env.WORKER_ZOOM_STATE_FILE || "/tmp/mood-checker-worker-zoom.json";
+  const workerZoomStateDir = path.dirname(workerZoomStateFile);
+  await fsp.mkdir(workerZoomStateDir, { recursive: true }).catch(() => {});
 
   const frameApiBase =
     (process.env.WORKER_FRAME_API_BASE || "http://127.0.0.1:3000/api/camera/frame").replace(/\/+$/, "");
@@ -365,6 +408,8 @@ async function main() {
   const emotionIntervalMs = Math.max(150, envInt("WORKER_EMOTION_INTERVAL_MS", 300));
   const snapshotCooldownMs = Math.max(150, envInt("WORKER_SNAPSHOT_COOLDOWN_MS", 450));
   const recognitionHoldMs = Math.max(0, envInt("WORKER_RECOGNITION_HOLD_MS", 1200));
+  const workerZoomReloadMs = Math.max(250, envInt("WORKER_ZOOM_RELOAD_MS", 700));
+  const workerZoomDefaults = parseWorkerZoomDefaults();
   const dbEndpoint = (process.env.WORKER_DB_ENDPOINT || "http://127.0.0.1:3000/api/recognitions").trim();
   const dbCooldownMs = Math.max(1000, envInt("WORKER_DB_COOLDOWN_MS", 4000));
   const saveSnapshots = envBool("WORKER_SAVE_SNAPSHOTS", true);
@@ -496,36 +541,70 @@ async function main() {
 
   let lastHeartbeatAt = 0;
   let lastStatusAt = 0;
+  let lastZoomReloadAt = 0;
+  let workerZoomMap = {};
 
   while (!stopping) {
     const now = Date.now();
     let confirmedTotal = 0;
 
+    if (now - lastZoomReloadAt >= workerZoomReloadMs) {
+      workerZoomMap = await readWorkerZoomState(workerZoomStateFile);
+      lastZoomReloadAt = now;
+    }
+
     for (const cam of states) {
       const frameUrl = buildFrameUrl(frameApiBase, cam.src);
+      cam.workerZoom = clampWorkerZoom(
+        workerZoomMap?.[cam.cameraId] ?? workerZoomDefaults[cam.cameraId] ?? 1,
+        1,
+      );
 
       try {
         const jpg = await fetchFrame(frameUrl, frameTimeoutMs);
         const image = await loadImage(jpg);
-        const w = Number(image.width ?? 0);
-        const h = Number(image.height ?? 0);
-        if (!w || !h) {
+        const sourceWidth = Number(image.width ?? 0);
+        const sourceHeight = Number(image.height ?? 0);
+        if (!sourceWidth || !sourceHeight) {
           throw new Error("invalid_image");
         }
+        const workerWidth =
+          cam.workerZoom > 1
+            ? Math.max(64, Math.floor(sourceWidth / cam.workerZoom))
+            : sourceWidth;
+        const workerHeight =
+          cam.workerZoom > 1
+            ? Math.max(64, Math.floor(sourceHeight / cam.workerZoom))
+            : sourceHeight;
+        const cropX = Math.max(0, Math.floor((sourceWidth - workerWidth) / 2));
+        const cropY = Math.max(0, Math.floor((sourceHeight - workerHeight) / 2));
+
         cam.frameOk = true;
         cam.lastFrameAt = now;
         cam.lastFrameBytes = jpg.byteLength;
-        cam.lastFrameWidth = w;
-        cam.lastFrameHeight = h;
+        cam.lastFrameWidth = sourceWidth;
+        cam.lastFrameHeight = sourceHeight;
+        cam.workerFrameWidth = workerWidth;
+        cam.workerFrameHeight = workerHeight;
         cam.lastFrameError = "";
 
-        const canvas = createCanvas(w, h);
+        const canvas = createCanvas(workerWidth, workerHeight);
         const ctx = canvas.getContext("2d");
-        ctx.drawImage(image, 0, 0, w, h);
-        const rgba = ctx.getImageData(0, 0, w, h).data;
+        ctx.drawImage(
+          image,
+          cropX,
+          cropY,
+          workerWidth,
+          workerHeight,
+          0,
+          0,
+          workerWidth,
+          workerHeight,
+        );
+        const rgba = ctx.getImageData(0, 0, workerWidth, workerHeight).data;
         const rgb = rgbaToRgbTensorData(rgba);
         // Keep dtype close to browser fromPixels() behavior used by face-api in client mode.
-        const frameTensor = faceapi.tf.tensor3d(rgb, [h, w, 3], "int32");
+        const frameTensor = faceapi.tf.tensor3d(rgb, [workerHeight, workerWidth, 3], "int32");
 
         let detections = [];
         try {
@@ -544,7 +623,7 @@ async function main() {
           cam.prevLuma = nextLuma;
         }
 
-        detections = filterAndDedupeDetections(detections, w, h, {
+        detections = filterAndDedupeDetections(detections, workerWidth, workerHeight, {
           minSidePxBase: filterMinSidePx,
           minSideRatio: filterMinSideRatio,
           minAreaRatio: filterMinAreaRatio,
@@ -621,7 +700,7 @@ async function main() {
         if (shouldSnapshot) {
           cam.lastSnapshotAt = now;
           try {
-            const snapTensor = faceapi.tf.tensor3d(rgb, [h, w, 3], "int32");
+            const snapTensor = faceapi.tf.tensor3d(rgb, [workerHeight, workerWidth, 3], "int32");
             let results = [];
             const runDetect = async (options) => {
               let task = faceapi.detectAllFaces(snapTensor, options);
@@ -643,7 +722,7 @@ async function main() {
               snapTensor.dispose();
             }
 
-            results = filterAndDedupeDetections(results || [], w, h, {
+            results = filterAndDedupeDetections(results || [], workerWidth, workerHeight, {
               minSidePxBase: filterMinSidePx,
               minSideRatio: filterMinSideRatio,
               minAreaRatio: filterMinAreaRatio,
@@ -806,6 +885,8 @@ async function main() {
         cam.topEmotion = "";
         cam.lastRecognitionAt = 0;
         cam.frameOk = false;
+        cam.workerFrameWidth = 0;
+        cam.workerFrameHeight = 0;
         cam.lastFrameError = String(err);
         if (now - cam.lastErrLogAt >= 2000) {
           log(`[${cam.cameraId}] frame error: ${String(err)}`);
@@ -829,15 +910,14 @@ async function main() {
       for (const cam of states) {
         const hasPerson = cam.candidate > 0 && cam.score >= minConfirmScore;
         const hasFace = cam.confirmed > 0;
-        const who = cam.matchedNames.length ? cam.matchedNames.join(", ") : "не определен";
-        const emotion = cam.topEmotion || "нет";
+        const who = cam.matchedNames.length ? cam.matchedNames.join(", ") : "unknown";
+        const emotion = cam.topEmotion || "none";
         const frameState = cam.frameOk
-          ? `есть (${cam.lastFrameWidth}x${cam.lastFrameHeight}, ${cam.lastFrameBytes}b)`
-          : `нет (${cam.lastFrameError || "unknown"})`;
+          ? `ok(${cam.lastFrameWidth}x${cam.lastFrameHeight}->${cam.workerFrameWidth}x${cam.workerFrameHeight},z=${cam.workerZoom.toFixed(1)}x,${cam.lastFrameBytes}b)`
+          : `err(${cam.lastFrameError || "unknown"})`;
         log(
-          `[${cam.cameraId}] человек в кадре: ${hasPerson ? "есть" : "нет"} | ` +
-            `лицо: ${hasFace ? "есть" : "нет"} | ` +
-            `кто: ${who} | эмоция: ${emotion} | кадр: ${frameState}`,
+          `[${cam.cameraId}] status person=${hasPerson ? 1 : 0} face=${hasFace ? 1 : 0} ` +
+            `who=${who} emotion=${emotion} frame=${frameState}`,
         );
         payload.cameras[cam.cameraId] = {
           candidate: cam.candidate,
@@ -850,6 +930,7 @@ async function main() {
           matchDistance: Number(cam.matchDistance.toFixed(3)),
           personInFrame: hasPerson,
           faceInFrame: hasFace,
+          workerZoom: Number(cam.workerZoom.toFixed(2)),
           people: cam.people,
           emotionSummary: cam.emotionSummary,
           topEmotion: cam.topEmotion,
@@ -860,6 +941,8 @@ async function main() {
           lastFrameBytes: cam.lastFrameBytes,
           frameWidth: cam.lastFrameWidth,
           frameHeight: cam.lastFrameHeight,
+          workerFrameWidth: cam.workerFrameWidth,
+          workerFrameHeight: cam.workerFrameHeight,
           frameError: cam.lastFrameError,
         };
       }
@@ -881,3 +964,5 @@ main().catch((err) => {
   process.stderr.write(`[node-detection-worker] fatal: ${String(err)}\n`);
   process.exit(1);
 });
+
+
