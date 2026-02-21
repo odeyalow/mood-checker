@@ -101,12 +101,14 @@ export default function CameraTile({
   const [people, setPeople] = useState<{ name: string; emotion?: string; distance?: number }[]>([]);
   const [snapshotUrl, setSnapshotUrl] = useState("");
   const [lastRecognitionAt, setLastRecognitionAt] = useState("");
+  const [workerDebugLine, setWorkerDebugLine] = useState("worker: waiting...");
   const [zoomValue, setZoomValue] = useState<number>(clampZoom(camera.digitalZoom));
 
   useEffect(() => {
     setPeople([]);
     setSnapshotUrl("");
     setLastRecognitionAt("");
+    setWorkerDebugLine("worker: waiting...");
   }, [camera.id]);
 
   useEffect(() => {
@@ -199,8 +201,6 @@ export default function CameraTile({
   }, [camera.id, camera.rtspUrl]);
 
   useEffect(() => {
-    if (status !== "ready") return;
-
     let mounted = true;
     let timer = 0;
 
@@ -214,6 +214,12 @@ export default function CameraTile({
           ts?: string;
           cameraId?: string;
           status?: {
+            candidate?: number;
+            confirmed?: number;
+            score?: number;
+            motion?: number;
+            streak?: number;
+            requiredFrames?: number;
             matchedNames?: string[];
             matchDistance?: number;
             emotionSummary?: string;
@@ -226,6 +232,24 @@ export default function CameraTile({
 
         const ws = payload.status;
         if (ws) {
+          const names = Array.isArray(ws.matchedNames) ? ws.matchedNames : [];
+          const score = Number.isFinite(ws.score) ? Number(ws.score).toFixed(3) : "-";
+          const motion = Number.isFinite(ws.motion) ? Number(ws.motion).toFixed(2) : "-";
+          const matchDistance = Number.isFinite(ws.matchDistance)
+            ? Number(ws.matchDistance).toFixed(3)
+            : "-";
+          const candidate = Number.isFinite(ws.candidate) ? Number(ws.candidate) : 0;
+          const confirmed = Number.isFinite(ws.confirmed) ? Number(ws.confirmed) : 0;
+          const streak =
+            Number.isFinite(ws.streak) && Number.isFinite(ws.requiredFrames)
+              ? `${ws.streak}/${ws.requiredFrames}`
+              : "-";
+          const ts = new Date().toLocaleTimeString();
+          setWorkerDebugLine(
+            `[${ts}] c=${candidate} ok=${confirmed} score=${score} motion=${motion} ` +
+              `streak=${streak} match=${matchDistance} names=${names.join("|") || "-"}`,
+          );
+
           if (Array.isArray(ws.people)) {
             setPeople(
               ws.people
@@ -237,7 +261,6 @@ export default function CameraTile({
                 .filter((p) => p.name),
             );
           } else {
-            const names = Array.isArray(ws.matchedNames) ? ws.matchedNames : [];
             setPeople(names.map((name) => ({ name: String(name), emotion: "" })));
           }
           setSnapshotUrl(typeof ws.snapshotUrl === "string" ? ws.snapshotUrl : "");
@@ -247,12 +270,16 @@ export default function CameraTile({
         } else {
           setPeople([]);
           setLastRecognitionAt("");
+          setWorkerDebugLine(`[${new Date().toLocaleTimeString()}] worker status: null`);
         }
-      } catch {}
+      } catch (error) {
+        const message = error instanceof Error ? error.message : "request_failed";
+        setWorkerDebugLine(`[${new Date().toLocaleTimeString()}] worker fetch error: ${message}`);
+      }
 
       timer = window.setTimeout(() => {
         void poll();
-      }, 250);
+      }, 500);
     };
 
     void poll();
@@ -260,7 +287,7 @@ export default function CameraTile({
       mounted = false;
       if (timer) window.clearTimeout(timer);
     };
-  }, [status, camera.id]);
+  }, [camera.id]);
 
   return (
     <Card className="camera-card" size="small">
@@ -334,6 +361,9 @@ export default function CameraTile({
               </div>
             </div>
           ) : null}
+          <div className="camera-debug-line">
+            <Text type="secondary">{workerDebugLine}</Text>
+          </div>
         </div>
         <Tag color={people.length ? "green" : "geekblue"}>
           {people.length ? labels.recognized : "RTSP"}
