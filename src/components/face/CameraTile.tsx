@@ -212,6 +212,8 @@ export default function CameraTile({
         });
         const payload = (await res.json()) as {
           ts?: string;
+          now?: string;
+          statusFileMtime?: string;
           cameraId?: string;
           status?: {
             candidate?: number;
@@ -232,6 +234,8 @@ export default function CameraTile({
 
         const ws = payload.status;
         if (ws) {
+          const sourceTs = typeof payload.ts === "string" ? payload.ts : "";
+          const mtime = typeof payload.statusFileMtime === "string" ? payload.statusFileMtime : "";
           const names = Array.isArray(ws.matchedNames) ? ws.matchedNames : [];
           const score = Number.isFinite(ws.score) ? Number(ws.score).toFixed(3) : "-";
           const motion = Number.isFinite(ws.motion) ? Number(ws.motion).toFixed(2) : "-";
@@ -247,7 +251,8 @@ export default function CameraTile({
           const ts = new Date().toLocaleTimeString();
           setWorkerDebugLine(
             `[${ts}] c=${candidate} ok=${confirmed} score=${score} motion=${motion} ` +
-              `streak=${streak} match=${matchDistance} names=${names.join("|") || "-"}`,
+              `streak=${streak} match=${matchDistance} names=${names.join("|") || "-"} ` +
+              `ts=${sourceTs || "-"} mtime=${mtime || "-"}`,
           );
 
           if (Array.isArray(ws.people)) {
