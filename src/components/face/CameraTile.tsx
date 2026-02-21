@@ -101,14 +101,14 @@ export default function CameraTile({
   const [people, setPeople] = useState<{ name: string; emotion?: string; distance?: number }[]>([]);
   const [snapshotUrl, setSnapshotUrl] = useState("");
   const [lastRecognitionAt, setLastRecognitionAt] = useState("");
-  const [workerDebugLine, setWorkerDebugLine] = useState("worker: waiting...");
+  const [workerDebugLine, setWorkerDebugLine] = useState("ожидание данных воркера...");
   const [zoomValue, setZoomValue] = useState<number>(clampZoom(camera.digitalZoom));
 
   useEffect(() => {
     setPeople([]);
     setSnapshotUrl("");
     setLastRecognitionAt("");
-    setWorkerDebugLine("worker: waiting...");
+    setWorkerDebugLine("ожидание данных воркера...");
   }, [camera.id]);
 
   useEffect(() => {
@@ -234,25 +234,35 @@ export default function CameraTile({
 
         const ws = payload.status;
         if (ws) {
-          const sourceTs = typeof payload.ts === "string" ? payload.ts : "";
-          const mtime = typeof payload.statusFileMtime === "string" ? payload.statusFileMtime : "";
           const names = Array.isArray(ws.matchedNames) ? ws.matchedNames : [];
+          const peopleNames = Array.isArray(ws.people)
+            ? ws.people
+                .map((p) => String(p?.name ?? "").trim())
+                .filter((name) => name.length > 0)
+            : [];
+          const who = (peopleNames.length ? peopleNames : names)
+            .map((name) => String(name).trim())
+            .filter((name) => name.length > 0)
+            .join(", ");
           const score = Number.isFinite(ws.score) ? Number(ws.score).toFixed(3) : "-";
-          const motion = Number.isFinite(ws.motion) ? Number(ws.motion).toFixed(2) : "-";
           const matchDistance = Number.isFinite(ws.matchDistance)
             ? Number(ws.matchDistance).toFixed(3)
             : "-";
           const candidate = Number.isFinite(ws.candidate) ? Number(ws.candidate) : 0;
           const confirmed = Number.isFinite(ws.confirmed) ? Number(ws.confirmed) : 0;
-          const streak =
-            Number.isFinite(ws.streak) && Number.isFinite(ws.requiredFrames)
-              ? `${ws.streak}/${ws.requiredFrames}`
-              : "-";
+          const hasFace = candidate > 0 || confirmed > 0;
+          const motion = Number.isFinite(ws.motion) ? Number(ws.motion) : 0;
+          const hasPerson = hasFace || motion >= 0.8;
+          const emotion =
+            typeof ws.topEmotion === "string" && ws.topEmotion.trim().length > 0
+              ? ws.topEmotion.trim()
+              : "нет";
           const ts = new Date().toLocaleTimeString();
           setWorkerDebugLine(
-            `[${ts}] c=${candidate} ok=${confirmed} score=${score} motion=${motion} ` +
-              `streak=${streak} match=${matchDistance} names=${names.join("|") || "-"} ` +
-              `ts=${sourceTs || "-"} mtime=${mtime || "-"}`,
+            `[${ts}] человек в кадре: ${hasPerson ? "есть" : "нет"} | ` +
+              `лицо: ${hasFace ? "есть" : "нет"} | ` +
+              `кто: ${who || "не определен"} | ` +
+              `эмоция: ${emotion} | score: ${score} | match: ${matchDistance}`,
           );
 
           if (Array.isArray(ws.people)) {
@@ -275,11 +285,13 @@ export default function CameraTile({
         } else {
           setPeople([]);
           setLastRecognitionAt("");
-          setWorkerDebugLine(`[${new Date().toLocaleTimeString()}] worker status: null`);
+          setWorkerDebugLine(`[${new Date().toLocaleTimeString()}] данные воркера: нет`);
         }
       } catch (error) {
         const message = error instanceof Error ? error.message : "request_failed";
-        setWorkerDebugLine(`[${new Date().toLocaleTimeString()}] worker fetch error: ${message}`);
+        setWorkerDebugLine(
+          `[${new Date().toLocaleTimeString()}] ошибка запроса статуса воркера: ${message}`,
+        );
       }
 
       timer = window.setTimeout(() => {

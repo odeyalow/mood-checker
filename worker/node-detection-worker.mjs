@@ -323,7 +323,7 @@ async function main() {
   const frameTimeoutMs = Math.max(700, envInt("WORKER_FRAME_TIMEOUT_MS", 1800));
   const loopDelayMs = Math.max(20, envInt("WORKER_LOOP_DELAY_MS", 80));
   const heartbeatSeconds = Math.max(1, envFloat("WORKER_HEARTBEAT_SECONDS", 5));
-  const statusLogSeconds = Math.max(0.4, envFloat("WORKER_STATUS_LOG_SECONDS", 1.0));
+  const statusLogSeconds = Math.max(0.4, envFloat("WORKER_STATUS_LOG_SECONDS", 1.5));
   const detectionLogCooldownMs = Math.max(200, envInt("WORKER_DETECTION_LOG_COOLDOWN_MS", 500));
   const candidateLogCooldownMs = Math.max(200, envInt("WORKER_CANDIDATE_LOG_COOLDOWN_MS", 700));
   const confirmFrames = Math.max(1, envInt("WORKER_CONFIRM_FRAMES", 1));
@@ -796,11 +796,16 @@ async function main() {
         cameras: {},
       };
       for (const cam of states) {
+        const hasFace = cam.candidate > 0 || cam.confirmed > 0;
+        const hasPerson = hasFace || cam.motion >= motionThreshold;
+        const who = cam.matchedNames.length ? cam.matchedNames.join(", ") : "не определен";
+        const emotion = cam.topEmotion || "нет";
         log(
-          `[${cam.cameraId}] status candidate=${cam.candidate} confirmed=${cam.confirmed} ` +
+          `[${cam.cameraId}] человек в кадре: ${hasPerson ? "есть" : "нет"} | ` +
+            `лицо: ${hasFace ? "есть" : "нет"} | ` +
+            `кто: ${who} | эмоция: ${emotion} | ` +
             `score=${cam.score.toFixed(3)} motion=${cam.motion.toFixed(2)} ` +
-            `streak=${cam.streak}/${confirmFrames} names=${cam.matchedNames.join("|") || "-"} ` +
-            `emotion=${cam.topEmotion || "-"}`,
+            `streak=${cam.streak}/${confirmFrames} match=${cam.matchDistance.toFixed(3)}`,
         );
         payload.cameras[cam.cameraId] = {
           candidate: cam.candidate,
