@@ -15,6 +15,12 @@ type WorkerStatusCamera = {
   people?: { name: string; emotion?: string; distance?: number }[];
   snapshotUrl?: string;
   lastRecognitionAt?: string;
+  frameOk?: boolean;
+  lastFrameAt?: string;
+  lastFrameBytes?: number;
+  frameWidth?: number;
+  frameHeight?: number;
+  frameError?: string;
 };
 
 type WorkerStatusPayload = {

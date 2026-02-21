@@ -287,6 +287,12 @@ function createState(cameraId, src) {
     emotionSummary: "",
     topEmotion: "",
     snapshotUrl: "",
+    frameOk: false,
+    lastFrameAt: 0,
+    lastFrameBytes: 0,
+    lastFrameWidth: 0,
+    lastFrameHeight: 0,
+    lastFrameError: "",
     lastRecognitionAt: 0,
     lastConfirmedAt: 0,
     lastMatchAt: 0,
@@ -497,6 +503,12 @@ async function main() {
         if (!w || !h) {
           throw new Error("invalid_image");
         }
+        cam.frameOk = true;
+        cam.lastFrameAt = now;
+        cam.lastFrameBytes = jpg.byteLength;
+        cam.lastFrameWidth = w;
+        cam.lastFrameHeight = h;
+        cam.lastFrameError = "";
 
         const canvas = createCanvas(w, h);
         const ctx = canvas.getContext("2d");
@@ -776,6 +788,8 @@ async function main() {
         cam.matchDistance = 0;
         cam.emotionSummary = "";
         cam.topEmotion = "";
+        cam.frameOk = false;
+        cam.lastFrameError = String(err);
         if (now - cam.lastErrLogAt >= 2000) {
           log(`[${cam.cameraId}] frame error: ${String(err)}`);
           cam.lastErrLogAt = now;
@@ -800,12 +814,13 @@ async function main() {
         const hasPerson = hasFace || cam.motion >= motionThreshold;
         const who = cam.matchedNames.length ? cam.matchedNames.join(", ") : "не определен";
         const emotion = cam.topEmotion || "нет";
+        const frameState = cam.frameOk
+          ? `есть (${cam.lastFrameWidth}x${cam.lastFrameHeight}, ${cam.lastFrameBytes}b)`
+          : `нет (${cam.lastFrameError || "unknown"})`;
         log(
           `[${cam.cameraId}] человек в кадре: ${hasPerson ? "есть" : "нет"} | ` +
             `лицо: ${hasFace ? "есть" : "нет"} | ` +
-            `кто: ${who} | эмоция: ${emotion} | ` +
-            `score=${cam.score.toFixed(3)} motion=${cam.motion.toFixed(2)} ` +
-            `streak=${cam.streak}/${confirmFrames} match=${cam.matchDistance.toFixed(3)}`,
+            `кто: ${who} | эмоция: ${emotion} | кадр: ${frameState}`,
         );
         payload.cameras[cam.cameraId] = {
           candidate: cam.candidate,
@@ -821,6 +836,12 @@ async function main() {
           topEmotion: cam.topEmotion,
           snapshotUrl: cam.snapshotUrl,
           lastRecognitionAt: cam.lastRecognitionAt ? new Date(cam.lastRecognitionAt).toISOString() : "",
+          frameOk: cam.frameOk,
+          lastFrameAt: cam.lastFrameAt ? new Date(cam.lastFrameAt).toISOString() : "",
+          lastFrameBytes: cam.lastFrameBytes,
+          frameWidth: cam.lastFrameWidth,
+          frameHeight: cam.lastFrameHeight,
+          frameError: cam.lastFrameError,
         };
       }
       try {

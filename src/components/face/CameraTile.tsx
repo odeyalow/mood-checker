@@ -226,11 +226,17 @@ export default function CameraTile({
             matchDistance?: number;
             emotionSummary?: string;
             topEmotion?: string;
-            people?: { name: string; emotion?: string; distance?: number }[];
-            snapshotUrl?: string;
-            lastRecognitionAt?: string;
-          } | null;
-        };
+          people?: { name: string; emotion?: string; distance?: number }[];
+          snapshotUrl?: string;
+          lastRecognitionAt?: string;
+          frameOk?: boolean;
+          lastFrameAt?: string;
+          lastFrameBytes?: number;
+          frameWidth?: number;
+          frameHeight?: number;
+          frameError?: string;
+        } | null;
+      };
 
         const ws = payload.status;
         if (ws) {
@@ -244,10 +250,6 @@ export default function CameraTile({
             .map((name) => String(name).trim())
             .filter((name) => name.length > 0)
             .join(", ");
-          const score = Number.isFinite(ws.score) ? Number(ws.score).toFixed(3) : "-";
-          const matchDistance = Number.isFinite(ws.matchDistance)
-            ? Number(ws.matchDistance).toFixed(3)
-            : "-";
           const candidate = Number.isFinite(ws.candidate) ? Number(ws.candidate) : 0;
           const confirmed = Number.isFinite(ws.confirmed) ? Number(ws.confirmed) : 0;
           const hasFace = candidate > 0 || confirmed > 0;
@@ -257,12 +259,29 @@ export default function CameraTile({
             typeof ws.topEmotion === "string" && ws.topEmotion.trim().length > 0
               ? ws.topEmotion.trim()
               : "нет";
+          const frameOk = ws.frameOk === true;
+          const frameHasSize =
+            Number.isFinite(ws.frameWidth) &&
+            Number(ws.frameWidth) > 0 &&
+            Number.isFinite(ws.frameHeight) &&
+            Number(ws.frameHeight) > 0;
+          const frameAt =
+            typeof ws.lastFrameAt === "string" && ws.lastFrameAt
+              ? new Date(ws.lastFrameAt).getTime()
+              : 0;
+          const frameAgeSec = frameAt ? Math.max(0, Math.round((Date.now() - frameAt) / 1000)) : 0;
+          const frameState = frameOk && frameHasSize ? "есть" : "нет";
+          const frameInfo = frameOk && frameHasSize
+            ? `${Number(ws.frameWidth)}x${Number(ws.frameHeight)}, ${frameAgeSec}с назад`
+            : typeof ws.frameError === "string" && ws.frameError.trim()
+              ? ws.frameError.trim()
+              : "нет данных";
           const ts = new Date().toLocaleTimeString();
           setWorkerDebugLine(
             `[${ts}] человек в кадре: ${hasPerson ? "есть" : "нет"} | ` +
               `лицо: ${hasFace ? "есть" : "нет"} | ` +
               `кто: ${who || "не определен"} | ` +
-              `эмоция: ${emotion} | score: ${score} | match: ${matchDistance}`,
+              `эмоция: ${emotion} | кадр: ${frameState} (${frameInfo})`,
           );
 
           if (Array.isArray(ws.people)) {
@@ -355,10 +374,7 @@ export default function CameraTile({
               {people.map((person) => (
                 <div key={`${person.name}-${person.emotion || "none"}`} className="camera-person">
                   <Text type="secondary">{person.name}</Text>
-                  <Text type="secondary">
-                    {person.emotion ? person.emotion : labels.emotion}{" "}
-                    {typeof person.distance === "number" ? `(${person.distance.toFixed(3)})` : ""}
-                  </Text>
+                  <Text type="secondary">{person.emotion ? person.emotion : labels.emotion}</Text>
                 </div>
               ))}
             </div>
