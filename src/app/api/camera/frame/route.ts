@@ -6,6 +6,18 @@ function isValidSrc(value: string) {
   return /^[a-zA-Z0-9_-]+$/.test(value);
 }
 
+function parseIntParam(
+  rawValue: string | null | undefined,
+  min: number,
+  max: number,
+): number | null {
+  if (!rawValue) return null;
+  const parsed = Number.parseInt(rawValue, 10);
+  if (!Number.isFinite(parsed)) return null;
+  if (parsed < min || parsed > max) return null;
+  return parsed;
+}
+
 export async function GET(req: NextRequest) {
   const src = req.nextUrl.searchParams.get("src") || "";
   if (!src || !isValidSrc(src)) {
@@ -13,10 +25,31 @@ export async function GET(req: NextRequest) {
   }
 
   const go2rtcBaseUrl = process.env.GO2RTC_BASE_URL || DEFAULT_GO2RTC_BASE_URL;
-  const url = `${go2rtcBaseUrl}/api/frame.jpeg?src=${encodeURIComponent(src)}`;
+  const width = parseIntParam(
+    req.nextUrl.searchParams.get("width") ?? process.env.GO2RTC_FRAME_WIDTH,
+    160,
+    7680,
+  );
+  const height = parseIntParam(
+    req.nextUrl.searchParams.get("height") ?? process.env.GO2RTC_FRAME_HEIGHT,
+    120,
+    4320,
+  );
+  const quality = parseIntParam(
+    req.nextUrl.searchParams.get("quality") ?? process.env.GO2RTC_FRAME_QUALITY,
+    1,
+    100,
+  );
+
+  const upstreamUrl = new URL(go2rtcBaseUrl);
+  upstreamUrl.pathname = `${upstreamUrl.pathname.replace(/\/$/, "")}/api/frame.jpeg`;
+  upstreamUrl.searchParams.set("src", src);
+  if (width != null) upstreamUrl.searchParams.set("width", String(width));
+  if (height != null) upstreamUrl.searchParams.set("height", String(height));
+  if (quality != null) upstreamUrl.searchParams.set("quality", String(quality));
 
   try {
-    const upstream = await fetch(url, { cache: "no-store" });
+    const upstream = await fetch(upstreamUrl.toString(), { cache: "no-store" });
     if (!upstream.ok) {
       const reason = await upstream.text().catch(() => "");
       return new Response(

@@ -250,10 +250,12 @@ function rgbaToRgbTensorData(rgba) {
 }
 
 async function fetchFrame(frameUrl, timeoutMs) {
+  const url = new URL(frameUrl);
+  url.searchParams.set("t", String(Date.now()));
   const controller = new AbortController();
   const t = setTimeout(() => controller.abort(), timeoutMs);
   try {
-    const res = await fetch(`${frameUrl}&t=${Date.now()}`, {
+    const res = await fetch(url.toString(), {
       cache: "no-store",
       signal: controller.signal,
       headers: { Accept: "image/jpeg" },
@@ -308,6 +310,12 @@ function createState(cameraId, src) {
     lastErrLogAt: 0,
     lastDbSentAt: new Map(),
   };
+}
+
+function buildFrameUrl(frameApiBase, src) {
+  const url = new URL(frameApiBase);
+  url.searchParams.set("src", src);
+  return url.toString();
 }
 
 async function main() {
@@ -494,7 +502,7 @@ async function main() {
     let confirmedTotal = 0;
 
     for (const cam of states) {
-      const frameUrl = `${frameApiBase}?src=${encodeURIComponent(cam.src)}`;
+      const frameUrl = buildFrameUrl(frameApiBase, cam.src);
 
       try {
         const jpg = await fetchFrame(frameUrl, frameTimeoutMs);
