@@ -21,7 +21,7 @@ module.exports = {
       },
     },
     {
-      name: "mood-checker-pyworker",
+      name: "mood-checker-worker",
       script: "node",
       args: "worker/node-detection-worker.mjs",
       cwd: __dirname,

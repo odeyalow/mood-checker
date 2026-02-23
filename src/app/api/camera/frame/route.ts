@@ -40,6 +40,11 @@ export async function GET(req: NextRequest) {
     1,
     100,
   );
+  const timeoutMs = parseIntParam(
+    req.nextUrl.searchParams.get("timeoutMs") ?? process.env.GO2RTC_FRAME_TIMEOUT_MS,
+    300,
+    15000,
+  );
 
   const upstreamUrl = new URL(go2rtcBaseUrl);
   upstreamUrl.pathname = `${upstreamUrl.pathname.replace(/\/$/, "")}/api/frame.jpeg`;
@@ -49,7 +54,14 @@ export async function GET(req: NextRequest) {
   if (quality != null) upstreamUrl.searchParams.set("quality", String(quality));
 
   try {
-    const upstream = await fetch(upstreamUrl.toString(), { cache: "no-store" });
+    const controller = new AbortController();
+    const t = setTimeout(() => controller.abort(), timeoutMs ?? 3500);
+    const upstream = await fetch(upstreamUrl.toString(), {
+      cache: "no-store",
+      signal: controller.signal,
+    }).finally(() => {
+      clearTimeout(t);
+    });
     if (!upstream.ok) {
       const reason = await upstream.text().catch(() => "");
       return new Response(
@@ -68,6 +80,9 @@ export async function GET(req: NextRequest) {
       },
     });
   } catch (error) {
+    if (error instanceof Error && error.name === "AbortError") {
+      return new Response(`camera frame timeout src=${src}`, { status: 504 });
+    }
     console.error("[camera-frame] proxy error:", error);
     return new Response("camera frame proxy error", { status: 500 });
   }

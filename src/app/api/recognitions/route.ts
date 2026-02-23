@@ -44,6 +44,12 @@ export async function POST(request: Request) {
     const body = await request.json().catch(() => ({}));
     const name = String(body?.name ?? "").trim();
     const mood = String(body?.mood ?? "").trim();
+    const cameraId = String(body?.cameraId ?? "").trim() || null;
+    const distanceRaw = Number(body?.distance);
+    const emotionConfidenceRaw = Number(body?.emotionConfidence);
+    const workerZoomRaw = Number(body?.workerZoom);
+    const frameWidthRaw = Number(body?.frameWidth);
+    const frameHeightRaw = Number(body?.frameHeight);
     const detectedAtRaw = body?.detectedAt ? new Date(body.detectedAt) : new Date();
 
     if (!name || !mood) {
@@ -55,9 +61,33 @@ export async function POST(request: Request) {
     }
 
     const detectedAt = Number.isNaN(detectedAtRaw.getTime()) ? new Date() : detectedAtRaw;
-    const item = await prisma.recognition.create({
-      data: { name, mood, detectedAt },
-    });
+    const data = {
+      name,
+      mood,
+      detectedAt,
+      cameraId,
+      distance: Number.isFinite(distanceRaw) ? distanceRaw : null,
+      emotionConfidence: Number.isFinite(emotionConfidenceRaw) ? emotionConfidenceRaw : null,
+      workerZoom: Number.isFinite(workerZoomRaw) ? workerZoomRaw : null,
+      frameWidth: Number.isFinite(frameWidthRaw) ? Math.round(frameWidthRaw) : null,
+      frameHeight: Number.isFinite(frameHeightRaw) ? Math.round(frameHeightRaw) : null,
+    };
+
+    let item;
+    try {
+      item = await prisma.recognition.create({ data });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      const migrationMissing =
+        message.includes("Unknown arg") ||
+        message.includes("no such column") ||
+        message.includes("does not exist");
+      if (!migrationMissing) throw error;
+
+      item = await prisma.recognition.create({
+        data: { name, mood, detectedAt },
+      });
+    }
 
     return NextResponse.json({ item });
   } catch (error) {

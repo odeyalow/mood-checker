@@ -16,7 +16,7 @@ type WorkerStatusCamera = {
   workerZoom?: number;
   emotionSummary?: string;
   topEmotion?: string;
-  people?: { name: string; emotion?: string; distance?: number }[];
+  people?: { name: string; emotion?: string; emotionConfidence?: number; distance?: number }[];
   snapshotUrl?: string;
   lastRecognitionAt?: string;
   frameOk?: boolean;
@@ -73,7 +73,7 @@ export async function GET(request: Request) {
         status: null,
         error: error instanceof Error ? error.message : "status_read_failed",
       },
-      { status: 200, headers: { "Cache-Control": "no-store" } },
+      { status: 503, headers: { "Cache-Control": "no-store" } },
     );
   }
 }

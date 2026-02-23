@@ -15,10 +15,19 @@ model User {
 }
 
 model Recognition {
-  id         String   @id @default(cuid())
-  name       String
-  mood       String
-  detectedAt DateTime @default(now())
+  id                String   @id @default(cuid())
+  name              String
+  mood              String
+  detectedAt        DateTime @default(now())
+  cameraId          String?
+  distance          Float?
+  emotionConfidence Float?
+  workerZoom        Float?
+  frameWidth        Int?
+  frameHeight       Int?
+
+  @@index([detectedAt])
+  @@index([cameraId, detectedAt])
 }
 
 model EmotionSnapshot {

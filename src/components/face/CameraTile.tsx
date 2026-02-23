@@ -30,6 +30,7 @@ type PlayerLoader = (options: {
 type WorkerPerson = {
   name: string;
   emotion?: string;
+  emotionConfidence?: number;
   distance?: number;
 };
 

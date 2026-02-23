@@ -126,6 +126,67 @@ function parseWorkerZoomDefaults() {
   return map;
 }
 
+function parseFiniteFloat(value, fallback = Number.NaN) {
+  const parsed =
+    typeof value === "number" ? value : Number.parseFloat(String(value ?? "").trim());
+  return Number.isFinite(parsed) ? parsed : fallback;
+}
+
+function parseFiniteInt(value, fallback = Number.NaN) {
+  const parsed =
+    typeof value === "number" ? Math.trunc(value) : Number.parseInt(String(value ?? "").trim(), 10);
+  return Number.isFinite(parsed) ? parsed : fallback;
+}
+
+function parseCameraSettings() {
+  const raw = (process.env.WORKER_CAMERA_SETTINGS_JSON ?? "").trim();
+  if (!raw) return {};
+  try {
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return {};
+    return parsed;
+  } catch (err) {
+    log(`camera settings parse error: ${String(err)}`);
+    return {};
+  }
+}
+
+function getCameraSetting(cameraSettings, cameraId, key, fallback) {
+  const source = cameraSettings?.[cameraId];
+  if (!source || typeof source !== "object" || Array.isArray(source)) return fallback;
+  if (!(key in source)) return fallback;
+  return source[key];
+}
+
+function parseEmotionFromExpressions(expressions, keys) {
+  if (!expressions) {
+    return {
+      key: "",
+      confidence: 0,
+      vector: {},
+    };
+  }
+
+  const vector = {};
+  let topKey = "";
+  let topVal = -1;
+  for (const k of keys) {
+    const v = Number(expressions[k] ?? 0);
+    const safe = Number.isFinite(v) ? Math.max(0, v) : 0;
+    vector[k] = safe;
+    if (safe > topVal) {
+      topVal = safe;
+      topKey = k;
+    }
+  }
+
+  return {
+    key: topKey,
+    confidence: topVal > 0 ? topVal : 0,
+    vector,
+  };
+}
+
 function getBox(det) {
   const box = det?.box ?? det?.detection?.box;
   if (!box) return null;
@@ -319,6 +380,25 @@ async function fetchFrame(frameUrl, timeoutMs) {
   }
 }
 
+async function postJsonWithTimeout(url, payload, timeoutMs) {
+  const controller = new AbortController();
+  const t = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const res = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+      signal: controller.signal,
+    });
+    if (!res.ok) {
+      const body = await res.text().catch(() => "");
+      throw new Error(`db_http_${res.status}${body ? ` body=${body.slice(0, 180)}` : ""}`);
+    }
+  } finally {
+    clearTimeout(t);
+  }
+}
+
 function isAbortError(err) {
   const message = String(err ?? "");
   return (
@@ -340,6 +420,65 @@ function buildAbortFallbackFrameUrl(frameUrl, width, height, quality) {
     url.searchParams.set("quality", String(Math.floor(quality)));
   }
   return url.toString();
+}
+
+function createDbQueueItem(payload, now) {
+  return {
+    payload,
+    attempts: 0,
+    nextAttemptAt: now,
+  };
+}
+
+async function drainDbQueue({
+  queue,
+  now,
+  maxBatchSize,
+  dbEndpoint,
+  requestTimeoutMs,
+  maxAttempts,
+  retryBaseMs,
+  logPrefix = "db",
+}) {
+  if (!queue.length) return { sent: 0, failed: 0, delayed: 0 };
+
+  const due = [];
+  for (let i = 0; i < queue.length && due.length < maxBatchSize; ) {
+    if ((queue[i]?.nextAttemptAt ?? 0) <= now) {
+      due.push(queue.splice(i, 1)[0]);
+      continue;
+    }
+    i += 1;
+  }
+
+  if (!due.length) return { sent: 0, failed: 0, delayed: 0 };
+
+  let sent = 0;
+  let failed = 0;
+  let delayed = 0;
+
+  await Promise.all(
+    due.map(async (item) => {
+      try {
+        await postJsonWithTimeout(dbEndpoint, item.payload, requestTimeoutMs);
+        sent += 1;
+      } catch (err) {
+        item.attempts += 1;
+        if (item.attempts >= maxAttempts) {
+          failed += 1;
+          log(`[${logPrefix}] drop after ${item.attempts} attempts: ${String(err)}`);
+          return;
+        }
+
+        const backoff = retryBaseMs * Math.pow(2, Math.max(0, item.attempts - 1));
+        item.nextAttemptAt = now + backoff;
+        queue.push(item);
+        delayed += 1;
+      }
+    }),
+  );
+
+  return { sent, failed, delayed };
 }
 
 async function writeStatusFile(filePath, payload) {
@@ -381,6 +520,8 @@ function createState(cameraId, src) {
     lastEmotionAt: 0,
     lastBestBox: null,
     prevLuma: null,
+    emotionEmaByName: new Map(),
+    emotionSeenAtByName: new Map(),
     lastCandidateLogAt: 0,
     lastConfirmLogAt: 0,
     lastMatchLogAt: 0,
@@ -459,8 +600,25 @@ async function main() {
   const recognitionHoldMs = Math.max(0, envInt("WORKER_RECOGNITION_HOLD_MS", 1200));
   const workerZoomReloadMs = Math.max(250, envInt("WORKER_ZOOM_RELOAD_MS", 700));
   const workerZoomDefaults = parseWorkerZoomDefaults();
+  const cameraSettings = parseCameraSettings();
+  const parallelCameraLimit = Math.max(
+    1,
+    envInt("WORKER_PARALLEL_CAMERAS", Math.max(1, cameras.length)),
+  );
+  const emotionMinConfidence = Math.max(
+    0,
+    Math.min(1, envFloat("WORKER_EMOTION_MIN_CONFIDENCE", 0.45)),
+  );
+  const emotionEmaAlpha = Math.max(0, Math.min(1, envFloat("WORKER_EMOTION_EMA_ALPHA", 0.65)));
+  const emotionEmaTtlMs = Math.max(2000, envInt("WORKER_EMOTION_EMA_TTL_MS", 12000));
   const dbEndpoint = (process.env.WORKER_DB_ENDPOINT || "http://127.0.0.1:3000/api/recognitions").trim();
   const dbCooldownMs = Math.max(1000, envInt("WORKER_DB_COOLDOWN_MS", 4000));
+  const dbRequestTimeoutMs = Math.max(500, envInt("WORKER_DB_TIMEOUT_MS", 1500));
+  const dbQueueMaxSize = Math.max(10, envInt("WORKER_DB_QUEUE_MAX_SIZE", 300));
+  const dbQueueBatchSize = Math.max(1, envInt("WORKER_DB_QUEUE_BATCH_SIZE", 6));
+  const dbQueueMaxAttempts = Math.max(1, envInt("WORKER_DB_QUEUE_MAX_ATTEMPTS", 4));
+  const dbQueueRetryBaseMs = Math.max(200, envInt("WORKER_DB_QUEUE_RETRY_BASE_MS", 1000));
+  const dbQueueWarnAt = Math.max(5, envInt("WORKER_DB_QUEUE_WARN_AT", 60));
   const saveSnapshots = envBool("WORKER_SAVE_SNAPSHOTS", true);
   const snapshotSaveCooldownMs = Math.max(200, envInt("WORKER_SNAPSHOT_SAVE_COOLDOWN_MS", 500));
   const snapshotDir = process.env.WORKER_SNAPSHOT_DIR || path.join(rootDir, "public", "_worker-snaps");
@@ -580,6 +738,14 @@ async function main() {
 
   const states = cameras.map((c) => createState(c.cameraId, c.src));
   log(`started cameras=${states.length} frame_api=${frameApiBase}`);
+  log(
+    `pipeline parallel_cameras=${parallelCameraLimit} db_queue_max=${dbQueueMaxSize} ` +
+      `db_batch=${dbQueueBatchSize} db_timeout_ms=${dbRequestTimeoutMs}`,
+  );
+  log(
+    `emotion min_confidence=${emotionMinConfidence} ema_alpha=${emotionEmaAlpha} ` +
+      `ema_ttl_ms=${emotionEmaTtlMs}`,
+  );
 
   let stopping = false;
   const stop = () => {
@@ -592,6 +758,545 @@ async function main() {
   let lastStatusAt = 0;
   let lastZoomReloadAt = 0;
   let workerZoomMap = {};
+  const dbQueue = [];
+  let lastDbQueueWarnAt = 0;
+  const emotionKeys = ["happy", "sad", "angry", "fearful", "disgusted", "surprised"];
+
+  const processCamera = async (cam, now) => {
+    const camFilterMinScore = Math.max(
+      0,
+      parseFiniteFloat(
+        getCameraSetting(cameraSettings, cam.cameraId, "filterMinScore", filterMinScore),
+        filterMinScore,
+      ),
+    );
+    const camFilterMinSidePx = Math.max(
+      4,
+      parseFiniteInt(
+        getCameraSetting(cameraSettings, cam.cameraId, "filterMinSidePx", filterMinSidePx),
+        filterMinSidePx,
+      ),
+    );
+    const camFilterMinSideRatio = Math.max(
+      0,
+      parseFiniteFloat(
+        getCameraSetting(cameraSettings, cam.cameraId, "filterMinSideRatio", filterMinSideRatio),
+        filterMinSideRatio,
+      ),
+    );
+    const camFilterMinAreaRatio = Math.max(
+      0,
+      parseFiniteFloat(
+        getCameraSetting(cameraSettings, cam.cameraId, "filterMinAreaRatio", filterMinAreaRatio),
+        filterMinAreaRatio,
+      ),
+    );
+    const camFilterMaxAreaRatio = Math.max(
+      camFilterMinAreaRatio,
+      parseFiniteFloat(
+        getCameraSetting(cameraSettings, cam.cameraId, "filterMaxAreaRatio", filterMaxAreaRatio),
+        filterMaxAreaRatio,
+      ),
+    );
+    const camFilterMinAspect = Math.max(
+      0.1,
+      parseFiniteFloat(
+        getCameraSetting(cameraSettings, cam.cameraId, "filterMinAspect", filterMinAspect),
+        filterMinAspect,
+      ),
+    );
+    const camFilterMaxAspect = Math.max(
+      camFilterMinAspect,
+      parseFiniteFloat(
+        getCameraSetting(cameraSettings, cam.cameraId, "filterMaxAspect", filterMaxAspect),
+        filterMaxAspect,
+      ),
+    );
+
+    const camConfirmFrames = Math.max(
+      1,
+      parseFiniteInt(
+        getCameraSetting(cameraSettings, cam.cameraId, "confirmFrames", confirmFrames),
+        confirmFrames,
+      ),
+    );
+    const camMotionThreshold = parseFiniteFloat(
+      getCameraSetting(cameraSettings, cam.cameraId, "motionThreshold", motionThreshold),
+      motionThreshold,
+    );
+    const camMinConfirmScore = parseFiniteFloat(
+      getCameraSetting(cameraSettings, cam.cameraId, "minConfirmScore", minConfirmScore),
+      minConfirmScore,
+    );
+    const camPersonMinScore = parseFiniteFloat(
+      getCameraSetting(cameraSettings, cam.cameraId, "personMinScore", personMinScore),
+      personMinScore,
+    );
+    const camPersonMinSidePx = Math.max(
+      10,
+      parseFiniteInt(
+        getCameraSetting(cameraSettings, cam.cameraId, "personMinSidePx", personMinSidePx),
+        personMinSidePx,
+      ),
+    );
+    const camPersonMinStreak = Math.max(
+      1,
+      parseFiniteInt(
+        getCameraSetting(cameraSettings, cam.cameraId, "personMinStreak", personMinStreak),
+        personMinStreak,
+      ),
+    );
+    const camMatchThreshold = parseFiniteFloat(
+      getCameraSetting(cameraSettings, cam.cameraId, "matchThreshold", matchThreshold),
+      matchThreshold,
+    );
+    const camMatchMinMargin = Math.max(
+      0,
+      parseFiniteFloat(
+        getCameraSetting(cameraSettings, cam.cameraId, "matchMinMargin", matchMinMargin),
+        matchMinMargin,
+      ),
+    );
+    const camMatchMinFaceSidePx = Math.max(
+      0,
+      parseFiniteInt(
+        getCameraSetting(cameraSettings, cam.cameraId, "matchMinFaceSidePx", matchMinFaceSidePx),
+        matchMinFaceSidePx,
+      ),
+    );
+    const camMatchIntervalMs = Math.max(
+      120,
+      parseFiniteInt(
+        getCameraSetting(cameraSettings, cam.cameraId, "matchIntervalMs", matchIntervalMs),
+        matchIntervalMs,
+      ),
+    );
+    const camEmotionIntervalMs = Math.max(
+      150,
+      parseFiniteInt(
+        getCameraSetting(cameraSettings, cam.cameraId, "emotionIntervalMs", emotionIntervalMs),
+        emotionIntervalMs,
+      ),
+    );
+    const camSnapshotCooldownMs = Math.max(
+      120,
+      parseFiniteInt(
+        getCameraSetting(cameraSettings, cam.cameraId, "snapshotCooldownMs", snapshotCooldownMs),
+        snapshotCooldownMs,
+      ),
+    );
+    const camRecognitionHoldMs = Math.max(
+      0,
+      parseFiniteInt(
+        getCameraSetting(cameraSettings, cam.cameraId, "recognitionHoldMs", recognitionHoldMs),
+        recognitionHoldMs,
+      ),
+    );
+    const camEmotionMinConfidence = Math.max(
+      0,
+      Math.min(
+        1,
+        parseFiniteFloat(
+          getCameraSetting(cameraSettings, cam.cameraId, "emotionMinConfidence", emotionMinConfidence),
+          emotionMinConfidence,
+        ),
+      ),
+    );
+    const camEmotionEmaAlpha = Math.max(
+      0,
+      Math.min(
+        1,
+        parseFiniteFloat(
+          getCameraSetting(cameraSettings, cam.cameraId, "emotionEmaAlpha", emotionEmaAlpha),
+          emotionEmaAlpha,
+        ),
+      ),
+    );
+
+    const frameUrl = buildFrameUrl(frameApiBase, cam.src);
+    cam.workerZoom = clampWorkerZoom(workerZoomMap?.[cam.cameraId] ?? workerZoomDefaults[cam.cameraId] ?? 1, 1);
+
+    try {
+      let jpg;
+      try {
+        jpg = await fetchFrame(frameUrl, frameTimeoutMs);
+      } catch (err) {
+        if (!frameAbortRetryEnabled || !isAbortError(err)) throw err;
+        const retryUrl = buildAbortFallbackFrameUrl(
+          frameUrl,
+          frameAbortRetryWidth,
+          frameAbortRetryHeight,
+          frameAbortRetryQuality,
+        );
+        jpg = await fetchFrame(retryUrl, frameAbortRetryTimeoutMs);
+      }
+      const image = await loadImage(jpg);
+      const sourceWidth = Number(image.width ?? 0);
+      const sourceHeight = Number(image.height ?? 0);
+      if (!sourceWidth || !sourceHeight) {
+        throw new Error("invalid_image");
+      }
+      const workerWidth =
+        cam.workerZoom > 1
+          ? Math.max(64, Math.floor(sourceWidth / cam.workerZoom))
+          : sourceWidth;
+      const workerHeight =
+        cam.workerZoom > 1
+          ? Math.max(64, Math.floor(sourceHeight / cam.workerZoom))
+          : sourceHeight;
+      const cropX = Math.max(0, Math.floor((sourceWidth - workerWidth) / 2));
+      const cropY = Math.max(0, Math.floor((sourceHeight - workerHeight) / 2));
+
+      cam.frameOk = true;
+      cam.lastFrameAt = now;
+      cam.lastFrameBytes = jpg.byteLength;
+      cam.lastFrameWidth = sourceWidth;
+      cam.lastFrameHeight = sourceHeight;
+      cam.workerFrameWidth = workerWidth;
+      cam.workerFrameHeight = workerHeight;
+      cam.lastFrameError = "";
+
+      const canvas = createCanvas(workerWidth, workerHeight);
+      const ctx = canvas.getContext("2d");
+      ctx.drawImage(
+        image,
+        cropX,
+        cropY,
+        workerWidth,
+        workerHeight,
+        0,
+        0,
+        workerWidth,
+        workerHeight,
+      );
+      const rgba = ctx.getImageData(0, 0, workerWidth, workerHeight).data;
+      const rgb = rgbaToRgbTensorData(rgba);
+      const frameTensor = faceapi.tf.tensor3d(rgb, [workerHeight, workerWidth, 3], "int32");
+
+      let detections = [];
+      try {
+        detections = await faceapi.detectAllFaces(frameTensor, tinyOptions);
+        if (!detections.length && ssdLoaded) {
+          detections = await faceapi.detectAllFaces(frameTensor, ssdOptions);
+        }
+      } finally {
+        const resized = faceapi.tf.image.resizeBilinear(frameTensor, [54, 96], true);
+        const downsampled = await resized.data();
+        resized.dispose();
+        frameTensor.dispose();
+
+        const nextLuma = computeLumaBufferFromRgb(downsampled);
+        cam.motion = computeMotionScore(cam.prevLuma, nextLuma);
+        cam.prevLuma = nextLuma;
+      }
+
+      detections = filterAndDedupeDetections(detections, workerWidth, workerHeight, {
+        minSidePxBase: camFilterMinSidePx,
+        minSideRatio: camFilterMinSideRatio,
+        minAreaRatio: camFilterMinAreaRatio,
+        maxAreaRatio: camFilterMaxAreaRatio,
+        minScore: camFilterMinScore,
+        minAspect: camFilterMinAspect,
+        maxAspect: camFilterMaxAspect,
+      });
+      cam.candidate = detections.length;
+
+      const { maxSide, maxScore } = largestFaceStats(detections);
+      cam.score = maxScore;
+      cam.maxFaceSide = maxSide;
+
+      const best = detections[0];
+      const bestBox = getBox(best);
+      const trackStable = Boolean(
+        bestBox && cam.lastBestBox && iou(bestBox, cam.lastBestBox) > 0.08,
+      );
+      if (bestBox) cam.lastBestBox = bestBox;
+      if (!bestBox) cam.lastBestBox = null;
+
+      if (cam.candidate > 0) {
+        if (trackStable || cam.streak === 0) cam.streak += 1;
+        else cam.streak = 1;
+      } else {
+        cam.streak = 0;
+      }
+
+      const recentConfirm = now - cam.lastConfirmedAt < 2500;
+      const motionGate =
+        cam.motion >= camMotionThreshold || recentConfirm || maxScore >= 0.65 || maxSide >= 150;
+      const isConfirmed =
+        cam.candidate > 0 &&
+        cam.streak >= camConfirmFrames &&
+        maxScore >= camMinConfirmScore &&
+        (fastPassMode ? true : motionGate);
+      cam.confirmed = isConfirmed ? cam.candidate : 0;
+      if (!isConfirmed) {
+        cam.matchedNames = [];
+        cam.matchDistance = 0;
+        if (now - cam.lastConfirmedAt >= camRecognitionHoldMs) {
+          cam.people = [];
+          cam.emotionSummary = "";
+          cam.topEmotion = "";
+          cam.lastRecognitionAt = 0;
+        }
+      }
+      if (isConfirmed) {
+        cam.lastConfirmedAt = now;
+        if (now - cam.lastConfirmLogAt >= detectionLogCooldownMs) {
+          log(
+            `[${cam.cameraId}] face_detected count=${cam.confirmed} ` +
+              `score=${cam.score.toFixed(3)} motion=${cam.motion.toFixed(2)}`,
+          );
+          cam.lastConfirmLogAt = now;
+        }
+      } else if (cam.candidate > 0 && now - cam.lastCandidateLogAt >= candidateLogCooldownMs) {
+        log(
+          `[${cam.cameraId}] candidate_detected count=${cam.candidate} ` +
+            `score=${cam.score.toFixed(3)} motion=${cam.motion.toFixed(2)} ` +
+            `streak=${cam.streak}/${camConfirmFrames}`,
+        );
+        cam.lastCandidateLogAt = now;
+      }
+
+      const needMatch = Boolean(matcher) && now - cam.lastMatchAt >= camMatchIntervalMs;
+      const needEmotion = enableEmotions && now - cam.lastEmotionAt >= camEmotionIntervalMs;
+      const shouldSnapshot =
+        cam.confirmed > 0 &&
+        (needMatch || needEmotion) &&
+        now - cam.lastSnapshotAt >= camSnapshotCooldownMs;
+
+      if (shouldSnapshot) {
+        cam.lastSnapshotAt = now;
+        try {
+          const snapTensor = faceapi.tf.tensor3d(rgb, [workerHeight, workerWidth, 3], "int32");
+          let results = [];
+          const runDetect = async (options) => {
+            let task = faceapi.detectAllFaces(snapTensor, options);
+            if (matcher) {
+              task = task.withFaceLandmarks(true).withFaceDescriptors();
+            }
+            if (enableEmotions && needEmotion) {
+              task = task.withFaceExpressions();
+            }
+            return task;
+          };
+
+          try {
+            results = await runDetect(tinyOptions);
+            if ((!results || !results.length) && ssdLoaded) {
+              results = await runDetect(ssdOptions);
+            }
+          } finally {
+            snapTensor.dispose();
+          }
+
+          results = filterAndDedupeDetections(results || [], workerWidth, workerHeight, {
+            minSidePxBase: camFilterMinSidePx,
+            minSideRatio: camFilterMinSideRatio,
+            minAreaRatio: camFilterMinAreaRatio,
+            maxAreaRatio: camFilterMaxAreaRatio,
+            minScore: camFilterMinScore,
+            minAspect: camFilterMinAspect,
+            maxAspect: camFilterMaxAspect,
+          });
+
+          const people = [];
+          let bestDistance = 0;
+          for (const det of results) {
+            let name = "unknown";
+            let distance = 0;
+            if (matcher && det?.descriptor) {
+              const faceSide = getFaceSide(det);
+              if (faceSide >= camMatchMinFaceSidePx) {
+                const ranked = computeMatchCandidates(knownLabeledDescriptors, det.descriptor);
+                const bestCandidate = ranked[0];
+                const second = ranked[1];
+                const margin = second
+                  ? second.distance - bestCandidate.distance
+                  : Number.POSITIVE_INFINITY;
+                const accepted =
+                  Boolean(bestCandidate) &&
+                  bestCandidate.distance <= camMatchThreshold &&
+                  margin >= camMatchMinMargin;
+
+                if (accepted) {
+                  name = bestCandidate.label;
+                  distance = Number(bestCandidate.distance) || 0;
+                  if (!bestDistance || distance < bestDistance) bestDistance = distance;
+                }
+              }
+            }
+
+            const parsedEmotion = parseEmotionFromExpressions(det?.expressions, emotionKeys);
+            let emotionKey = parsedEmotion.key;
+            let emotionConfidence = parsedEmotion.confidence;
+            if (emotionKey && !isUnknownIdentity(name)) {
+              const prev = cam.emotionEmaByName.get(name);
+              const smoothed = {};
+              for (const key of emotionKeys) {
+                const currentVal = Number(parsedEmotion.vector[key] ?? 0);
+                const prevVal = Number(prev?.[key] ?? currentVal);
+                smoothed[key] = prev
+                  ? camEmotionEmaAlpha * currentVal + (1 - camEmotionEmaAlpha) * prevVal
+                  : currentVal;
+              }
+
+              const parsedSmoothed = parseEmotionFromExpressions(smoothed, emotionKeys);
+              emotionKey = parsedSmoothed.key;
+              emotionConfidence = parsedSmoothed.confidence;
+              cam.emotionEmaByName.set(name, smoothed);
+              cam.emotionSeenAtByName.set(name, now);
+            }
+
+            const emotionLabel =
+              emotionKey && emotionConfidence >= camEmotionMinConfidence
+                ? `${emotionKey} ${(emotionConfidence * 100).toFixed(0)}%`
+                : "";
+
+            if (!isUnknownIdentity(name)) {
+              people.push({
+                name,
+                emotion: emotionLabel,
+                emotionConfidence: Number(emotionConfidence.toFixed(4)),
+                distance: Number(distance.toFixed(3)),
+              });
+            }
+          }
+
+          for (const [savedName, seenAt] of cam.emotionSeenAtByName.entries()) {
+            if (now - seenAt > emotionEmaTtlMs) {
+              cam.emotionSeenAtByName.delete(savedName);
+              cam.emotionEmaByName.delete(savedName);
+            }
+          }
+
+          cam.people = people;
+          cam.matchedNames = people.map((p) => p.name);
+          cam.matchDistance = people.length ? Number(bestDistance || 0) : 0;
+          if (people.length) {
+            cam.lastRecognitionAt = now;
+          }
+
+          if (
+            saveSnapshots &&
+            people.length &&
+            now - cam.lastSnapshotSavedAt >= snapshotSaveCooldownMs
+          ) {
+            try {
+              const snapshotFile = path.join(snapshotDir, `${cam.cameraId}.jpg`);
+              await fsp.writeFile(snapshotFile, jpg);
+              cam.snapshotUrl = `${snapshotPublicBase}/${cam.cameraId}.jpg?v=${now}`;
+              cam.lastSnapshotSavedAt = now;
+            } catch (err) {
+              if (now - cam.lastErrLogAt >= 2000) {
+                log(`[${cam.cameraId}] snapshot save error: ${String(err)}`);
+                cam.lastErrLogAt = now;
+              }
+            }
+          }
+
+          if (enableMatching && enableEmotions && people.length) {
+            for (const person of people) {
+              if (isUnknownIdentity(person.name)) continue;
+              const moodLabel = String(person.emotion || "").split(" ")[0];
+              if (!moodLabel) continue;
+              const cooldownKey = `${cam.cameraId}:${person.name}`;
+              const lastSent = cam.lastDbSentAt.get(cooldownKey) ?? 0;
+              if (now - lastSent < dbCooldownMs) continue;
+              cam.lastDbSentAt.set(cooldownKey, now);
+
+              if (dbQueue.length >= dbQueueMaxSize) {
+                dbQueue.shift();
+                if (now - lastDbQueueWarnAt >= 3000) {
+                  log(`[db-queue] overflow: drop oldest, size=${dbQueue.length}`);
+                  lastDbQueueWarnAt = now;
+                }
+              }
+
+              dbQueue.push(
+                createDbQueueItem(
+                  {
+                    name: person.name,
+                    mood: moodLabel,
+                    detectedAt: new Date(now).toISOString(),
+                    cameraId: cam.cameraId,
+                    distance: Number(person.distance ?? 0),
+                    emotionConfidence: Number(person.emotionConfidence ?? 0),
+                    workerZoom: Number(cam.workerZoom.toFixed(2)),
+                    frameWidth: cam.workerFrameWidth,
+                    frameHeight: cam.workerFrameHeight,
+                  },
+                  now,
+                ),
+              );
+            }
+          }
+
+          if (needMatch) {
+            cam.lastMatchAt = now;
+            if (cam.matchedNames.length && now - cam.lastMatchLogAt >= matchLogCooldownMs) {
+              log(
+                `[${cam.cameraId}] matched names=${cam.matchedNames.join(",")} ` +
+                  `distance=${cam.matchDistance.toFixed(3)}`,
+              );
+              cam.lastMatchLogAt = now;
+            }
+          }
+
+          if (needEmotion) {
+            cam.lastEmotionAt = now;
+            cam.emotionSummary = cam.people
+              .map((p) =>
+                `${p.name}:${p.emotion || "-"}(${Number(p.emotionConfidence ?? 0).toFixed(2)})`,
+              )
+              .join(", ");
+            cam.topEmotion = cam.people.length ? cam.people[0].emotion || "" : "";
+            if (cam.topEmotion && now - cam.lastEmotionLogAt >= 1500) {
+              log(`[${cam.cameraId}] emotion top=${cam.topEmotion}`);
+              cam.lastEmotionLogAt = now;
+            }
+          }
+        } catch (err) {
+          cam.matchedNames = [];
+          cam.matchDistance = 0;
+          cam.people = [];
+          cam.emotionSummary = "";
+          cam.topEmotion = "";
+          if (now - cam.lastErrLogAt >= 2000) {
+            log(`[${cam.cameraId}] snapshot error: ${String(err)}`);
+            cam.lastErrLogAt = now;
+          }
+        }
+      } else if ((!enableEmotions && !matcher) || cam.candidate === 0) {
+        cam.matchedNames = [];
+        cam.matchDistance = 0;
+        cam.people = [];
+        cam.emotionSummary = "";
+        cam.topEmotion = "";
+      }
+    } catch (err) {
+      cam.candidate = 0;
+      cam.confirmed = 0;
+      cam.score = 0;
+      cam.maxFaceSide = 0;
+      cam.streak = 0;
+      cam.matchedNames = [];
+      cam.matchDistance = 0;
+      cam.people = [];
+      cam.emotionSummary = "";
+      cam.topEmotion = "";
+      cam.lastRecognitionAt = 0;
+      cam.frameOk = false;
+      cam.workerFrameWidth = 0;
+      cam.workerFrameHeight = 0;
+      cam.lastFrameError = String(err);
+      if (now - cam.lastErrLogAt >= 2000) {
+        log(`[${cam.cameraId}] frame error: ${String(err)}`);
+        cam.lastErrLogAt = now;
+      }
+    }
+
+    return cam.confirmed;
+  };
 
   while (!stopping) {
     const now = Date.now();
@@ -602,361 +1307,37 @@ async function main() {
       lastZoomReloadAt = now;
     }
 
-    for (const cam of states) {
-      const frameUrl = buildFrameUrl(frameApiBase, cam.src);
-      cam.workerZoom = clampWorkerZoom(
-        workerZoomMap?.[cam.cameraId] ?? workerZoomDefaults[cam.cameraId] ?? 1,
-        1,
+    const workers = [];
+    let cursor = 0;
+    const activeWorkers = Math.min(parallelCameraLimit, states.length);
+    for (let idx = 0; idx < activeWorkers; idx += 1) {
+      workers.push(
+        (async () => {
+          while (cursor < states.length) {
+            const current = states[cursor];
+            cursor += 1;
+            confirmedTotal += await processCamera(current, now);
+          }
+        })(),
       );
+    }
+    await Promise.all(workers);
 
-      try {
-        let jpg;
-        try {
-          jpg = await fetchFrame(frameUrl, frameTimeoutMs);
-        } catch (err) {
-          if (!frameAbortRetryEnabled || !isAbortError(err)) throw err;
-          const retryUrl = buildAbortFallbackFrameUrl(
-            frameUrl,
-            frameAbortRetryWidth,
-            frameAbortRetryHeight,
-            frameAbortRetryQuality,
-          );
-          jpg = await fetchFrame(retryUrl, frameAbortRetryTimeoutMs);
-        }
-        const image = await loadImage(jpg);
-        const sourceWidth = Number(image.width ?? 0);
-        const sourceHeight = Number(image.height ?? 0);
-        if (!sourceWidth || !sourceHeight) {
-          throw new Error("invalid_image");
-        }
-        const workerWidth =
-          cam.workerZoom > 1
-            ? Math.max(64, Math.floor(sourceWidth / cam.workerZoom))
-            : sourceWidth;
-        const workerHeight =
-          cam.workerZoom > 1
-            ? Math.max(64, Math.floor(sourceHeight / cam.workerZoom))
-            : sourceHeight;
-        const cropX = Math.max(0, Math.floor((sourceWidth - workerWidth) / 2));
-        const cropY = Math.max(0, Math.floor((sourceHeight - workerHeight) / 2));
-
-        cam.frameOk = true;
-        cam.lastFrameAt = now;
-        cam.lastFrameBytes = jpg.byteLength;
-        cam.lastFrameWidth = sourceWidth;
-        cam.lastFrameHeight = sourceHeight;
-        cam.workerFrameWidth = workerWidth;
-        cam.workerFrameHeight = workerHeight;
-        cam.lastFrameError = "";
-
-        const canvas = createCanvas(workerWidth, workerHeight);
-        const ctx = canvas.getContext("2d");
-        ctx.drawImage(
-          image,
-          cropX,
-          cropY,
-          workerWidth,
-          workerHeight,
-          0,
-          0,
-          workerWidth,
-          workerHeight,
-        );
-        const rgba = ctx.getImageData(0, 0, workerWidth, workerHeight).data;
-        const rgb = rgbaToRgbTensorData(rgba);
-        // Keep dtype close to browser fromPixels() behavior used by face-api in client mode.
-        const frameTensor = faceapi.tf.tensor3d(rgb, [workerHeight, workerWidth, 3], "int32");
-
-        let detections = [];
-        try {
-          detections = await faceapi.detectAllFaces(frameTensor, tinyOptions);
-          if (!detections.length && ssdLoaded) {
-            detections = await faceapi.detectAllFaces(frameTensor, ssdOptions);
-          }
-        } finally {
-          const resized = faceapi.tf.image.resizeBilinear(frameTensor, [54, 96], true);
-          const rgb = await resized.data();
-          resized.dispose();
-          frameTensor.dispose();
-
-          const nextLuma = computeLumaBufferFromRgb(rgb);
-          cam.motion = computeMotionScore(cam.prevLuma, nextLuma);
-          cam.prevLuma = nextLuma;
-        }
-
-        detections = filterAndDedupeDetections(detections, workerWidth, workerHeight, {
-          minSidePxBase: filterMinSidePx,
-          minSideRatio: filterMinSideRatio,
-          minAreaRatio: filterMinAreaRatio,
-          maxAreaRatio: filterMaxAreaRatio,
-          minScore: filterMinScore,
-          minAspect: filterMinAspect,
-          maxAspect: filterMaxAspect,
-        });
-        cam.candidate = detections.length;
-
-        const { maxSide, maxScore } = largestFaceStats(detections);
-        cam.score = maxScore;
-        cam.maxFaceSide = maxSide;
-
-        const best = detections[0];
-        const bestBox = getBox(best);
-        const trackStable = Boolean(
-          bestBox && cam.lastBestBox && iou(bestBox, cam.lastBestBox) > 0.08,
-        );
-        if (bestBox) cam.lastBestBox = bestBox;
-        if (!bestBox) cam.lastBestBox = null;
-
-        if (cam.candidate > 0) {
-          if (trackStable || cam.streak === 0) cam.streak += 1;
-          else cam.streak = 1;
-        } else {
-          cam.streak = 0;
-        }
-
-        const recentConfirm = now - cam.lastConfirmedAt < 2500;
-        const motionGate =
-          cam.motion >= motionThreshold || recentConfirm || maxScore >= 0.65 || maxSide >= 150;
-        const isConfirmed =
-          cam.candidate > 0 &&
-          cam.streak >= confirmFrames &&
-          maxScore >= minConfirmScore &&
-          (fastPassMode ? true : motionGate);
-        cam.confirmed = isConfirmed ? cam.candidate : 0;
-        if (!isConfirmed) {
-          cam.matchedNames = [];
-          cam.matchDistance = 0;
-          if (now - cam.lastConfirmedAt >= recognitionHoldMs) {
-            cam.people = [];
-            cam.emotionSummary = "";
-            cam.topEmotion = "";
-            cam.lastRecognitionAt = 0;
-          }
-        }
-        if (isConfirmed) {
-          cam.lastConfirmedAt = now;
-          confirmedTotal += cam.confirmed;
-          if (now - cam.lastConfirmLogAt >= detectionLogCooldownMs) {
-            log(
-              `[${cam.cameraId}] face_detected count=${cam.confirmed} ` +
-                `score=${cam.score.toFixed(3)} motion=${cam.motion.toFixed(2)}`,
-            );
-            cam.lastConfirmLogAt = now;
-          }
-        } else if (cam.candidate > 0 && now - cam.lastCandidateLogAt >= candidateLogCooldownMs) {
-          log(
-            `[${cam.cameraId}] candidate_detected count=${cam.candidate} ` +
-              `score=${cam.score.toFixed(3)} motion=${cam.motion.toFixed(2)} ` +
-              `streak=${cam.streak}/${confirmFrames}`,
-          );
-          cam.lastCandidateLogAt = now;
-        }
-
-        const needMatch = Boolean(matcher) && now - cam.lastMatchAt >= matchIntervalMs;
-        const needEmotion = enableEmotions && now - cam.lastEmotionAt >= emotionIntervalMs;
-        const shouldSnapshot =
-          cam.confirmed > 0 &&
-          (needMatch || needEmotion) &&
-          now - cam.lastSnapshotAt >= snapshotCooldownMs;
-
-        if (shouldSnapshot) {
-          cam.lastSnapshotAt = now;
-          try {
-            const snapTensor = faceapi.tf.tensor3d(rgb, [workerHeight, workerWidth, 3], "int32");
-            let results = [];
-            const runDetect = async (options) => {
-              let task = faceapi.detectAllFaces(snapTensor, options);
-              if (matcher) {
-                task = task.withFaceLandmarks(true).withFaceDescriptors();
-              }
-              if (enableEmotions && needEmotion) {
-                task = task.withFaceExpressions();
-              }
-              return task;
-            };
-
-            try {
-              results = await runDetect(tinyOptions);
-              if ((!results || !results.length) && ssdLoaded) {
-                results = await runDetect(ssdOptions);
-              }
-            } finally {
-              snapTensor.dispose();
-            }
-
-            results = filterAndDedupeDetections(results || [], workerWidth, workerHeight, {
-              minSidePxBase: filterMinSidePx,
-              minSideRatio: filterMinSideRatio,
-              minAreaRatio: filterMinAreaRatio,
-              maxAreaRatio: filterMaxAreaRatio,
-              minScore: filterMinScore,
-              minAspect: filterMinAspect,
-              maxAspect: filterMaxAspect,
-            });
-
-            const keys = ["happy", "sad", "angry", "fearful", "disgusted", "surprised"];
-            const people = [];
-            let bestDistance = 0;
-            for (const det of results) {
-              let name = "unknown";
-              let distance = 0;
-              if (matcher && det?.descriptor) {
-                const faceSide = getFaceSide(det);
-                if (faceSide >= matchMinFaceSidePx) {
-                  const ranked = computeMatchCandidates(knownLabeledDescriptors, det.descriptor);
-                  const best = ranked[0];
-                  const second = ranked[1];
-                  const margin = second ? second.distance - best.distance : Number.POSITIVE_INFINITY;
-                  const accepted =
-                    Boolean(best) &&
-                    best.distance <= matchThreshold &&
-                    margin >= matchMinMargin;
-
-                  if (accepted) {
-                    name = best.label;
-                    distance = Number(best.distance) || 0;
-                    if (!bestDistance || distance < bestDistance) bestDistance = distance;
-                  }
-                }
-              }
-
-              let emotionLabel = "";
-              if (enableEmotions && det?.expressions) {
-                let topKey = "";
-                let topVal = -1;
-                for (const k of keys) {
-                  const v = Number(det.expressions[k] ?? 0);
-                  if (v > topVal) {
-                    topVal = v;
-                    topKey = k;
-                  }
-                }
-                emotionLabel = topKey ? `${topKey} ${(topVal * 100).toFixed(0)}%` : "";
-              }
-
-              if (!isUnknownIdentity(name)) {
-                people.push({
-                  name,
-                  emotion: emotionLabel,
-                  distance: Number(distance.toFixed(3)),
-                });
-              }
-            }
-
-            cam.people = people;
-            cam.matchedNames = people.map((p) => p.name);
-            cam.matchDistance = people.length ? Number(bestDistance || 0) : 0;
-            if (people.length) {
-              cam.lastRecognitionAt = now;
-            }
-
-            if (
-              saveSnapshots &&
-              people.length &&
-              now - cam.lastSnapshotSavedAt >= snapshotSaveCooldownMs
-            ) {
-              try {
-                const snapshotFile = path.join(snapshotDir, `${cam.cameraId}.jpg`);
-                await fsp.writeFile(snapshotFile, jpg);
-                cam.snapshotUrl = `${snapshotPublicBase}/${cam.cameraId}.jpg?v=${now}`;
-                cam.lastSnapshotSavedAt = now;
-              } catch (err) {
-                if (now - cam.lastErrLogAt >= 2000) {
-                  log(`[${cam.cameraId}] snapshot save error: ${String(err)}`);
-                  cam.lastErrLogAt = now;
-                }
-              }
-            }
-
-            if (enableMatching && enableEmotions && people.length) {
-              for (const person of people) {
-                if (isUnknownIdentity(person.name)) continue;
-                const moodLabel = String(person.emotion || "").split(" ")[0];
-                if (!moodLabel) continue;
-                const lastSent = cam.lastDbSentAt.get(person.name) ?? 0;
-                if (now - lastSent < dbCooldownMs) continue;
-                cam.lastDbSentAt.set(person.name, now);
-                try {
-                  await fetch(dbEndpoint, {
-                    method: "POST",
-                    headers: { "Content-Type": "application/json" },
-                    body: JSON.stringify({
-                      name: person.name,
-                      mood: moodLabel,
-                      detectedAt: new Date().toISOString(),
-                      cameraId: cam.cameraId,
-                    }),
-                  });
-                } catch (err) {
-                  if (now - cam.lastErrLogAt >= 2000) {
-                    log(`[${cam.cameraId}] db send error: ${String(err)}`);
-                    cam.lastErrLogAt = now;
-                  }
-                }
-              }
-            }
-
-            if (needMatch) {
-              cam.lastMatchAt = now;
-              if (cam.matchedNames.length && now - cam.lastMatchLogAt >= matchLogCooldownMs) {
-                log(
-                  `[${cam.cameraId}] matched names=${cam.matchedNames.join(",")} ` +
-                    `distance=${cam.matchDistance.toFixed(3)}`,
-                );
-                cam.lastMatchLogAt = now;
-              }
-            }
-
-            if (needEmotion) {
-              cam.lastEmotionAt = now;
-              cam.emotionSummary = people
-                .map((p) => `${p.name}:${p.emotion || "-"}`)
-                .join(", ");
-              cam.topEmotion = people.length ? people[0].emotion || "" : "";
-              if (cam.topEmotion && now - cam.lastEmotionLogAt >= 1500) {
-                log(`[${cam.cameraId}] emotion top=${cam.topEmotion}`);
-                cam.lastEmotionLogAt = now;
-              }
-            }
-          } catch (err) {
-            cam.matchedNames = [];
-            cam.matchDistance = 0;
-            cam.people = [];
-            cam.emotionSummary = "";
-            cam.topEmotion = "";
-            if (now - cam.lastErrLogAt >= 2000) {
-              log(`[${cam.cameraId}] snapshot error: ${String(err)}`);
-              cam.lastErrLogAt = now;
-            }
-          }
-        } else if ((!enableEmotions && !matcher) || cam.candidate === 0) {
-          cam.matchedNames = [];
-          cam.matchDistance = 0;
-          cam.people = [];
-          cam.emotionSummary = "";
-          cam.topEmotion = "";
-        }
-      } catch (err) {
-        cam.candidate = 0;
-        cam.confirmed = 0;
-        cam.score = 0;
-        cam.maxFaceSide = 0;
-        cam.streak = 0;
-        cam.matchedNames = [];
-        cam.matchDistance = 0;
-        cam.people = [];
-        cam.emotionSummary = "";
-        cam.topEmotion = "";
-        cam.lastRecognitionAt = 0;
-        cam.frameOk = false;
-        cam.workerFrameWidth = 0;
-        cam.workerFrameHeight = 0;
-        cam.lastFrameError = String(err);
-        if (now - cam.lastErrLogAt >= 2000) {
-          log(`[${cam.cameraId}] frame error: ${String(err)}`);
-          cam.lastErrLogAt = now;
-        }
-      }
+    const dbResult = await drainDbQueue({
+      queue: dbQueue,
+      now,
+      maxBatchSize: dbQueueBatchSize,
+      dbEndpoint,
+      requestTimeoutMs: dbRequestTimeoutMs,
+      maxAttempts: dbQueueMaxAttempts,
+      retryBaseMs: dbQueueRetryBaseMs,
+      logPrefix: "db-queue",
+    });
+    if ((dbResult.failed || dbResult.delayed || dbQueue.length >= dbQueueWarnAt) && now - lastDbQueueWarnAt >= 3000) {
+      log(
+        `[db-queue] size=${dbQueue.length} sent=${dbResult.sent} delayed=${dbResult.delayed} dropped=${dbResult.failed}`,
+      );
+      lastDbQueueWarnAt = now;
     }
 
     if (now - lastHeartbeatAt >= heartbeatSeconds * 1000) {
@@ -972,12 +1353,37 @@ async function main() {
         cameras: {},
       };
       for (const cam of states) {
+        const camConfirmFrames = Math.max(
+          1,
+          parseFiniteInt(
+            getCameraSetting(cameraSettings, cam.cameraId, "confirmFrames", confirmFrames),
+            confirmFrames,
+          ),
+        );
+        const camPersonMinScore = parseFiniteFloat(
+          getCameraSetting(cameraSettings, cam.cameraId, "personMinScore", personMinScore),
+          personMinScore,
+        );
+        const camPersonMinSidePx = Math.max(
+          10,
+          parseFiniteInt(
+            getCameraSetting(cameraSettings, cam.cameraId, "personMinSidePx", personMinSidePx),
+            personMinSidePx,
+          ),
+        );
+        const camPersonMinStreak = Math.max(
+          1,
+          parseFiniteInt(
+            getCameraSetting(cameraSettings, cam.cameraId, "personMinStreak", personMinStreak),
+            personMinStreak,
+          ),
+        );
         const hasPerson =
           cam.confirmed > 0 ||
           (cam.candidate > 0 &&
-            cam.score >= personMinScore &&
-            cam.maxFaceSide >= personMinSidePx &&
-            cam.streak >= personMinStreak);
+            cam.score >= camPersonMinScore &&
+            cam.maxFaceSide >= camPersonMinSidePx &&
+            cam.streak >= camPersonMinStreak);
         const hasFace = cam.confirmed > 0;
         const who = cam.matchedNames.length ? cam.matchedNames.join(", ") : "unknown";
         const emotion = cam.topEmotion || "none";
@@ -995,7 +1401,7 @@ async function main() {
           maxFaceSide: Number(cam.maxFaceSide.toFixed(1)),
           motion: Number(cam.motion.toFixed(2)),
           streak: cam.streak,
-          requiredFrames: confirmFrames,
+          requiredFrames: camConfirmFrames,
           matchedNames: cam.matchedNames,
           matchDistance: Number(cam.matchDistance.toFixed(3)),
           personInFrame: hasPerson,
@@ -1025,6 +1431,22 @@ async function main() {
     }
 
     await sleep(loopDelayMs);
+  }
+
+  if (dbQueue.length) {
+    await drainDbQueue({
+      queue: dbQueue,
+      now: Date.now(),
+      maxBatchSize: dbQueue.length,
+      dbEndpoint,
+      requestTimeoutMs: dbRequestTimeoutMs,
+      maxAttempts: dbQueueMaxAttempts,
+      retryBaseMs: dbQueueRetryBaseMs,
+      logPrefix: "db-queue",
+    });
+    if (dbQueue.length) {
+      log(`[db-queue] pending after stop=${dbQueue.length}`);
+    }
   }
 
   log("stop signal received");

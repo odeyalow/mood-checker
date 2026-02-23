@@ -32,6 +32,7 @@ GO2RTC_BASE_URL=http://127.0.0.1:1984
 GO2RTC_FRAME_WIDTH=1280
 GO2RTC_FRAME_HEIGHT=720
 GO2RTC_FRAME_QUALITY=92
+GO2RTC_FRAME_TIMEOUT_MS=3500
 # Worker timeout fallback for unstable cameras
 WORKER_FRAME_ABORT_RETRY_ENABLED=true
 WORKER_FRAME_ABORT_RETRY_TIMEOUT_MS=2500
@@ -40,6 +41,8 @@ WORKER_FRAME_ABORT_RETRY_HEIGHT=720
 WORKER_FRAME_ABORT_RETRY_QUALITY=85
 # Optional defaults for worker-only zoom (x1..x5)
 # WORKER_CAMERA_ZOOMS=cam-01=1,cam-02=2
+# Optional per-camera quality profiles
+# WORKER_CAMERA_SETTINGS_JSON={"cam-01":{"matchThreshold":0.50},"cam-02":{"confirmFrames":2,"filterMinScore":0.16}}
 ```
 
 Notes:
@@ -53,7 +56,8 @@ Notes:
 ## Node detection worker (browser-like)
 
 The worker uses `@vladmandic/face-api` in Node and mirrors browser detection behavior.
-At this stage it does not do matching and does not write to DB.
+It performs face detection, identity matching against `public/known`, emotion extraction,
+and async writes to `/api/recognitions` with retry queue.
 
 Run manually:
 
@@ -76,7 +80,7 @@ npm run pm2:save
 Verify:
 
 ```bash
-pm2 logs mood-checker-pyworker --lines 80
+pm2 logs mood-checker-worker --lines 80
 ```
 
 Worker status API used by UI in worker mode:
@@ -111,7 +115,7 @@ npm run pm2:logs
 npm run pm2:restart
 npm run pm2:stop
 npm run pm2:start       # app only
-npm run pm2:start:pyworker
-npm run pm2:restart:pyworker
+npm run pm2:start:worker
+npm run pm2:restart:worker
 npm run pm2:save
 ```
