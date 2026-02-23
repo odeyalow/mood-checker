@@ -10,6 +10,11 @@ type CameraLabels = {
   recognized: string;
   noRecognitions: string;
   emotion: string;
+  snapshotTitle: string;
+  whoLabel: string;
+  emotionLabel: string;
+  unknownLabel: string;
+  noneLabel: string;
 };
 
 export default function CameraGrid({ labels }: { labels: CameraLabels }) {

@@ -8,20 +8,30 @@ import FaceScripts from "@/components/face/FaceScripts";
 
 const TEXT = {
   ru: {
-    title: "Камеры",
-    loading: "Загрузка",
-    error: "Ошибка",
-    recognized: "Распознан",
-    noRecognitions: "Распознаний нет",
+    title: "\u041a\u0430\u043c\u0435\u0440\u044b",
+    loading: "\u0417\u0430\u0433\u0440\u0443\u0437\u043a\u0430",
+    error: "\u041e\u0448\u0438\u0431\u043a\u0430",
+    recognized: "\u0420\u0430\u0441\u043f\u043e\u0437\u043d\u0430\u043d",
+    noRecognitions: "\u0420\u0430\u0441\u043f\u043e\u0437\u043d\u0430\u043d\u0438\u0439 \u043d\u0435\u0442",
     emotionPlaceholder: "-",
+    snapshotTitle: "\u0421\u043d\u0438\u043c\u043e\u043a",
+    whoLabel: "\u041a\u0442\u043e",
+    emotionLabel: "\u042d\u043c\u043e\u0446\u0438\u044f",
+    unknownLabel: "\u043d\u0435 \u043e\u043f\u0440\u0435\u0434\u0435\u043b\u0435\u043d",
+    noneLabel: "\u043d\u0435\u0442",
   },
   kz: {
-    title: "Камералар",
-    loading: "Жүктелуде",
-    error: "Қате",
-    recognized: "Танылды",
-    noRecognitions: "Танылу жоқ",
+    title: "\u041a\u0430\u043c\u0435\u0440\u0430\u043b\u0430\u0440",
+    loading: "\u0416\u04af\u043a\u0442\u0435\u043b\u0443\u0434\u0435",
+    error: "\u049a\u0430\u0442\u0435",
+    recognized: "\u0422\u0430\u043d\u044b\u043b\u0434\u044b",
+    noRecognitions: "\u0422\u0430\u043d\u044b\u043b\u0443 \u0436\u043e\u049b",
     emotionPlaceholder: "-",
+    snapshotTitle: "\u0421\u0443\u0440\u0435\u0442",
+    whoLabel: "\u041a\u0456\u043c",
+    emotionLabel: "\u042d\u043c\u043e\u0446\u0438\u044f",
+    unknownLabel: "\u0430\u043d\u044b\u049b\u0442\u0430\u043b\u043c\u0430\u0434\u044b",
+    noneLabel: "\u0436\u043e\u049b",
   },
   en: {
     title: "Cameras",
@@ -30,6 +40,11 @@ const TEXT = {
     recognized: "Recognized",
     noRecognitions: "No recognitions",
     emotionPlaceholder: "-",
+    snapshotTitle: "Snapshot",
+    whoLabel: "Who",
+    emotionLabel: "Emotion",
+    unknownLabel: "unknown",
+    noneLabel: "none",
   },
 };
 
@@ -54,6 +69,11 @@ export default function CamerasPage({
               recognized: t.recognized,
               noRecognitions: t.noRecognitions,
               emotion: t.emotionPlaceholder,
+              snapshotTitle: t.snapshotTitle,
+              whoLabel: t.whoLabel,
+              emotionLabel: t.emotionLabel,
+              unknownLabel: t.unknownLabel,
+              noneLabel: t.noneLabel,
             }}
           />
         </Space>

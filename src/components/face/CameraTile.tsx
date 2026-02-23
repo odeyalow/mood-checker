@@ -139,6 +139,11 @@ export default function CameraTile({
     recognized: string;
     noRecognitions: string;
     emotion: string;
+    snapshotTitle: string;
+    whoLabel: string;
+    emotionLabel: string;
+    unknownLabel: string;
+    noneLabel: string;
   };
 }) {
   const streamRef = useRef<HTMLCanvasElement | null>(null);
@@ -273,7 +278,7 @@ export default function CameraTile({
           const emotion =
             typeof ws.topEmotion === "string" && ws.topEmotion.trim().length > 0
               ? ws.topEmotion.trim()
-              : "none";
+              : "";
           const zoom = clampWorkerZoom(Number(ws.workerZoom ?? 1));
 
           setWorkerZoom(zoom);
@@ -292,7 +297,7 @@ export default function CameraTile({
           const nextSnapshotUrl = typeof ws.snapshotUrl === "string" ? ws.snapshotUrl : "";
           const nextRecognitionAt =
             typeof ws.lastRecognitionAt === "string" ? ws.lastRecognitionAt : "";
-          const nextWho = who || "unknown";
+          const nextWho = who || "";
 
           setSnapshotWho(nextWho);
           setSnapshotEmotion(emotion);
@@ -444,16 +449,16 @@ export default function CameraTile({
             <div className="camera-evidence">
               <img className="camera-evidence-image" src={snapshotUrl} alt={`${camera.name} snapshot`} />
               <div className="camera-evidence-meta">
-                <Text type="secondary">Snapshot</Text>
+                <Text type="secondary">{labels.snapshotTitle}</Text>
                 {lastRecognitionAt ? (
                   <Text type="secondary">{formatRecognitionTime(lastRecognitionAt)}</Text>
                 ) : null}
               </div>
               <div className="camera-evidence-meta">
-                <Text type="secondary">{`Who: ${snapshotWho || "unknown"}`}</Text>
+                <Text type="secondary">{`${labels.whoLabel}: ${snapshotWho || labels.unknownLabel}`}</Text>
               </div>
               <div className="camera-evidence-meta">
-                <Text type="secondary">{`Emotion: ${snapshotEmotion || "none"}`}</Text>
+                <Text type="secondary">{`${labels.emotionLabel}: ${snapshotEmotion || labels.noneLabel}`}</Text>
               </div>
             </div>
           ) : null}
@@ -464,8 +469,8 @@ export default function CameraTile({
                 <div key={item.id} className="camera-history-card">
                   <img className="camera-history-image" src={item.snapshotUrl} alt="history snapshot" />
                   <div className="camera-history-body">
-                    <Text type="secondary">{`Who: ${item.who}`}</Text>
-                    <Text type="secondary">{`Emotion: ${item.emotion || "none"}`}</Text>
+                    <Text type="secondary">{`${labels.whoLabel}: ${item.who || labels.unknownLabel}`}</Text>
+                    <Text type="secondary">{`${labels.emotionLabel}: ${item.emotion || labels.noneLabel}`}</Text>
                     <Text type="secondary">{formatRecognitionTime(item.capturedAt)}</Text>
                   </div>
                 </div>
