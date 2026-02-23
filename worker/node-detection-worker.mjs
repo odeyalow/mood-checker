@@ -528,6 +528,7 @@ function createState(cameraId, src) {
     lastEmotionLogAt: 0,
     lastErrLogAt: 0,
     lastDbSentAt: new Map(),
+    lastSeenMatchedAt: new Map(),
   };
 }
 
@@ -609,10 +610,23 @@ async function main() {
     0,
     Math.min(1, envFloat("WORKER_EMOTION_MIN_CONFIDENCE", 0.45)),
   );
+  const emotionLowConfidenceFloor = Math.max(
+    0,
+    Math.min(1, envFloat("WORKER_EMOTION_LOW_CONFIDENCE_FLOOR", 0.18)),
+  );
+  const emotionAllowLowConfidenceLabel = envBool(
+    "WORKER_EMOTION_ALLOW_LOW_CONFIDENCE_LABEL",
+    true,
+  );
   const emotionEmaAlpha = Math.max(0, Math.min(1, envFloat("WORKER_EMOTION_EMA_ALPHA", 0.65)));
   const emotionEmaTtlMs = Math.max(2000, envInt("WORKER_EMOTION_EMA_TTL_MS", 12000));
   const dbEndpoint = (process.env.WORKER_DB_ENDPOINT || "http://127.0.0.1:3000/api/recognitions").trim();
   const dbCooldownMs = Math.max(1000, envInt("WORKER_DB_COOLDOWN_MS", 4000));
+  const dbReentryGapMs = Math.max(300, envInt("WORKER_DB_REENTRY_GAP_MS", 1800));
+  const dbSeenTtlMs = Math.max(dbCooldownMs * 6, dbReentryGapMs * 6);
+  const dbAllowMoodFallback = envBool("WORKER_DB_ALLOW_MOOD_FALLBACK", true);
+  const dbFallbackMoodRaw = (process.env.WORKER_DB_FALLBACK_MOOD || "neutral").trim().toLowerCase();
+  const dbFallbackMood = dbFallbackMoodRaw || "neutral";
   const dbRequestTimeoutMs = Math.max(500, envInt("WORKER_DB_TIMEOUT_MS", 1500));
   const dbQueueMaxSize = Math.max(10, envInt("WORKER_DB_QUEUE_MAX_SIZE", 300));
   const dbQueueBatchSize = Math.max(1, envInt("WORKER_DB_QUEUE_BATCH_SIZE", 6));
@@ -744,7 +758,12 @@ async function main() {
   );
   log(
     `emotion min_confidence=${emotionMinConfidence} ema_alpha=${emotionEmaAlpha} ` +
-      `ema_ttl_ms=${emotionEmaTtlMs}`,
+      `ema_ttl_ms=${emotionEmaTtlMs} low_floor=${emotionLowConfidenceFloor} ` +
+      `allow_low_label=${emotionAllowLowConfidenceLabel ? "on" : "off"}`,
+  );
+  log(
+    `db cooldown_ms=${dbCooldownMs} reentry_gap_ms=${dbReentryGapMs} ` +
+      `mood_fallback=${dbAllowMoodFallback ? dbFallbackMood : "off"}`,
   );
 
   let stopping = false;
@@ -902,6 +921,31 @@ async function main() {
         ),
       ),
     );
+    const camEmotionLowConfidenceFloor = Math.max(
+      0,
+      Math.min(
+        1,
+        parseFiniteFloat(
+          getCameraSetting(
+            cameraSettings,
+            cam.cameraId,
+            "emotionLowConfidenceFloor",
+            emotionLowConfidenceFloor,
+          ),
+          emotionLowConfidenceFloor,
+        ),
+      ),
+    );
+    const camEmotionAllowLowConfidenceLabelRaw = getCameraSetting(
+      cameraSettings,
+      cam.cameraId,
+      "emotionAllowLowConfidenceLabel",
+      emotionAllowLowConfidenceLabel,
+    );
+    const camEmotionAllowLowConfidenceLabel =
+      typeof camEmotionAllowLowConfidenceLabelRaw === "boolean"
+        ? camEmotionAllowLowConfidenceLabelRaw
+        : emotionAllowLowConfidenceLabel;
     const camEmotionEmaAlpha = Math.max(
       0,
       Math.min(
@@ -910,6 +954,13 @@ async function main() {
           getCameraSetting(cameraSettings, cam.cameraId, "emotionEmaAlpha", emotionEmaAlpha),
           emotionEmaAlpha,
         ),
+      ),
+    );
+    const camDbReentryGapMs = Math.max(
+      300,
+      parseFiniteInt(
+        getCameraSetting(cameraSettings, cam.cameraId, "dbReentryGapMs", dbReentryGapMs),
+        dbReentryGapMs,
       ),
     );
 
@@ -1147,8 +1198,13 @@ async function main() {
               cam.emotionSeenAtByName.set(name, now);
             }
 
+            const strongEmotion = emotionKey && emotionConfidence >= camEmotionMinConfidence;
+            const lowConfidenceEmotion =
+              emotionKey &&
+              camEmotionAllowLowConfidenceLabel &&
+              emotionConfidence >= camEmotionLowConfidenceFloor;
             const emotionLabel =
-              emotionKey && emotionConfidence >= camEmotionMinConfidence
+              strongEmotion || lowConfidenceEmotion
                 ? `${emotionKey} ${(emotionConfidence * 100).toFixed(0)}%`
                 : "";
 
@@ -1156,6 +1212,7 @@ async function main() {
               people.push({
                 name,
                 emotion: emotionLabel,
+                emotionKey: emotionKey || "",
                 emotionConfidence: Number(emotionConfidence.toFixed(4)),
                 distance: Number(distance.toFixed(3)),
               });
@@ -1172,6 +1229,15 @@ async function main() {
           cam.people = people;
           cam.matchedNames = people.map((p) => p.name);
           cam.matchDistance = people.length ? Number(bestDistance || 0) : 0;
+          const matchedNamesNow = new Set(
+            people.map((p) => p.name).filter((name) => !isUnknownIdentity(name)),
+          );
+          for (const [savedName, seenAt] of cam.lastSeenMatchedAt.entries()) {
+            if (!matchedNamesNow.has(savedName) && now - seenAt > dbSeenTtlMs) {
+              cam.lastSeenMatchedAt.delete(savedName);
+              cam.lastDbSentAt.delete(`${cam.cameraId}:${savedName}`);
+            }
+          }
           if (people.length) {
             cam.lastRecognitionAt = now;
           }
@@ -1197,11 +1263,27 @@ async function main() {
           if (enableMatching && enableEmotions && people.length) {
             for (const person of people) {
               if (isUnknownIdentity(person.name)) continue;
-              const moodLabel = String(person.emotion || "").split(" ")[0];
+              const prevSeenAt = cam.lastSeenMatchedAt.get(person.name) ?? 0;
+              cam.lastSeenMatchedAt.set(person.name, now);
+              const isReentry = prevSeenAt > 0 && now - prevSeenAt >= camDbReentryGapMs;
+
+              let moodLabel = String(person.emotion || "").split(" ")[0];
+              if (!moodLabel && dbAllowMoodFallback) {
+                const fallbackEmotionKey = String(person.emotionKey || "").trim().toLowerCase();
+                if (
+                  fallbackEmotionKey &&
+                  Number(person.emotionConfidence ?? 0) >= camEmotionLowConfidenceFloor
+                ) {
+                  moodLabel = fallbackEmotionKey;
+                } else {
+                  moodLabel = dbFallbackMood;
+                }
+              }
               if (!moodLabel) continue;
+
               const cooldownKey = `${cam.cameraId}:${person.name}`;
               const lastSent = cam.lastDbSentAt.get(cooldownKey) ?? 0;
-              if (now - lastSent < dbCooldownMs) continue;
+              if (!isReentry && now - lastSent < dbCooldownMs) continue;
               cam.lastDbSentAt.set(cooldownKey, now);
 
               if (dbQueue.length >= dbQueueMaxSize) {

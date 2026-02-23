@@ -43,6 +43,13 @@ WORKER_FRAME_ABORT_RETRY_QUALITY=85
 # WORKER_CAMERA_ZOOMS=cam-01=1,cam-02=2
 # Optional per-camera quality profiles
 # WORKER_CAMERA_SETTINGS_JSON={"cam-01":{"matchThreshold":0.50},"cam-02":{"confirmFrames":2,"filterMinScore":0.16}}
+# Re-entry writes a new recognition event when person reappears after short absence
+# WORKER_DB_REENTRY_GAP_MS=1800
+# Emotion fallback for weak confidence (prevents missing events in distance/zoom scenes)
+# WORKER_EMOTION_LOW_CONFIDENCE_FLOOR=0.18
+# WORKER_EMOTION_ALLOW_LOW_CONFIDENCE_LABEL=true
+# WORKER_DB_ALLOW_MOOD_FALLBACK=true
+# WORKER_DB_FALLBACK_MOOD=neutral
 ```
 
 Notes:
