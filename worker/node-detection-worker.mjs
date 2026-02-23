@@ -780,6 +780,7 @@ async function main() {
   const dbQueue = [];
   let lastDbQueueWarnAt = 0;
   const emotionKeys = ["happy", "sad", "angry", "fearful", "disgusted", "surprised"];
+  const loggedCameraProfiles = new Set();
 
   const processCamera = async (cam, now) => {
     const camFilterMinScore = Math.max(
@@ -966,6 +967,19 @@ async function main() {
 
     const frameUrl = buildFrameUrl(frameApiBase, cam.src);
     cam.workerZoom = clampWorkerZoom(workerZoomMap?.[cam.cameraId] ?? workerZoomDefaults[cam.cameraId] ?? 1, 1);
+    if (!loggedCameraProfiles.has(cam.cameraId)) {
+      loggedCameraProfiles.add(cam.cameraId);
+      log(
+        `[${cam.cameraId}] profile ` +
+          `zoom=${cam.workerZoom.toFixed(2)} confirm_frames=${camConfirmFrames} ` +
+          `min_confirm=${camMinConfirmScore.toFixed(3)} filter_min=${camFilterMinScore.toFixed(3)} ` +
+          `person_min=${camPersonMinScore.toFixed(3)} person_side=${camPersonMinSidePx} ` +
+          `person_streak=${camPersonMinStreak} match_th=${camMatchThreshold.toFixed(3)} ` +
+          `match_margin=${camMatchMinMargin.toFixed(3)} match_face_px=${camMatchMinFaceSidePx} ` +
+          `emotion_min=${camEmotionMinConfidence.toFixed(3)} emotion_floor=${camEmotionLowConfidenceFloor.toFixed(3)} ` +
+          `db_reentry_ms=${camDbReentryGapMs}`,
+      );
+    }
 
     try {
       let jpg;
