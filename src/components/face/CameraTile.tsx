@@ -44,13 +44,15 @@ type WorkerStatus = {
   snapshotUrl?: string;
   lastRecognitionAt?: string;
   frameOk?: boolean;
-  lastFrameAt?: string;
-  frameWidth?: number;
-  frameHeight?: number;
-  workerFrameWidth?: number;
-  workerFrameHeight?: number;
-  frameError?: string;
   workerZoom?: number;
+};
+
+type SnapshotHistoryItem = {
+  id: string;
+  snapshotUrl: string;
+  who: string;
+  emotion: string;
+  capturedAt: string;
 };
 
 function safeDestroyPlayer(player: RtspPlayer | null) {
@@ -143,13 +145,15 @@ export default function CameraTile({
   const playerRef = useRef<RtspPlayer | null>(null);
   const streamTokenRef = useRef(0);
   const reconnectTimerRef = useRef<number | null>(null);
+  const lastSnapshotKeyRef = useRef("");
 
   const [status, setStatus] = useState<"loading" | "ready" | "error">("loading");
   const [people, setPeople] = useState<WorkerPerson[]>([]);
   const [snapshotUrl, setSnapshotUrl] = useState("");
   const [snapshotWho, setSnapshotWho] = useState("");
+  const [snapshotEmotion, setSnapshotEmotion] = useState("");
   const [lastRecognitionAt, setLastRecognitionAt] = useState("");
-  const [workerDebugLine, setWorkerDebugLine] = useState("ожидание данных воркера...");
+  const [history, setHistory] = useState<SnapshotHistoryItem[]>([]);
   const [zoomValue, setZoomValue] = useState<number>(clampZoom(camera.digitalZoom));
   const [workerZoom, setWorkerZoom] = useState(1);
   const [workerZoomSaving, setWorkerZoomSaving] = useState(false);
@@ -158,9 +162,11 @@ export default function CameraTile({
     setPeople([]);
     setSnapshotUrl("");
     setSnapshotWho("");
+    setSnapshotEmotion("");
     setLastRecognitionAt("");
+    setHistory([]);
     setWorkerZoom(1);
-    setWorkerDebugLine("ожидание данных воркера...");
+    lastSnapshotKeyRef.current = "";
   }, [camera.id]);
 
   useEffect(() => {
@@ -264,35 +270,13 @@ export default function CameraTile({
         if (ws) {
           const names = namesFromStatus(ws);
           const who = names.join(", ");
-          const hasPerson =
-            typeof ws.personInFrame === "boolean" ? ws.personInFrame : Number(ws.candidate ?? 0) > 0;
-          const hasFace =
-            typeof ws.faceInFrame === "boolean" ? ws.faceInFrame : Number(ws.confirmed ?? 0) > 0;
           const emotion =
             typeof ws.topEmotion === "string" && ws.topEmotion.trim().length > 0
               ? ws.topEmotion.trim()
-              : "нет";
+              : "none";
           const zoom = clampWorkerZoom(Number(ws.workerZoom ?? 1));
-          const frameOk = ws.frameOk === true;
-          const frameAt = ws.lastFrameAt ? new Date(ws.lastFrameAt).getTime() : 0;
-          const frameAgeSec = frameAt ? Math.max(0, Math.round((Date.now() - frameAt) / 1000)) : 0;
-          const sourceW = Number(ws.frameWidth ?? 0);
-          const sourceH = Number(ws.frameHeight ?? 0);
-          const workerW = Number(ws.workerFrameWidth ?? 0);
-          const workerH = Number(ws.workerFrameHeight ?? 0);
-          const frameState = frameOk ? "есть" : "нет";
-          const frameInfo =
-            frameOk && sourceW > 0 && sourceH > 0
-              ? `${sourceW}x${sourceH} -> ${workerW || sourceW}x${workerH || sourceH}, ${frameAgeSec}с назад`
-              : ws.frameError || "нет данных";
 
           setWorkerZoom(zoom);
-          setWorkerDebugLine(
-            `[${new Date().toLocaleTimeString()}] человек в кадре: ${hasPerson ? "есть" : "нет"} | ` +
-              `лицо: ${hasFace ? "есть" : "нет"} | ` +
-              `кто: ${who || "не определен"} | ` +
-              `эмоция: ${emotion} | worker zoom: x${zoom.toFixed(1)} | кадр: ${frameState} (${frameInfo})`,
-          );
 
           const nextPeople = Array.isArray(ws.people)
             ? ws.people
@@ -305,20 +289,42 @@ export default function CameraTile({
             : names.map((name) => ({ name, emotion: "" }));
           setPeople(nextPeople);
 
-          setSnapshotWho(who || "не определен");
-          setSnapshotUrl(typeof ws.snapshotUrl === "string" ? ws.snapshotUrl : "");
-          setLastRecognitionAt(typeof ws.lastRecognitionAt === "string" ? ws.lastRecognitionAt : "");
+          const nextSnapshotUrl = typeof ws.snapshotUrl === "string" ? ws.snapshotUrl : "";
+          const nextRecognitionAt =
+            typeof ws.lastRecognitionAt === "string" ? ws.lastRecognitionAt : "";
+          const nextWho = who || "unknown";
+
+          setSnapshotWho(nextWho);
+          setSnapshotEmotion(emotion);
+          setSnapshotUrl(nextSnapshotUrl);
+          setLastRecognitionAt(nextRecognitionAt);
+
+          if (nextSnapshotUrl && nextRecognitionAt) {
+            const snapshotKey = `${nextSnapshotUrl}|${nextRecognitionAt}`;
+            if (snapshotKey !== lastSnapshotKeyRef.current) {
+              lastSnapshotKeyRef.current = snapshotKey;
+              setHistory((prev) =>
+                [
+                  {
+                    id: snapshotKey,
+                    snapshotUrl: nextSnapshotUrl,
+                    who: nextWho,
+                    emotion,
+                    capturedAt: nextRecognitionAt,
+                  },
+                  ...prev,
+                ].slice(0, 5),
+              );
+            }
+          }
         } else {
           setPeople([]);
           setSnapshotWho("");
+          setSnapshotEmotion("");
           setLastRecognitionAt("");
-          setWorkerDebugLine(`[${new Date().toLocaleTimeString()}] данные воркера: нет`);
         }
       } catch (error) {
-        const message = error instanceof Error ? error.message : "request_failed";
-        setWorkerDebugLine(
-          `[${new Date().toLocaleTimeString()}] ошибка запроса статуса воркера: ${message}`,
-        );
+        console.error("[camera] worker status error:", error);
       }
 
       timer = window.setTimeout(() => {
@@ -344,10 +350,7 @@ export default function CameraTile({
       if (!res.ok) throw new Error(`zoom_http_${res.status}`);
       setWorkerZoom(clampWorkerZoom(nextZoom));
     } catch (error) {
-      const message = error instanceof Error ? error.message : "zoom_update_failed";
-      setWorkerDebugLine(
-        `[${new Date().toLocaleTimeString()}] ошибка установки worker zoom: ${message}`,
-      );
+      console.error("[camera] set worker zoom error:", error);
     } finally {
       setWorkerZoomSaving(false);
     }
@@ -441,20 +444,34 @@ export default function CameraTile({
             <div className="camera-evidence">
               <img className="camera-evidence-image" src={snapshotUrl} alt={`${camera.name} snapshot`} />
               <div className="camera-evidence-meta">
-                <Text type="secondary">Снимок воркера</Text>
+                <Text type="secondary">Snapshot</Text>
                 {lastRecognitionAt ? (
                   <Text type="secondary">{formatRecognitionTime(lastRecognitionAt)}</Text>
                 ) : null}
               </div>
               <div className="camera-evidence-meta">
-                <Text type="secondary">{`На снимке: ${snapshotWho || "не определен"}`}</Text>
+                <Text type="secondary">{`Who: ${snapshotWho || "unknown"}`}</Text>
+              </div>
+              <div className="camera-evidence-meta">
+                <Text type="secondary">{`Emotion: ${snapshotEmotion || "none"}`}</Text>
               </div>
             </div>
           ) : null}
 
-          <div className="camera-debug-line">
-            <Text type="secondary">{workerDebugLine}</Text>
-          </div>
+          {history.length ? (
+            <div className="camera-history">
+              {history.map((item) => (
+                <div key={item.id} className="camera-history-card">
+                  <img className="camera-history-image" src={item.snapshotUrl} alt="history snapshot" />
+                  <div className="camera-history-body">
+                    <Text type="secondary">{`Who: ${item.who}`}</Text>
+                    <Text type="secondary">{`Emotion: ${item.emotion || "none"}`}</Text>
+                    <Text type="secondary">{formatRecognitionTime(item.capturedAt)}</Text>
+                  </div>
+                </div>
+              ))}
+            </div>
+          ) : null}
         </div>
 
         <Tag color={people.length ? "green" : "geekblue"}>
@@ -464,4 +481,3 @@ export default function CameraTile({
     </Card>
   );
 }
-
