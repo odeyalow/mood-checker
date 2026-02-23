@@ -5,6 +5,7 @@ type WorkerStatusCamera = {
   candidate: number;
   confirmed: number;
   score: number;
+  maxFaceSide?: number;
   motion: number;
   streak: number;
   requiredFrames: number;

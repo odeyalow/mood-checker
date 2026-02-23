@@ -319,6 +319,7 @@ function createState(cameraId, src) {
     candidate: 0,
     confirmed: 0,
     score: 0,
+    maxFaceSide: 0,
     motion: 0,
     streak: 0,
     matchedNames: [],
@@ -386,6 +387,12 @@ async function main() {
   const confirmFrames = Math.max(1, envInt("WORKER_CONFIRM_FRAMES", 1));
   const motionThreshold = envFloat("WORKER_MOTION_THRESHOLD", 1.5);
   const minConfirmScore = envFloat("WORKER_MIN_CONFIRM_SCORE", 0.14);
+  const personMinScore = envFloat(
+    "WORKER_PERSON_MIN_SCORE",
+    Math.max(minConfirmScore, 0.22),
+  );
+  const personMinSidePx = Math.max(10, envInt("WORKER_PERSON_MIN_SIDE_PX", 34));
+  const personMinStreak = Math.max(1, envInt("WORKER_PERSON_MIN_STREAK", 2));
   const tinyInputSize = envInt("WORKER_TINY_INPUT_SIZE", 512);
   const tinyScoreThreshold = envFloat("WORKER_TINY_SCORE_THRESHOLD", 0.18);
   const ssdMinConfidence = envFloat("WORKER_SSD_MIN_CONFIDENCE", 0.35);
@@ -636,6 +643,7 @@ async function main() {
 
         const { maxSide, maxScore } = largestFaceStats(detections);
         cam.score = maxScore;
+        cam.maxFaceSide = maxSide;
 
         const best = detections[0];
         const bestBox = getBox(best);
@@ -877,6 +885,7 @@ async function main() {
         cam.candidate = 0;
         cam.confirmed = 0;
         cam.score = 0;
+        cam.maxFaceSide = 0;
         cam.streak = 0;
         cam.matchedNames = [];
         cam.matchDistance = 0;
@@ -908,7 +917,12 @@ async function main() {
         cameras: {},
       };
       for (const cam of states) {
-        const hasPerson = cam.candidate > 0 && cam.score >= minConfirmScore;
+        const hasPerson =
+          cam.confirmed > 0 ||
+          (cam.candidate > 0 &&
+            cam.score >= personMinScore &&
+            cam.maxFaceSide >= personMinSidePx &&
+            cam.streak >= personMinStreak);
         const hasFace = cam.confirmed > 0;
         const who = cam.matchedNames.length ? cam.matchedNames.join(", ") : "unknown";
         const emotion = cam.topEmotion || "none";
@@ -923,6 +937,7 @@ async function main() {
           candidate: cam.candidate,
           confirmed: cam.confirmed,
           score: Number(cam.score.toFixed(3)),
+          maxFaceSide: Number(cam.maxFaceSide.toFixed(1)),
           motion: Number(cam.motion.toFixed(2)),
           streak: cam.streak,
           requiredFrames: confirmFrames,
