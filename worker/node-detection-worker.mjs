@@ -67,6 +67,20 @@ function normalizeKnownList(value) {
     .filter(Boolean);
 }
 
+function isUnknownIdentity(name) {
+  const normalized = String(name ?? "").trim().toLowerCase();
+  if (!normalized) return true;
+  return (
+    normalized === "unknown" ||
+    normalized === "unrecognized" ||
+    normalized === "not_recognized" ||
+    normalized === "undefined" ||
+    normalized === "null" ||
+    normalized === "none" ||
+    normalized === "n/a"
+  );
+}
+
 function parseCameraSources() {
   const explicit = (process.env.WORKER_CAMERA_SOURCES ?? "").trim();
   const list = [];
@@ -820,7 +834,7 @@ async function main() {
                 emotionLabel = topKey ? `${topKey} ${(topVal * 100).toFixed(0)}%` : "";
               }
 
-              if (name !== "unknown") {
+              if (!isUnknownIdentity(name)) {
                 people.push({
                   name,
                   emotion: emotionLabel,
@@ -856,6 +870,7 @@ async function main() {
 
             if (enableMatching && enableEmotions && people.length) {
               for (const person of people) {
+                if (isUnknownIdentity(person.name)) continue;
                 const moodLabel = String(person.emotion || "").split(" ")[0];
                 if (!moodLabel) continue;
                 const lastSent = cam.lastDbSentAt.get(person.name) ?? 0;

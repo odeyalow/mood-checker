@@ -10,6 +10,20 @@ function parseLimit(raw: string | null, fallback = 10) {
   return Math.max(1, Math.min(100, n));
 }
 
+function isUnknownIdentity(name: string) {
+  const normalized = name.trim().toLowerCase();
+  if (!normalized) return true;
+  return (
+    normalized === "unknown" ||
+    normalized === "unrecognized" ||
+    normalized === "not_recognized" ||
+    normalized === "undefined" ||
+    normalized === "null" ||
+    normalized === "none" ||
+    normalized === "n/a"
+  );
+}
+
 export async function GET(request: Request) {
   try {
     const url = new URL(request.url);
@@ -34,6 +48,10 @@ export async function POST(request: Request) {
 
     if (!name || !mood) {
       return NextResponse.json({ error: "invalid_payload" }, { status: 400 });
+    }
+
+    if (isUnknownIdentity(name)) {
+      return NextResponse.json({ ok: true, skipped: "unknown_identity" });
     }
 
     const detectedAt = Number.isNaN(detectedAtRaw.getTime()) ? new Date() : detectedAtRaw;
