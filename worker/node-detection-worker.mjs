@@ -305,6 +305,29 @@ async function fetchFrame(frameUrl, timeoutMs) {
   }
 }
 
+function isAbortError(err) {
+  const message = String(err ?? "");
+  return (
+    message.includes("AbortError") ||
+    message.includes("operation was aborted") ||
+    message.includes("aborted")
+  );
+}
+
+function buildAbortFallbackFrameUrl(frameUrl, width, height, quality) {
+  const url = new URL(frameUrl);
+  if (Number.isFinite(width) && width > 0) {
+    url.searchParams.set("width", String(Math.floor(width)));
+  }
+  if (Number.isFinite(height) && height > 0) {
+    url.searchParams.set("height", String(Math.floor(height)));
+  }
+  if (Number.isFinite(quality) && quality > 0) {
+    url.searchParams.set("quality", String(Math.floor(quality)));
+  }
+  return url.toString();
+}
+
 async function writeStatusFile(filePath, payload) {
   const tmp = `${filePath}.tmp`;
   await fsp.writeFile(tmp, JSON.stringify(payload), "utf-8");
@@ -379,6 +402,11 @@ async function main() {
   const frameApiBase =
     (process.env.WORKER_FRAME_API_BASE || "http://127.0.0.1:3000/api/camera/frame").replace(/\/+$/, "");
   const frameTimeoutMs = Math.max(500, envInt("WORKER_FRAME_TIMEOUT_MS", 1200));
+  const frameAbortRetryEnabled = envBool("WORKER_FRAME_ABORT_RETRY_ENABLED", true);
+  const frameAbortRetryTimeoutMs = Math.max(500, envInt("WORKER_FRAME_ABORT_RETRY_TIMEOUT_MS", 2500));
+  const frameAbortRetryWidth = Math.max(320, envInt("WORKER_FRAME_ABORT_RETRY_WIDTH", 1280));
+  const frameAbortRetryHeight = Math.max(180, envInt("WORKER_FRAME_ABORT_RETRY_HEIGHT", 720));
+  const frameAbortRetryQuality = Math.min(100, Math.max(1, envInt("WORKER_FRAME_ABORT_RETRY_QUALITY", 85)));
   const loopDelayMs = Math.max(15, envInt("WORKER_LOOP_DELAY_MS", 50));
   const heartbeatSeconds = Math.max(1, envFloat("WORKER_HEARTBEAT_SECONDS", 5));
   const statusLogSeconds = Math.max(0.4, envFloat("WORKER_STATUS_LOG_SECONDS", 1.5));
@@ -568,7 +596,19 @@ async function main() {
       );
 
       try {
-        const jpg = await fetchFrame(frameUrl, frameTimeoutMs);
+        let jpg;
+        try {
+          jpg = await fetchFrame(frameUrl, frameTimeoutMs);
+        } catch (err) {
+          if (!frameAbortRetryEnabled || !isAbortError(err)) throw err;
+          const retryUrl = buildAbortFallbackFrameUrl(
+            frameUrl,
+            frameAbortRetryWidth,
+            frameAbortRetryHeight,
+            frameAbortRetryQuality,
+          );
+          jpg = await fetchFrame(retryUrl, frameAbortRetryTimeoutMs);
+        }
         const image = await loadImage(jpg);
         const sourceWidth = Number(image.width ?? 0);
         const sourceHeight = Number(image.height ?? 0);
