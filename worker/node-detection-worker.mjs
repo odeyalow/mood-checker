@@ -1,4 +1,4 @@
-﻿#!/usr/bin/env node
+#!/usr/bin/env node
 /* Detection-only worker using the same model family/logic as browser face-api. */
 
 import fs from "node:fs";
