@@ -187,6 +187,90 @@ function parseEmotionFromExpressions(expressions, keys) {
   };
 }
 
+function createPresenceSession(now) {
+  return {
+    startedAt: now,
+    lastSeenAt: now,
+    lastSampleAt: 0,
+    sampleCount: 0,
+    emotionSampleCount: 0,
+    bestDistance: Number.POSITIVE_INFINITY,
+    emittedAt: 0,
+    lastMoodLabel: "",
+    emotionStats: new Map(),
+  };
+}
+
+function addSessionEmotionSample(session, emotionKey, emotionConfidence) {
+  const key = String(emotionKey ?? "").trim().toLowerCase();
+  const confidence = Number(emotionConfidence ?? 0);
+  if (!key || !Number.isFinite(confidence) || confidence <= 0) return;
+  const prev = session.emotionStats.get(key) || { sum: 0, count: 0, max: 0 };
+  prev.sum += confidence;
+  prev.count += 1;
+  prev.max = Math.max(prev.max, confidence);
+  session.emotionStats.set(key, prev);
+  session.emotionSampleCount += 1;
+}
+
+function resolveSessionEmotionLabel({
+  session,
+  minConfidence,
+  lowConfidenceFloor,
+  allowLowConfidenceLabel,
+  allowFallbackMood,
+  fallbackMood,
+}) {
+  let bestKey = "";
+  let bestSum = 0;
+  let bestAvg = 0;
+  let bestPeak = 0;
+  for (const [key, stats] of session.emotionStats.entries()) {
+    const sum = Number(stats?.sum ?? 0);
+    const count = Number(stats?.count ?? 0);
+    const peak = Number(stats?.max ?? 0);
+    if (!count || !Number.isFinite(sum)) continue;
+    if (sum > bestSum) {
+      bestSum = sum;
+      bestKey = key;
+      bestAvg = sum / count;
+      bestPeak = Number.isFinite(peak) ? peak : bestAvg;
+    }
+  }
+
+  if (bestKey) {
+    const aggregatedConfidence = Math.max(bestAvg, bestPeak);
+    if (aggregatedConfidence >= minConfidence) {
+      return {
+        moodLabel: bestKey,
+        emotionLabel: `${bestKey} ${(aggregatedConfidence * 100).toFixed(0)}%`,
+        emotionConfidence: Number(aggregatedConfidence.toFixed(4)),
+      };
+    }
+    if (allowLowConfidenceLabel && aggregatedConfidence >= lowConfidenceFloor) {
+      return {
+        moodLabel: bestKey,
+        emotionLabel: `${bestKey} ${(aggregatedConfidence * 100).toFixed(0)}%`,
+        emotionConfidence: Number(aggregatedConfidence.toFixed(4)),
+      };
+    }
+  }
+
+  if (allowFallbackMood) {
+    return {
+      moodLabel: fallbackMood,
+      emotionLabel: "",
+      emotionConfidence: 0,
+    };
+  }
+
+  return {
+    moodLabel: "",
+    emotionLabel: "",
+    emotionConfidence: 0,
+  };
+}
+
 function getBox(det) {
   const box = det?.box ?? det?.detection?.box;
   if (!box) return null;
@@ -529,6 +613,7 @@ function createState(cameraId, src) {
     lastErrLogAt: 0,
     lastDbSentAt: new Map(),
     lastSeenMatchedAt: new Map(),
+    presenceSessions: new Map(),
   };
 }
 
@@ -599,6 +684,23 @@ async function main() {
   const emotionIntervalMs = Math.max(150, envInt("WORKER_EMOTION_INTERVAL_MS", 300));
   const snapshotCooldownMs = Math.max(150, envInt("WORKER_SNAPSHOT_COOLDOWN_MS", 450));
   const recognitionHoldMs = Math.max(0, envInt("WORKER_RECOGNITION_HOLD_MS", 1200));
+  const sessionSnapshotIntervalMs = Math.max(
+    500,
+    envInt("WORKER_SESSION_SNAPSHOT_INTERVAL_MS", 1500),
+  );
+  const sessionAbsenceMs = Math.max(
+    700,
+    envInt("WORKER_SESSION_ABSENCE_MS", Math.max(2200, recognitionHoldMs + 800)),
+  );
+  const sessionResolveWaitMs = Math.max(
+    300,
+    envInt("WORKER_SESSION_RESOLVE_WAIT_MS", 2800),
+  );
+  const sessionMinSamples = Math.max(1, envInt("WORKER_SESSION_MIN_SAMPLES", 2));
+  const sessionMinEmotionSamples = Math.max(
+    1,
+    envInt("WORKER_SESSION_MIN_EMOTION_SAMPLES", 2),
+  );
   const workerZoomReloadMs = Math.max(250, envInt("WORKER_ZOOM_RELOAD_MS", 700));
   const workerZoomDefaults = parseWorkerZoomDefaults();
   const cameraSettings = parseCameraSettings();
@@ -769,6 +871,11 @@ async function main() {
   log(
     `db cooldown_ms=${dbCooldownMs} reentry_gap_ms=${dbReentryGapMs} ` +
       `mood_fallback=${dbAllowMoodFallback ? dbFallbackMood : "off"}`,
+  );
+  log(
+    `session snapshot_ms=${sessionSnapshotIntervalMs} absence_ms=${sessionAbsenceMs} ` +
+      `resolve_wait_ms=${sessionResolveWaitMs} min_samples=${sessionMinSamples} ` +
+      `min_emotion_samples=${sessionMinEmotionSamples}`,
   );
 
   let stopping = false;
@@ -969,6 +1076,60 @@ async function main() {
         dbReentryGapMs,
       ),
     );
+    const camSessionSnapshotIntervalMs = Math.max(
+      500,
+      parseFiniteInt(
+        getCameraSetting(
+          cameraSettings,
+          cam.cameraId,
+          "sessionSnapshotIntervalMs",
+          sessionSnapshotIntervalMs,
+        ),
+        sessionSnapshotIntervalMs,
+      ),
+    );
+    const camSessionAbsenceMs = Math.max(
+      700,
+      parseFiniteInt(
+        getCameraSetting(cameraSettings, cam.cameraId, "sessionAbsenceMs", sessionAbsenceMs),
+        sessionAbsenceMs,
+      ),
+    );
+    const camSessionResolveWaitMs = Math.max(
+      300,
+      parseFiniteInt(
+        getCameraSetting(cameraSettings, cam.cameraId, "sessionResolveWaitMs", sessionResolveWaitMs),
+        sessionResolveWaitMs,
+      ),
+    );
+    const camSessionMinSamples = Math.max(
+      1,
+      parseFiniteInt(
+        getCameraSetting(cameraSettings, cam.cameraId, "sessionMinSamples", sessionMinSamples),
+        sessionMinSamples,
+      ),
+    );
+    const camSessionMinEmotionSamples = Math.max(
+      1,
+      parseFiniteInt(
+        getCameraSetting(
+          cameraSettings,
+          cam.cameraId,
+          "sessionMinEmotionSamples",
+          sessionMinEmotionSamples,
+        ),
+        sessionMinEmotionSamples,
+      ),
+    );
+    const evictPresenceSessions = (activeNames = null) => {
+      for (const [savedName, session] of cam.presenceSessions.entries()) {
+        if (activeNames && activeNames.has(savedName)) continue;
+        if (now - (session?.lastSeenAt ?? 0) <= camSessionAbsenceMs) continue;
+        cam.presenceSessions.delete(savedName);
+        cam.lastSeenMatchedAt.delete(savedName);
+        cam.lastDbSentAt.delete(`${cam.cameraId}:${savedName}`);
+      }
+    };
 
     const frameUrl = buildFrameUrl(frameApiBase, cam.src);
     const zoomOverride = Number(workerZoomMap?.[cam.cameraId]);
@@ -987,7 +1148,8 @@ async function main() {
           `person_streak=${camPersonMinStreak} match_th=${camMatchThreshold.toFixed(3)} ` +
           `match_margin=${camMatchMinMargin.toFixed(3)} match_face_px=${camMatchMinFaceSidePx} ` +
           `emotion_min=${camEmotionMinConfidence.toFixed(3)} emotion_floor=${camEmotionLowConfidenceFloor.toFixed(3)} ` +
-          `db_reentry_ms=${camDbReentryGapMs}`,
+          `db_reentry_ms=${camDbReentryGapMs} session_ms=${camSessionSnapshotIntervalMs} ` +
+          `absence_ms=${camSessionAbsenceMs} resolve_ms=${camSessionResolveWaitMs}`,
       );
     }
 
@@ -1134,10 +1296,14 @@ async function main() {
 
       const needMatch = Boolean(matcher) && now - cam.lastMatchAt >= camMatchIntervalMs;
       const needEmotion = enableEmotions && now - cam.lastEmotionAt >= camEmotionIntervalMs;
+      const effectiveSnapshotCooldownMs = Math.max(
+        camSnapshotCooldownMs,
+        camSessionSnapshotIntervalMs,
+      );
       const shouldSnapshot =
         cam.confirmed > 0 &&
         (needMatch || needEmotion) &&
-        now - cam.lastSnapshotAt >= camSnapshotCooldownMs;
+        now - cam.lastSnapshotAt >= effectiveSnapshotCooldownMs;
 
       if (shouldSnapshot) {
         cam.lastSnapshotAt = now;
@@ -1256,12 +1422,16 @@ async function main() {
           const matchedNamesNow = new Set(
             people.map((p) => p.name).filter((name) => !isUnknownIdentity(name)),
           );
+          for (const matchedName of matchedNamesNow) {
+            cam.lastSeenMatchedAt.set(matchedName, now);
+          }
           for (const [savedName, seenAt] of cam.lastSeenMatchedAt.entries()) {
             if (!matchedNamesNow.has(savedName) && now - seenAt > dbSeenTtlMs) {
               cam.lastSeenMatchedAt.delete(savedName);
               cam.lastDbSentAt.delete(`${cam.cameraId}:${savedName}`);
             }
           }
+          evictPresenceSessions(matchedNamesNow);
           if (people.length) {
             cam.lastRecognitionAt = now;
           }
@@ -1269,13 +1439,19 @@ async function main() {
           if (
             saveSnapshots &&
             people.length &&
-            now - cam.lastSnapshotSavedAt >= snapshotSaveCooldownMs
+            now - cam.lastSnapshotSavedAt >= Math.max(snapshotSaveCooldownMs, camSessionSnapshotIntervalMs)
           ) {
             try {
               const snapshotFile = path.join(snapshotDir, `${cam.cameraId}.jpg`);
               await fsp.writeFile(snapshotFile, jpg);
               cam.snapshotUrl = `${snapshotPublicBase}/${cam.cameraId}.jpg?v=${now}`;
               cam.lastSnapshotSavedAt = now;
+              const snapshotFaces = people
+                .map((person) => `${person.name}:${person.emotion || "-"}`)
+                .join(", ");
+              if (snapshotFaces) {
+                log(`[${cam.cameraId}] snapshot faces=${snapshotFaces}`);
+              }
             } catch (err) {
               if (now - cam.lastErrLogAt >= 2000) {
                 log(`[${cam.cameraId}] snapshot save error: ${String(err)}`);
@@ -1287,28 +1463,91 @@ async function main() {
           if (enableMatching && enableEmotions && people.length) {
             for (const person of people) {
               if (isUnknownIdentity(person.name)) continue;
-              const prevSeenAt = cam.lastSeenMatchedAt.get(person.name) ?? 0;
-              cam.lastSeenMatchedAt.set(person.name, now);
-              const isReentry = prevSeenAt > 0 && now - prevSeenAt >= camDbReentryGapMs;
+              const sessionKey = person.name;
+              let session = cam.presenceSessions.get(sessionKey);
+              if (!session) {
+                session = createPresenceSession(now);
+                cam.presenceSessions.set(sessionKey, session);
+              }
+              session.lastSeenAt = now;
 
-              let moodLabel = String(person.emotion || "").split(" ")[0];
-              if (!moodLabel && dbAllowMoodFallback) {
-                const fallbackEmotionKey = String(person.emotionKey || "").trim().toLowerCase();
-                if (
-                  fallbackEmotionKey &&
-                  Number(person.emotionConfidence ?? 0) >= camEmotionLowConfidenceFloor
-                ) {
-                  moodLabel = fallbackEmotionKey;
-                } else {
-                  moodLabel = dbFallbackMood;
+              const personDistance = Number(person.distance ?? 0);
+              if (Number.isFinite(personDistance) && personDistance > 0) {
+                session.bestDistance = Math.min(
+                  Number(session.bestDistance ?? Number.POSITIVE_INFINITY),
+                  personDistance,
+                );
+              }
+
+              const shouldTakeSessionSample =
+                session.sampleCount === 0 ||
+                now - session.lastSampleAt >= camSessionSnapshotIntervalMs;
+              if (shouldTakeSessionSample) {
+                session.lastSampleAt = now;
+                session.sampleCount += 1;
+                addSessionEmotionSample(session, person.emotionKey, person.emotionConfidence);
+              }
+
+              const directMoodLabel = String(person.emotion || "").split(" ")[0];
+              if (directMoodLabel) {
+                session.lastMoodLabel = directMoodLabel;
+              }
+
+              let moodLabel = directMoodLabel;
+              let resolvedEmotionLabel = String(person.emotion || "");
+              let resolvedEmotionConfidence = Number(person.emotionConfidence ?? 0);
+              const sessionAgeMs = now - session.startedAt;
+              const canResolveFromSamples =
+                session.sampleCount >= camSessionMinSamples &&
+                sessionAgeMs >= camSessionResolveWaitMs &&
+                (session.emotionSampleCount >= camSessionMinEmotionSamples || dbAllowMoodFallback);
+              if (!moodLabel && canResolveFromSamples) {
+                const resolved = resolveSessionEmotionLabel({
+                  session,
+                  minConfidence: camEmotionMinConfidence,
+                  lowConfidenceFloor: camEmotionLowConfidenceFloor,
+                  allowLowConfidenceLabel: camEmotionAllowLowConfidenceLabel,
+                  allowFallbackMood: dbAllowMoodFallback,
+                  fallbackMood: dbFallbackMood,
+                });
+                moodLabel = resolved.moodLabel;
+                if (resolved.emotionLabel) {
+                  resolvedEmotionLabel = resolved.emotionLabel;
+                }
+                if (Number.isFinite(resolved.emotionConfidence)) {
+                  resolvedEmotionConfidence = Number(resolved.emotionConfidence);
                 }
               }
-              if (!moodLabel) continue;
+
+              const readyByDirectEmotion = Boolean(directMoodLabel);
+              const readyBySession =
+                session.sampleCount >= camSessionMinSamples &&
+                sessionAgeMs >= camSessionResolveWaitMs &&
+                (session.emotionSampleCount >= camSessionMinEmotionSamples || dbAllowMoodFallback);
+              const shouldEmitSessionRecord =
+                !session.emittedAt &&
+                (readyByDirectEmotion || readyBySession) &&
+                Boolean(moodLabel);
+              if (!shouldEmitSessionRecord) continue;
+
+              const prevSeenAt = cam.lastSeenMatchedAt.get(person.name) ?? 0;
+              const isReentry = prevSeenAt > 0 && now - prevSeenAt >= camDbReentryGapMs;
 
               const cooldownKey = `${cam.cameraId}:${person.name}`;
               const lastSent = cam.lastDbSentAt.get(cooldownKey) ?? 0;
               if (!isReentry && now - lastSent < dbCooldownMs) continue;
               cam.lastDbSentAt.set(cooldownKey, now);
+              session.emittedAt = now;
+              session.lastMoodLabel = moodLabel;
+
+              if (!person.emotion && resolvedEmotionLabel) {
+                person.emotion = resolvedEmotionLabel;
+              }
+              person.emotionConfidence = Number(
+                Number.isFinite(resolvedEmotionConfidence)
+                  ? resolvedEmotionConfidence
+                  : Number(person.emotionConfidence ?? 0),
+              );
 
               if (dbQueue.length >= dbQueueMaxSize) {
                 dbQueue.shift();
@@ -1325,7 +1564,9 @@ async function main() {
                     mood: moodLabel,
                     detectedAt: new Date(now).toISOString(),
                     cameraId: cam.cameraId,
-                    distance: Number(person.distance ?? 0),
+                    distance: Number.isFinite(session.bestDistance)
+                      ? Number(session.bestDistance)
+                      : Number(person.distance ?? 0),
                     emotionConfidence: Number(person.emotionConfidence ?? 0),
                     workerZoom: Number(cam.workerZoom.toFixed(2)),
                     frameWidth: cam.workerFrameWidth,
@@ -1355,7 +1596,8 @@ async function main() {
                 `${p.name}:${p.emotion || "-"}(${Number(p.emotionConfidence ?? 0).toFixed(2)})`,
               )
               .join(", ");
-            cam.topEmotion = cam.people.length ? cam.people[0].emotion || "" : "";
+            cam.topEmotion =
+              cam.people.find((person) => String(person?.emotion ?? "").trim())?.emotion || "";
             if (cam.topEmotion && now - cam.lastEmotionLogAt >= 1500) {
               log(`[${cam.cameraId}] emotion top=${cam.topEmotion}`);
               cam.lastEmotionLogAt = now;
@@ -1378,6 +1620,7 @@ async function main() {
         cam.people = [];
         cam.emotionSummary = "";
         cam.topEmotion = "";
+        evictPresenceSessions(new Set());
       }
     } catch (err) {
       cam.candidate = 0;
@@ -1391,6 +1634,7 @@ async function main() {
       cam.emotionSummary = "";
       cam.topEmotion = "";
       cam.lastRecognitionAt = 0;
+      evictPresenceSessions(new Set());
       cam.frameOk = false;
       cam.workerFrameWidth = 0;
       cam.workerFrameHeight = 0;

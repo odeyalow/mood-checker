@@ -97,6 +97,19 @@ function namesFromStatus(status: WorkerStatus): string[] {
   return [];
 }
 
+function emotionSummaryFromPeople(people: WorkerPerson[]): string {
+  if (!Array.isArray(people) || !people.length) return "";
+  return people
+    .map((person) => {
+      const name = String(person?.name ?? "").trim();
+      if (!name) return "";
+      const emotion = String(person?.emotion ?? "").trim() || "-";
+      return `${name}: ${emotion}`;
+    })
+    .filter(Boolean)
+    .join(", ");
+}
+
 async function waitForPlayer(timeoutMs = 15000) {
   const started = Date.now();
   while (Date.now() - started < timeoutMs) {
@@ -276,10 +289,6 @@ export default function CameraTile({
         if (ws) {
           const names = namesFromStatus(ws);
           const who = names.join(", ");
-          const emotion =
-            typeof ws.topEmotion === "string" && ws.topEmotion.trim().length > 0
-              ? ws.topEmotion.trim()
-              : "";
           const zoom = clampWorkerZoom(Number(ws.workerZoom ?? 1));
 
           setWorkerZoom(zoom);
@@ -293,6 +302,11 @@ export default function CameraTile({
                 }))
                 .filter((person) => person.name)
             : names.map((name) => ({ name, emotion: "" }));
+          const emotion =
+            emotionSummaryFromPeople(nextPeople) ||
+            (typeof ws.topEmotion === "string" && ws.topEmotion.trim().length > 0
+              ? ws.topEmotion.trim()
+              : "");
           setPeople(nextPeople);
 
           const nextSnapshotUrl = typeof ws.snapshotUrl === "string" ? ws.snapshotUrl : "";
