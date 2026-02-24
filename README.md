@@ -96,6 +96,13 @@ Verify:
 pm2 logs mood-checker-worker --lines 80
 ```
 
+Apply balanced worker profile (recommended for cam-02 stability + anti-phantom matching):
+
+```bash
+npm run worker:profile:balanced
+pm2 restart mood-checker-worker --update-env
+```
+
 Worker status API used by UI in worker mode:
 
 ```bash
