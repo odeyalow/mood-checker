@@ -750,7 +750,12 @@ async function main() {
       `ssd_fallback=${ssdLoaded ? "on" : "off"}`,
   );
 
-  const states = cameras.map((c) => createState(c.cameraId, c.src));
+  const states = cameras.map((c) => {
+    const state = createState(c.cameraId, c.src);
+    // Apply defaults once on startup; after that keep current zoom unless explicit override exists.
+    state.workerZoom = clampWorkerZoom(workerZoomDefaults[c.cameraId] ?? 1, 1);
+    return state;
+  });
   log(`started cameras=${states.length} frame_api=${frameApiBase}`);
   log(
     `pipeline parallel_cameras=${parallelCameraLimit} db_queue_max=${dbQueueMaxSize} ` +
@@ -966,7 +971,12 @@ async function main() {
     );
 
     const frameUrl = buildFrameUrl(frameApiBase, cam.src);
-    cam.workerZoom = clampWorkerZoom(workerZoomMap?.[cam.cameraId] ?? workerZoomDefaults[cam.cameraId] ?? 1, 1);
+    const zoomOverride = Number(workerZoomMap?.[cam.cameraId]);
+    if (Number.isFinite(zoomOverride)) {
+      cam.workerZoom = clampWorkerZoom(zoomOverride, cam.workerZoom);
+    } else {
+      cam.workerZoom = clampWorkerZoom(cam.workerZoom, 1);
+    }
     if (!loggedCameraProfiles.has(cam.cameraId)) {
       loggedCameraProfiles.add(cam.cameraId);
       log(
