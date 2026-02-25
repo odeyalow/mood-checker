@@ -26,7 +26,7 @@ function stripQuotes(value) {
   return v;
 }
 
-function loadEnvFile(filePath) {
+function loadEnvFile(filePath, { override = false } = {}) {
   if (!fs.existsSync(filePath)) return;
   const raw = fs.readFileSync(filePath, "utf-8");
   for (const line of raw.split(/\r?\n/)) {
@@ -36,7 +36,8 @@ function loadEnvFile(filePath) {
     if (eq <= 0) continue;
     const key = v.slice(0, eq).trim();
     const val = stripQuotes(v.slice(eq + 1));
-    if (key && process.env[key] == null) process.env[key] = val;
+    if (!key) continue;
+    if (override || process.env[key] == null) process.env[key] = val;
   }
 }
 
@@ -630,7 +631,8 @@ function buildFrameUrl(frameApiBase, src, timeoutMs = Number.NaN) {
 }
 
 async function main() {
-  loadEnvFile(path.join(rootDir, ".env.worker"));
+  // Worker-local config must win over stale PM2 env values.
+  loadEnvFile(path.join(rootDir, ".env.worker"), { override: true });
   loadEnvFile(path.join(rootDir, ".env"));
 
   const cameras = parseCameraSources();
