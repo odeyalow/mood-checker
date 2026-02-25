@@ -492,7 +492,7 @@ function isAbortError(err) {
   );
 }
 
-function buildAbortFallbackFrameUrl(frameUrl, width, height, quality) {
+function buildAbortFallbackFrameUrl(frameUrl, width, height, quality, timeoutMs = Number.NaN) {
   const url = new URL(frameUrl);
   if (Number.isFinite(width) && width > 0) {
     url.searchParams.set("width", String(Math.floor(width)));
@@ -502,6 +502,9 @@ function buildAbortFallbackFrameUrl(frameUrl, width, height, quality) {
   }
   if (Number.isFinite(quality) && quality > 0) {
     url.searchParams.set("quality", String(Math.floor(quality)));
+  }
+  if (Number.isFinite(timeoutMs) && timeoutMs > 0) {
+    url.searchParams.set("timeoutMs", String(Math.floor(timeoutMs)));
   }
   return url.toString();
 }
@@ -617,9 +620,12 @@ function createState(cameraId, src) {
   };
 }
 
-function buildFrameUrl(frameApiBase, src) {
+function buildFrameUrl(frameApiBase, src, timeoutMs = Number.NaN) {
   const url = new URL(frameApiBase);
   url.searchParams.set("src", src);
+  if (Number.isFinite(timeoutMs) && timeoutMs > 0) {
+    url.searchParams.set("timeoutMs", String(Math.floor(timeoutMs)));
+  }
   return url.toString();
 }
 
@@ -648,6 +654,8 @@ async function main() {
   const frameAbortRetryWidth = Math.max(320, envInt("WORKER_FRAME_ABORT_RETRY_WIDTH", 1280));
   const frameAbortRetryHeight = Math.max(180, envInt("WORKER_FRAME_ABORT_RETRY_HEIGHT", 720));
   const frameAbortRetryQuality = Math.min(100, Math.max(1, envInt("WORKER_FRAME_ABORT_RETRY_QUALITY", 85)));
+  const frameApiTimeoutMs = Math.max(300, frameTimeoutMs - 300);
+  const frameAbortRetryApiTimeoutMs = Math.max(500, frameAbortRetryTimeoutMs - 300);
   const loopDelayMs = Math.max(15, envInt("WORKER_LOOP_DELAY_MS", 50));
   const heartbeatSeconds = Math.max(1, envFloat("WORKER_HEARTBEAT_SECONDS", 5));
   const statusLogSeconds = Math.max(0.4, envFloat("WORKER_STATUS_LOG_SECONDS", 1.5));
@@ -891,6 +899,7 @@ async function main() {
   let workerZoomMap = {};
   const dbQueue = [];
   let lastDbQueueWarnAt = 0;
+  let lastLoopErrLogAt = 0;
   const emotionKeys = ["happy", "sad", "angry", "fearful", "disgusted", "surprised"];
   const loggedCameraProfiles = new Set();
 
@@ -1131,7 +1140,7 @@ async function main() {
       }
     };
 
-    const frameUrl = buildFrameUrl(frameApiBase, cam.src);
+    const frameUrl = buildFrameUrl(frameApiBase, cam.src, frameApiTimeoutMs);
     const zoomOverride = Number(workerZoomMap?.[cam.cameraId]);
     if (Number.isFinite(zoomOverride)) {
       cam.workerZoom = clampWorkerZoom(zoomOverride, cam.workerZoom);
@@ -1164,6 +1173,7 @@ async function main() {
           frameAbortRetryWidth,
           frameAbortRetryHeight,
           frameAbortRetryQuality,
+          frameAbortRetryApiTimeoutMs,
         );
         jpg = await fetchFrame(retryUrl, frameAbortRetryTimeoutMs);
       }
@@ -1651,136 +1661,144 @@ async function main() {
   while (!stopping) {
     const now = Date.now();
     let confirmedTotal = 0;
+    try {
+      if (now - lastZoomReloadAt >= workerZoomReloadMs) {
+        workerZoomMap = await readWorkerZoomState(workerZoomStateFile);
+        lastZoomReloadAt = now;
+      }
 
-    if (now - lastZoomReloadAt >= workerZoomReloadMs) {
-      workerZoomMap = await readWorkerZoomState(workerZoomStateFile);
-      lastZoomReloadAt = now;
-    }
-
-    const workers = [];
-    let cursor = 0;
-    const activeWorkers = Math.min(parallelCameraLimit, states.length);
-    for (let idx = 0; idx < activeWorkers; idx += 1) {
-      workers.push(
-        (async () => {
-          while (cursor < states.length) {
-            const current = states[cursor];
-            cursor += 1;
-            confirmedTotal += await processCamera(current, now);
-          }
-        })(),
-      );
-    }
-    await Promise.all(workers);
-
-    const dbResult = await drainDbQueue({
-      queue: dbQueue,
-      now,
-      maxBatchSize: dbQueueBatchSize,
-      dbEndpoint,
-      requestTimeoutMs: dbRequestTimeoutMs,
-      maxAttempts: dbQueueMaxAttempts,
-      retryBaseMs: dbQueueRetryBaseMs,
-      logPrefix: "db-queue",
-    });
-    if ((dbResult.failed || dbResult.delayed || dbQueue.length >= dbQueueWarnAt) && now - lastDbQueueWarnAt >= 3000) {
-      log(
-        `[db-queue] size=${dbQueue.length} sent=${dbResult.sent} delayed=${dbResult.delayed} dropped=${dbResult.failed}`,
-      );
-      lastDbQueueWarnAt = now;
-    }
-
-    if (now - lastHeartbeatAt >= heartbeatSeconds * 1000) {
-      log(
-        `heartbeat: cameras_ready=${states.length}/${states.length} faces_detected=${confirmedTotal}`,
-      );
-      lastHeartbeatAt = now;
-    }
-
-    if (now - lastStatusAt >= statusLogSeconds * 1000) {
-      const payload = {
-        ts: new Date().toISOString(),
-        cameras: {},
-      };
-      for (const cam of states) {
-        const camConfirmFrames = Math.max(
-          1,
-          parseFiniteInt(
-            getCameraSetting(cameraSettings, cam.cameraId, "confirmFrames", confirmFrames),
-            confirmFrames,
-          ),
+      const workers = [];
+      let cursor = 0;
+      const activeWorkers = Math.min(parallelCameraLimit, states.length);
+      for (let idx = 0; idx < activeWorkers; idx += 1) {
+        workers.push(
+          (async () => {
+            while (cursor < states.length) {
+              const current = states[cursor];
+              cursor += 1;
+              confirmedTotal += await processCamera(current, now);
+            }
+          })(),
         );
-        const camPersonMinScore = parseFiniteFloat(
-          getCameraSetting(cameraSettings, cam.cameraId, "personMinScore", personMinScore),
-          personMinScore,
-        );
-        const camPersonMinSidePx = Math.max(
-          10,
-          parseFiniteInt(
-            getCameraSetting(cameraSettings, cam.cameraId, "personMinSidePx", personMinSidePx),
-            personMinSidePx,
-          ),
-        );
-        const camPersonMinStreak = Math.max(
-          1,
-          parseFiniteInt(
-            getCameraSetting(cameraSettings, cam.cameraId, "personMinStreak", personMinStreak),
-            personMinStreak,
-          ),
-        );
-        const hasPerson =
-          cam.confirmed > 0 ||
-          (cam.candidate > 0 &&
-            cam.score >= camPersonMinScore &&
-            cam.maxFaceSide >= camPersonMinSidePx &&
-            cam.streak >= camPersonMinStreak);
-        const hasFace = cam.confirmed > 0;
-        const who = cam.matchedNames.length ? cam.matchedNames.join(", ") : "unknown";
-        const emotion = cam.topEmotion || "none";
-        const frameState = cam.frameOk
-          ? `ok(${cam.lastFrameWidth}x${cam.lastFrameHeight}->${cam.workerFrameWidth}x${cam.workerFrameHeight},z=${cam.workerZoom.toFixed(1)}x,${cam.lastFrameBytes}b)`
-          : `err(${cam.lastFrameError || "unknown"})`;
+      }
+      await Promise.all(workers);
+
+      const dbResult = await drainDbQueue({
+        queue: dbQueue,
+        now,
+        maxBatchSize: dbQueueBatchSize,
+        dbEndpoint,
+        requestTimeoutMs: dbRequestTimeoutMs,
+        maxAttempts: dbQueueMaxAttempts,
+        retryBaseMs: dbQueueRetryBaseMs,
+        logPrefix: "db-queue",
+      });
+      if ((dbResult.failed || dbResult.delayed || dbQueue.length >= dbQueueWarnAt) && now - lastDbQueueWarnAt >= 3000) {
         log(
-          `[${cam.cameraId}] status person=${hasPerson ? 1 : 0} face=${hasFace ? 1 : 0} ` +
-            `who=${who} emotion=${emotion} frame=${frameState}`,
+          `[db-queue] size=${dbQueue.length} sent=${dbResult.sent} delayed=${dbResult.delayed} dropped=${dbResult.failed}`,
         );
-        payload.cameras[cam.cameraId] = {
-          candidate: cam.candidate,
-          confirmed: cam.confirmed,
-          score: Number(cam.score.toFixed(3)),
-          maxFaceSide: Number(cam.maxFaceSide.toFixed(1)),
-          motion: Number(cam.motion.toFixed(2)),
-          streak: cam.streak,
-          requiredFrames: camConfirmFrames,
-          matchedNames: cam.matchedNames,
-          matchDistance: Number(cam.matchDistance.toFixed(3)),
-          personInFrame: hasPerson,
-          faceInFrame: hasFace,
-          workerZoom: Number(cam.workerZoom.toFixed(2)),
-          people: cam.people,
-          emotionSummary: cam.emotionSummary,
-          topEmotion: cam.topEmotion,
-          snapshotUrl: cam.snapshotUrl,
-          lastRecognitionAt: cam.lastRecognitionAt ? new Date(cam.lastRecognitionAt).toISOString() : "",
-          frameOk: cam.frameOk,
-          lastFrameAt: cam.lastFrameAt ? new Date(cam.lastFrameAt).toISOString() : "",
-          lastFrameBytes: cam.lastFrameBytes,
-          frameWidth: cam.lastFrameWidth,
-          frameHeight: cam.lastFrameHeight,
-          workerFrameWidth: cam.workerFrameWidth,
-          workerFrameHeight: cam.workerFrameHeight,
-          frameError: cam.lastFrameError,
-        };
+        lastDbQueueWarnAt = now;
       }
-      try {
-        await writeStatusFile(statusFile, payload);
-      } catch (err) {
-        log(`status file write failed: ${String(err)}`);
-      }
-      lastStatusAt = now;
-    }
 
-    await sleep(loopDelayMs);
+      if (now - lastHeartbeatAt >= heartbeatSeconds * 1000) {
+        log(
+          `heartbeat: cameras_ready=${states.length}/${states.length} faces_detected=${confirmedTotal}`,
+        );
+        lastHeartbeatAt = now;
+      }
+
+      if (now - lastStatusAt >= statusLogSeconds * 1000) {
+        const payload = {
+          ts: new Date().toISOString(),
+          cameras: {},
+        };
+        for (const cam of states) {
+          const camConfirmFrames = Math.max(
+            1,
+            parseFiniteInt(
+              getCameraSetting(cameraSettings, cam.cameraId, "confirmFrames", confirmFrames),
+              confirmFrames,
+            ),
+          );
+          const camPersonMinScore = parseFiniteFloat(
+            getCameraSetting(cameraSettings, cam.cameraId, "personMinScore", personMinScore),
+            personMinScore,
+          );
+          const camPersonMinSidePx = Math.max(
+            10,
+            parseFiniteInt(
+              getCameraSetting(cameraSettings, cam.cameraId, "personMinSidePx", personMinSidePx),
+              personMinSidePx,
+            ),
+          );
+          const camPersonMinStreak = Math.max(
+            1,
+            parseFiniteInt(
+              getCameraSetting(cameraSettings, cam.cameraId, "personMinStreak", personMinStreak),
+              personMinStreak,
+            ),
+          );
+          const hasPerson =
+            cam.confirmed > 0 ||
+            (cam.candidate > 0 &&
+              cam.score >= camPersonMinScore &&
+              cam.maxFaceSide >= camPersonMinSidePx &&
+              cam.streak >= camPersonMinStreak);
+          const hasFace = cam.confirmed > 0;
+          const who = cam.matchedNames.length ? cam.matchedNames.join(", ") : "unknown";
+          const emotion = cam.topEmotion || "none";
+          const safeZoom = Number.isFinite(cam.workerZoom) ? cam.workerZoom : 1;
+          const frameState = cam.frameOk
+            ? `ok(${cam.lastFrameWidth}x${cam.lastFrameHeight}->${cam.workerFrameWidth}x${cam.workerFrameHeight},z=${safeZoom.toFixed(1)}x,${cam.lastFrameBytes}b)`
+            : `err(${cam.lastFrameError || "unknown"})`;
+          log(
+            `[${cam.cameraId}] status person=${hasPerson ? 1 : 0} face=${hasFace ? 1 : 0} ` +
+              `who=${who} emotion=${emotion} frame=${frameState}`,
+          );
+          payload.cameras[cam.cameraId] = {
+            candidate: cam.candidate,
+            confirmed: cam.confirmed,
+            score: Number.isFinite(cam.score) ? Number(cam.score.toFixed(3)) : 0,
+            maxFaceSide: Number.isFinite(cam.maxFaceSide) ? Number(cam.maxFaceSide.toFixed(1)) : 0,
+            motion: Number.isFinite(cam.motion) ? Number(cam.motion.toFixed(2)) : 0,
+            streak: cam.streak,
+            requiredFrames: camConfirmFrames,
+            matchedNames: cam.matchedNames,
+            matchDistance: Number.isFinite(cam.matchDistance) ? Number(cam.matchDistance.toFixed(3)) : 0,
+            personInFrame: hasPerson,
+            faceInFrame: hasFace,
+            workerZoom: Number(safeZoom.toFixed(2)),
+            people: cam.people,
+            emotionSummary: cam.emotionSummary,
+            topEmotion: cam.topEmotion,
+            snapshotUrl: cam.snapshotUrl,
+            lastRecognitionAt: cam.lastRecognitionAt ? new Date(cam.lastRecognitionAt).toISOString() : "",
+            frameOk: cam.frameOk,
+            lastFrameAt: cam.lastFrameAt ? new Date(cam.lastFrameAt).toISOString() : "",
+            lastFrameBytes: cam.lastFrameBytes,
+            frameWidth: cam.lastFrameWidth,
+            frameHeight: cam.lastFrameHeight,
+            workerFrameWidth: cam.workerFrameWidth,
+            workerFrameHeight: cam.workerFrameHeight,
+            frameError: cam.lastFrameError,
+          };
+        }
+        try {
+          await writeStatusFile(statusFile, payload);
+        } catch (err) {
+          log(`status file write failed: ${String(err)}`);
+        }
+        lastStatusAt = now;
+      }
+
+      await sleep(loopDelayMs);
+    } catch (err) {
+      if (now - lastLoopErrLogAt >= 1000) {
+        log(`[loop] unexpected error: ${String(err)}`);
+        lastLoopErrLogAt = now;
+      }
+      await sleep(Math.max(loopDelayMs, 200));
+    }
   }
 
   if (dbQueue.length) {
