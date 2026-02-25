@@ -29,7 +29,9 @@
     "db:push": "prisma db push",
     "db:reset": "prisma migrate reset --force --skip-generate",
     "create-user": "node scripts/create-user.mjs",
-    "worker:profile:balanced": "node scripts/apply-worker-profile-balanced.mjs"
+    "worker:profile:balanced": "node scripts/apply-worker-profile-balanced.mjs",
+    "worker:profile:pre-request": "node scripts/apply-worker-profile-pre-request.mjs",
+    "worker:diagnose": "bash scripts/diagnose-worker.sh"
   },
   "dependencies": {
     "@vladmandic/face-api": "^1.7.15",

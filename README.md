@@ -103,6 +103,19 @@ npm run worker:profile:balanced
 pm2 restart mood-checker-worker --update-env
 ```
 
+Restore pre-request profile (the values used before latest strict tuning):
+
+```bash
+npm run worker:profile:pre-request
+pm2 restart mood-checker-worker --update-env
+```
+
+Run full worker diagnostics:
+
+```bash
+npm run worker:diagnose
+```
+
 Worker status API used by UI in worker mode:
 
 ```bash
