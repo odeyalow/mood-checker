@@ -894,7 +894,7 @@ async function main() {
         shortId,
         distance: Number(payload?.distance),
       };
-    } catch (err) {
+    } catch {
       return null;
     }
   };
@@ -1662,6 +1662,7 @@ async function main() {
                     frameWidth: cam.workerFrameWidth,
                     frameHeight: cam.workerFrameHeight,
                     descriptor: descriptorByName.get(person.name) || undefined,
+                    snapshotUrl: cam.snapshotUrl || undefined,
                     snapshotBase64,
                   },
                   now,

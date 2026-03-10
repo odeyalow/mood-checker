@@ -26,15 +26,21 @@ export async function GET(request: Request) {
     });
 
     const ids = identities.map((item) => item.id);
+    const shortIds = identities.map((item) => item.shortId);
+    const idByShortId = new Map(identities.map((item) => [item.shortId, item.id]));
     const latestWithSnapshot = ids.length
       ? await prisma.recognition.findMany({
           where: {
-            faceIdentityId: { in: ids },
+            OR: [
+              { faceIdentityId: { in: ids } },
+              { name: { in: shortIds } },
+            ],
             snapshotUrl: { not: null },
           },
           orderBy: { detectedAt: "desc" },
           select: {
             faceIdentityId: true,
+            name: true,
             snapshotUrl: true,
             detectedAt: true,
           },
@@ -47,7 +53,8 @@ export async function GET(request: Request) {
       { snapshotUrl: string | null; detectedAt: Date }
     >();
     for (const item of latestWithSnapshot) {
-      const faceIdentityId = String(item.faceIdentityId ?? "");
+      const faceIdentityId =
+        String(item.faceIdentityId ?? "") || String(idByShortId.get(String(item.name ?? "")) ?? "");
       if (!faceIdentityId || latestByFaceId.has(faceIdentityId)) continue;
       latestByFaceId.set(faceIdentityId, {
         snapshotUrl: item.snapshotUrl,

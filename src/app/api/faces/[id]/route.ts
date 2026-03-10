@@ -30,7 +30,10 @@ export async function GET(
 
     const images = await prisma.recognition.findMany({
       where: {
-        faceIdentityId: face.id,
+        OR: [
+          { faceIdentityId: face.id },
+          { name: face.shortId },
+        ],
         snapshotUrl: { not: null },
       },
       orderBy: { detectedAt: "desc" },
@@ -45,7 +48,12 @@ export async function GET(
     });
 
     const recognitionCount = await prisma.recognition.count({
-      where: { faceIdentityId: face.id },
+      where: {
+        OR: [
+          { faceIdentityId: face.id },
+          { name: face.shortId },
+        ],
+      },
     });
 
     return NextResponse.json({

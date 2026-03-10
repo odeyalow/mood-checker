@@ -42,6 +42,16 @@ function parseSnapshotBuffer(raw: unknown): Buffer | null {
   }
 }
 
+function parseSnapshotPublicUrl(raw: unknown): string | null {
+  if (typeof raw !== "string") return null;
+  const trimmed = raw.trim();
+  if (!trimmed) return null;
+  const urlPath = trimmed.split("?")[0] || "";
+  if (!urlPath.startsWith("/")) return null;
+  if (!urlPath.startsWith("/_worker-snaps/") && !urlPath.startsWith("/_faces/")) return null;
+  return urlPath;
+}
+
 async function saveSnapshot(faceShortId: string, buf: Buffer) {
   const safeId = faceShortId.replace(/[^A-Za-z0-9_-]/g, "").slice(0, 16) || "face";
   const dirAbs = path.join(process.cwd(), "public", "_faces", safeId);
@@ -50,6 +60,16 @@ async function saveSnapshot(faceShortId: string, buf: Buffer) {
   const fileAbs = path.join(dirAbs, fileName);
   await fs.writeFile(fileAbs, buf);
   return `/_faces/${safeId}/${fileName}`;
+}
+
+async function saveSnapshotFromPublicUrl(faceShortId: string, publicUrl: string) {
+  const relativePath = publicUrl.replace(/^\/+/, "");
+  const publicRoot = path.resolve(process.cwd(), "public");
+  const sourceAbs = path.resolve(publicRoot, relativePath);
+  if (!sourceAbs.startsWith(publicRoot)) return null;
+  const source = await fs.readFile(sourceAbs).catch(() => null);
+  if (!source?.length) return null;
+  return saveSnapshot(faceShortId, source);
 }
 
 export async function GET(request: Request) {
@@ -79,6 +99,7 @@ export async function POST(request: Request) {
     const frameWidthRaw = Number(body?.frameWidth);
     const frameHeightRaw = Number(body?.frameHeight);
     const snapshotBuffer = parseSnapshotBuffer(body?.snapshotBase64);
+    const snapshotPublicUrl = parseSnapshotPublicUrl(body?.snapshotUrl);
     const descriptor = normalizeDescriptor(body?.descriptor);
     const detectedAtRaw = body?.detectedAt ? new Date(body.detectedAt) : new Date();
 
@@ -96,6 +117,13 @@ export async function POST(request: Request) {
         snapshotUrl = await saveSnapshot(name, snapshotBuffer);
       } catch (error) {
         console.error("[api/recognitions] snapshot save failed", error);
+      }
+    }
+    if (!snapshotUrl && snapshotPublicUrl) {
+      try {
+        snapshotUrl = await saveSnapshotFromPublicUrl(name, snapshotPublicUrl);
+      } catch (error) {
+        console.error("[api/recognitions] snapshot copy failed", error);
       }
     }
 
