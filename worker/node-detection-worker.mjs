@@ -832,13 +832,13 @@ async function main() {
   const matchMinFaceSidePx = Math.max(0, envInt("WORKER_MATCH_MIN_FACE_SIDE_PX", 26));
   const identityMinScore = Math.max(
     0,
-    Math.min(1, envFloat("WORKER_IDENTITY_MIN_SCORE", 0.14)),
+    Math.min(1, envFloat("WORKER_IDENTITY_MIN_SCORE", 0.12)),
   );
   const newIdMinSnapshots = Math.max(1, envInt("WORKER_NEW_ID_MIN_SNAPSHOTS", 2));
-  const newIdMinDurationMs = Math.max(0, envInt("WORKER_NEW_ID_MIN_DURATION_MS", 700));
+  const newIdMinDurationMs = Math.max(0, envInt("WORKER_NEW_ID_MIN_DURATION_MS", 450));
   const newIdDescriptorDistance = Math.max(
     0.05,
-    envFloat("WORKER_NEW_ID_DESCRIPTOR_DISTANCE", 0.34),
+    envFloat("WORKER_NEW_ID_DESCRIPTOR_DISTANCE", 0.36),
   );
   const newIdCooldownMs = Math.max(0, envInt("WORKER_NEW_ID_COOLDOWN_MS", 6000));
   const newIdHoldoffAfterKnownMs = Math.max(
@@ -853,22 +853,22 @@ async function main() {
   const requireFrontalFace = envBool("WORKER_REQUIRE_FRONTAL_FACE", true);
   const frontalMinEyeDistanceRatio = Math.max(
     0.05,
-    envFloat("WORKER_FRONTAL_MIN_EYE_DISTANCE_RATIO", 0.16),
+    envFloat("WORKER_FRONTAL_MIN_EYE_DISTANCE_RATIO", 0.12),
   );
   const frontalMaxEyeSlope = Math.max(0.02, envFloat("WORKER_FRONTAL_MAX_EYE_SLOPE", 0.2));
   const frontalNoseCenterTolerance = Math.max(
     0.05,
-    envFloat("WORKER_FRONTAL_NOSE_CENTER_TOLERANCE", 0.3),
+    envFloat("WORKER_FRONTAL_NOSE_CENTER_TOLERANCE", 0.42),
   );
-  const matchIntervalMs = Math.max(120, envInt("WORKER_MATCH_INTERVAL_MS", 180));
+  const matchIntervalMs = Math.max(120, envInt("WORKER_MATCH_INTERVAL_MS", 140));
   const matchLogCooldownMs = Math.max(300, envInt("WORKER_MATCH_LOG_COOLDOWN_MS", 1000));
   const enableEmotions = envBool("WORKER_ENABLE_EMOTIONS", true);
   const emotionIntervalMs = Math.max(150, envInt("WORKER_EMOTION_INTERVAL_MS", 300));
-  const snapshotCooldownMs = Math.max(150, envInt("WORKER_SNAPSHOT_COOLDOWN_MS", 450));
+  const snapshotCooldownMs = Math.max(150, envInt("WORKER_SNAPSHOT_COOLDOWN_MS", 300));
   const recognitionHoldMs = Math.max(0, envInt("WORKER_RECOGNITION_HOLD_MS", 1200));
   const sessionSnapshotIntervalMs = Math.max(
     500,
-    envInt("WORKER_SESSION_SNAPSHOT_INTERVAL_MS", 1500),
+    envInt("WORKER_SESSION_SNAPSHOT_INTERVAL_MS", 900),
   );
   const sessionAbsenceMs = Math.max(
     700,
@@ -876,7 +876,7 @@ async function main() {
   );
   const sessionResolveWaitMs = Math.max(
     300,
-    envInt("WORKER_SESSION_RESOLVE_WAIT_MS", 2800),
+    envInt("WORKER_SESSION_RESOLVE_WAIT_MS", 1800),
   );
   const sessionMinSamples = Math.max(1, envInt("WORKER_SESSION_MIN_SAMPLES", 2));
   const sessionMinEmotionSamples = Math.max(
