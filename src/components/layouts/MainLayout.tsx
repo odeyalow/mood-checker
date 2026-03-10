@@ -7,6 +7,7 @@ import {
   VideoCameraOutlined,
   TrophyOutlined,
   CalendarOutlined,
+  UserOutlined,
   LogoutOutlined,
 } from "@ant-design/icons";
 import { usePathname, useRouter } from "next/navigation";
@@ -26,36 +27,39 @@ type StudentOption = {
 const L10N = {
   ru: {
     menu: {
-      dashboard: "Дэшборд",
-      cameras: "Камеры",
-      top: "Топ негативных",
-      byDate: "По дате",
+      dashboard: "\u0414\u044d\u0448\u0431\u043e\u0440\u0434",
+      cameras: "\u041a\u0430\u043c\u0435\u0440\u044b",
+      faces: "\u041b\u0438\u0446\u0430",
+      top: "\u0422\u043e\u043f \u043d\u0435\u0433\u0430\u0442\u0438\u0432\u043d\u044b\u0445",
+      byDate: "\u041f\u043e \u0434\u0430\u0442\u0435",
     },
     brandSub: "Campus Insight",
-    logout: "Выйти",
-    updatedToday: "Обновлено: сегодня",
-    searchPlaceholder: "Поиск студента",
-    searching: "Поиск...",
-    nothingFound: "Ничего не найдено",
+    logout: "\u0412\u044b\u0439\u0442\u0438",
+    updatedToday: "\u041e\u0431\u043d\u043e\u0432\u043b\u0435\u043d\u043e: \u0441\u0435\u0433\u043e\u0434\u043d\u044f",
+    searchPlaceholder: "\u041f\u043e\u0438\u0441\u043a \u0441\u0442\u0443\u0434\u0435\u043d\u0442\u0430",
+    searching: "\u041f\u043e\u0438\u0441\u043a...",
+    nothingFound: "\u041d\u0438\u0447\u0435\u0433\u043e \u043d\u0435 \u043d\u0430\u0439\u0434\u0435\u043d\u043e",
   },
   kz: {
     menu: {
-      dashboard: "Басқару панелі",
-      cameras: "Камералар",
-      top: "Негатив топ",
-      byDate: "Күні бойынша",
+      dashboard: "\u0411\u0430\u0441\u049b\u0430\u0440\u0443 \u043f\u0430\u043d\u0435\u043b\u0456",
+      cameras: "\u041a\u0430\u043c\u0435\u0440\u0430\u043b\u0430\u0440",
+      faces: "\u0422\u04b1\u043b\u0493\u0430\u043b\u0430\u0440",
+      top: "\u041d\u0435\u0433\u0430\u0442\u0438\u0432 \u0442\u043e\u043f",
+      byDate: "\u041a\u04af\u043d\u0456 \u0431\u043e\u0439\u044b\u043d\u0448\u0430",
     },
     brandSub: "Campus Insight",
-    logout: "Шығу",
-    updatedToday: "Жаңартылды: бүгін",
-    searchPlaceholder: "Студентті іздеу",
-    searching: "Ізделуде...",
-    nothingFound: "Ештеңе табылмады",
+    logout: "\u0428\u044b\u0493\u0443",
+    updatedToday: "\u0416\u0430\u04a3\u0430\u0440\u0442\u044b\u043b\u0434\u044b: \u0431\u04af\u0433\u0456\u043d",
+    searchPlaceholder: "\u0421\u0442\u0443\u0434\u0435\u043d\u0442\u0442\u0456 \u0456\u0437\u0434\u0435\u0443",
+    searching: "\u0406\u0437\u0434\u0435\u043b\u0443\u0434\u0435...",
+    nothingFound: "\u0415\u0448\u0442\u0435\u04a3\u0435 \u0442\u0430\u0431\u044b\u043b\u043c\u0430\u0434\u044b",
   },
   en: {
     menu: {
       dashboard: "Dashboard",
       cameras: "Cameras",
+      faces: "Faces",
       top: "Top Negative",
       byDate: "By Date",
     },
@@ -89,9 +93,11 @@ export default function MainLayout({
     ? "top"
     : pathname?.includes("/by-date")
       ? "by-date"
-      : pathname?.includes("/cameras")
-        ? "cameras"
-        : "dashboard";
+      : pathname?.includes("/faces")
+        ? "faces"
+        : pathname?.includes("/cameras")
+          ? "cameras"
+          : "dashboard";
 
   const localizedMenuItems = [
     {
@@ -103,6 +109,11 @@ export default function MainLayout({
       key: "cameras",
       icon: <VideoCameraOutlined />,
       label: <Link href={`/${safeLocale}/cameras`}>{t.menu.cameras}</Link>,
+    },
+    {
+      key: "faces",
+      icon: <UserOutlined />,
+      label: <Link href={`/${safeLocale}/faces`}>{t.menu.faces}</Link>,
     },
     {
       key: "top",
@@ -137,7 +148,7 @@ export default function MainLayout({
         data.items.map((item: { id: string; name: string }) => ({
           value: item.id,
           label: item.name,
-        }))
+        })),
       );
     } finally {
       setSearchLoading(false);
@@ -220,3 +231,4 @@ export default function MainLayout({
     </Layout>
   );
 }
+

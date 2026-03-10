@@ -69,8 +69,15 @@ Notes:
 ## Node detection worker (browser-like)
 
 The worker uses `@vladmandic/face-api` in Node and mirrors browser detection behavior.
-It performs face detection, identity matching against `public/known`, emotion extraction,
+It performs face detection, identity matching against the face registry (`FaceIdentity` in DB),
+auto-creates short face IDs for new people,
+emotion extraction,
 and async writes to `/api/recognitions` with retry queue.
+
+Optional identity env (app process):
+- `FACE_IDENTITY_ID_LENGTH=6` (`4..8`)
+- `FACE_IDENTITY_MATCH_THRESHOLD=0.56`
+- `FACE_IDENTITY_DESCRIPTOR_ALPHA=0.2`
 
 Run manually:
 

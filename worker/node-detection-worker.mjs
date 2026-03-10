@@ -12,6 +12,7 @@ import * as faceapi from "@vladmandic/face-api";
 import { createCanvas, loadImage } from "@napi-rs/canvas";
 
 const rootDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+const FACE_DESCRIPTOR_LENGTH = 128;
 
 function log(message) {
   const ts = new Date().toISOString().replace(/\.\d{3}Z$/, "Z");
@@ -57,15 +58,17 @@ function envBool(name, fallback) {
   return ["1", "true", "yes", "on"].includes(v);
 }
 
-function labelFromFilename(fileName) {
-  return fileName.replace(/\.[^/.]+$/, "").trim();
+function normalizeDescriptor(value) {
+  if (!Array.isArray(value) || value.length !== FACE_DESCRIPTOR_LENGTH) return null;
+  const descriptor = value.map((item) => Number(item));
+  if (descriptor.some((item) => !Number.isFinite(item))) return null;
+  return descriptor;
 }
 
-function normalizeKnownList(value) {
-  if (!Array.isArray(value)) return [];
-  return value
-    .map((item) => String(item ?? "").trim())
-    .filter(Boolean);
+function descriptorToArray(value) {
+  if (!value || typeof value !== "object") return null;
+  const raw = Array.from(value, (item) => Number(item));
+  return normalizeDescriptor(raw);
 }
 
 function isUnknownIdentity(name) {
@@ -417,6 +420,21 @@ function computeMatchCandidates(labeledDescriptors, descriptor) {
   return ranked;
 }
 
+function upsertKnownDescriptor(labeledDescriptors, label, descriptor) {
+  const safeLabel = String(label ?? "").trim();
+  const safeDescriptor = normalizeDescriptor(descriptor);
+  if (!safeLabel || !safeDescriptor) return false;
+
+  const index = labeledDescriptors.findIndex((item) => String(item?.label ?? "") === safeLabel);
+  if (index >= 0) {
+    labeledDescriptors[index] = { label: safeLabel, descriptors: [safeDescriptor] };
+    return false;
+  }
+
+  labeledDescriptors.push({ label: safeLabel, descriptors: [safeDescriptor] });
+  return true;
+}
+
 function rgbaToRgbTensorData(rgba) {
   const rgb = new Uint8Array(Math.floor((rgba.length / 4) * 3));
   let j = 0;
@@ -479,6 +497,46 @@ async function postJsonWithTimeout(url, payload, timeoutMs) {
       const body = await res.text().catch(() => "");
       throw new Error(`db_http_${res.status}${body ? ` body=${body.slice(0, 180)}` : ""}`);
     }
+  } finally {
+    clearTimeout(t);
+  }
+}
+
+async function getJsonWithTimeout(url, timeoutMs) {
+  const controller = new AbortController();
+  const t = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const res = await fetch(url, {
+      method: "GET",
+      cache: "no-store",
+      signal: controller.signal,
+      headers: { Accept: "application/json" },
+    });
+    if (!res.ok) {
+      const body = await res.text().catch(() => "");
+      throw new Error(`http_${res.status}${body ? ` body=${body.slice(0, 180)}` : ""}`);
+    }
+    return await res.json();
+  } finally {
+    clearTimeout(t);
+  }
+}
+
+async function postJsonExpectJsonWithTimeout(url, payload, timeoutMs) {
+  const controller = new AbortController();
+  const t = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const res = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Accept: "application/json" },
+      body: JSON.stringify(payload),
+      signal: controller.signal,
+    });
+    if (!res.ok) {
+      const body = await res.text().catch(() => "");
+      throw new Error(`http_${res.status}${body ? ` body=${body.slice(0, 180)}` : ""}`);
+    }
+    return await res.json();
   } finally {
     clearTimeout(t);
   }
@@ -745,6 +803,7 @@ async function main() {
   const dbQueueMaxAttempts = Math.max(1, envInt("WORKER_DB_QUEUE_MAX_ATTEMPTS", 4));
   const dbQueueRetryBaseMs = Math.max(200, envInt("WORKER_DB_QUEUE_RETRY_BASE_MS", 1000));
   const dbQueueWarnAt = Math.max(5, envInt("WORKER_DB_QUEUE_WARN_AT", 60));
+  const dbIncludeSnapshot = envBool("WORKER_DB_INCLUDE_SNAPSHOT", true);
   const saveSnapshots = envBool("WORKER_SAVE_SNAPSHOTS", true);
   const snapshotSaveCooldownMs = Math.max(200, envInt("WORKER_SNAPSHOT_SAVE_COOLDOWN_MS", 500));
   const snapshotDir = process.env.WORKER_SNAPSHOT_DIR || path.join(rootDir, "public", "_worker-snaps");
@@ -752,8 +811,16 @@ async function main() {
     /\/+$/,
     "",
   );
-  const knownDir = process.env.WORKER_KNOWN_DIR || path.join(rootDir, "public", "known");
-  const knownListFile = process.env.WORKER_KNOWN_LIST_FILE || path.join(knownDir, "images.json");
+  const faceRegistryEndpoint = (
+    process.env.WORKER_FACE_REGISTRY_ENDPOINT || "http://127.0.0.1:3000/api/faces/registry"
+  ).trim();
+  const faceIdentifyEndpoint = (
+    process.env.WORKER_FACE_IDENTIFY_ENDPOINT || "http://127.0.0.1:3000/api/faces/identify"
+  ).trim();
+  const faceRegistryTimeoutMs = Math.max(500, envInt("WORKER_FACE_REGISTRY_TIMEOUT_MS", 2000));
+  const faceIdentifyTimeoutMs = Math.max(500, envInt("WORKER_FACE_IDENTIFY_TIMEOUT_MS", 2000));
+  const faceRegistryRefreshMs = Math.max(3000, envInt("WORKER_FACE_REGISTRY_REFRESH_MS", 20000));
+  const faceAutoCreate = envBool("WORKER_FACE_AUTO_CREATE", true);
 
   if (saveSnapshots) {
     await fsp.mkdir(snapshotDir, { recursive: true }).catch(() => {});
@@ -767,8 +834,8 @@ async function main() {
 
   faceapi.tf.enableProdMode();
   await faceapi.nets.tinyFaceDetector.loadFromDisk(modelDir);
-  let matcher = null;
   let knownLabeledDescriptors = [];
+  let lastFaceRegistryReloadAt = 0;
   let ssdLoaded = false;
   if (useSsdFallback) {
     try {
@@ -784,69 +851,62 @@ async function main() {
   });
   const ssdOptions = new faceapi.SsdMobilenetv1Options({ minConfidence: ssdMinConfidence });
 
+  const reloadFaceRegistry = async (reason) => {
+    const loadedAt = Date.now();
+    if (!faceRegistryEndpoint) return;
+    try {
+      const payload = await getJsonWithTimeout(faceRegistryEndpoint, faceRegistryTimeoutMs);
+      const items = Array.isArray(payload?.items) ? payload.items : [];
+      const nextDescriptors = [];
+      for (const item of items) {
+        const label = String(item?.shortId ?? "").trim();
+        const descriptor = normalizeDescriptor(item?.descriptor);
+        if (!label || !descriptor) continue;
+        nextDescriptors.push({ label, descriptors: [descriptor] });
+      }
+      knownLabeledDescriptors = nextDescriptors;
+      lastFaceRegistryReloadAt = loadedAt;
+      if (reason) {
+        log(`[faces] registry reload reason=${reason} count=${knownLabeledDescriptors.length}`);
+      }
+    } catch (err) {
+      if (reason) {
+        log(`[faces] registry reload failed reason=${reason} err=${String(err)}`);
+      }
+    }
+  };
+
+  const identifyFaceDescriptor = async (descriptor, threshold) => {
+    if (!faceIdentifyEndpoint || !faceAutoCreate) return null;
+    const safeDescriptor = normalizeDescriptor(descriptor);
+    if (!safeDescriptor) return null;
+    try {
+      const payload = await postJsonExpectJsonWithTimeout(
+        faceIdentifyEndpoint,
+        { descriptor: safeDescriptor, threshold },
+        faceIdentifyTimeoutMs,
+      );
+      const shortId = String(payload?.shortId ?? "").trim();
+      const mergedDescriptor = normalizeDescriptor(payload?.descriptor) || safeDescriptor;
+      if (!shortId || !mergedDescriptor) return null;
+      upsertKnownDescriptor(knownLabeledDescriptors, shortId, mergedDescriptor);
+      return {
+        shortId,
+        distance: Number(payload?.distance),
+      };
+    } catch (err) {
+      return null;
+    }
+  };
+
   if (enableMatching) {
     await faceapi.nets.faceLandmark68TinyNet.loadFromDisk(modelDir);
     await faceapi.nets.faceRecognitionNet.loadFromDisk(modelDir);
-
-    let knownFiles = [];
-    try {
-      const raw = await fsp.readFile(knownListFile, "utf-8");
-      knownFiles = normalizeKnownList(JSON.parse(raw));
-    } catch (err) {
-      log(`known list load failed: ${String(err)}`);
-    }
-
-    const labeledDescriptors = [];
-    for (const fileName of knownFiles) {
-      const absPath = path.join(knownDir, fileName);
-      try {
-        const image = await loadImage(absPath);
-        const w = Number(image.width ?? 0);
-        const h = Number(image.height ?? 0);
-        if (!w || !h) continue;
-        const canvas = createCanvas(w, h);
-        const ctx = canvas.getContext("2d");
-        ctx.drawImage(image, 0, 0, w, h);
-        const rgba = ctx.getImageData(0, 0, w, h).data;
-        const rgb = rgbaToRgbTensorData(rgba);
-        const knownTensor = faceapi.tf.tensor3d(rgb, [h, w, 3], "int32");
-
-        let det = null;
-        try {
-          det = await faceapi
-            .detectSingleFace(knownTensor, tinyOptions)
-            .withFaceLandmarks(true)
-            .withFaceDescriptor();
-          if (!det && ssdLoaded) {
-            det = await faceapi
-              .detectSingleFace(knownTensor, ssdOptions)
-              .withFaceLandmarks(true)
-              .withFaceDescriptor();
-          }
-        } finally {
-          knownTensor.dispose();
-        }
-
-        if (det?.descriptor) {
-          labeledDescriptors.push(
-            new faceapi.LabeledFaceDescriptors(labelFromFilename(fileName), [det.descriptor]),
-          );
-        }
-      } catch (err) {
-        log(`known image skipped: ${fileName} (${String(err)})`);
-      }
-    }
-
-    if (labeledDescriptors.length) {
-      knownLabeledDescriptors = labeledDescriptors;
-      matcher = new faceapi.FaceMatcher(labeledDescriptors, matchThreshold);
-      log(
-        `matching=on known=${labeledDescriptors.length} threshold=${matchThreshold} ` +
-          `min_margin=${matchMinMargin} min_face_px=${matchMinFaceSidePx}`,
-      );
-    } else {
-      log("matching=off reason=no_known_descriptors");
-    }
+    await reloadFaceRegistry("startup");
+    log(
+      `matching=on known=${knownLabeledDescriptors.length} threshold=${matchThreshold} ` +
+        `min_margin=${matchMinMargin} min_face_px=${matchMinFaceSidePx} auto_create=${faceAutoCreate ? "on" : "off"}`,
+    );
   } else {
     log("matching=off reason=env_disabled");
   }
@@ -881,6 +941,10 @@ async function main() {
   log(
     `db cooldown_ms=${dbCooldownMs} reentry_gap_ms=${dbReentryGapMs} ` +
       `mood_fallback=${dbAllowMoodFallback ? dbFallbackMood : "off"}`,
+  );
+  log(
+    `faces registry=${faceRegistryEndpoint || "off"} identify=${faceIdentifyEndpoint || "off"} ` +
+      `refresh_ms=${faceRegistryRefreshMs} include_snapshot=${dbIncludeSnapshot ? "on" : "off"}`,
   );
   log(
     `session snapshot_ms=${sessionSnapshotIntervalMs} absence_ms=${sessionAbsenceMs} ` +
@@ -1306,7 +1370,7 @@ async function main() {
         cam.lastCandidateLogAt = now;
       }
 
-      const needMatch = Boolean(matcher) && now - cam.lastMatchAt >= camMatchIntervalMs;
+      const needMatch = enableMatching && now - cam.lastMatchAt >= camMatchIntervalMs;
       const needEmotion = enableEmotions && now - cam.lastEmotionAt >= camEmotionIntervalMs;
       const effectiveSnapshotCooldownMs = Math.max(
         camSnapshotCooldownMs,
@@ -1324,7 +1388,7 @@ async function main() {
           let results = [];
           const runDetect = async (options) => {
             let task = faceapi.detectAllFaces(snapTensor, options);
-            if (matcher) {
+            if (enableMatching) {
               task = task.withFaceLandmarks(true).withFaceDescriptors();
             }
             if (enableEmotions && needEmotion) {
@@ -1353,14 +1417,16 @@ async function main() {
           });
 
           const people = [];
+          const descriptorByName = new Map();
           let bestDistance = 0;
           for (const det of results) {
             let name = "unknown";
             let distance = 0;
-            if (matcher && det?.descriptor) {
+            const descriptor = descriptorToArray(det?.descriptor);
+            if (enableMatching && descriptor) {
               const faceSide = getFaceSide(det);
               if (faceSide >= camMatchMinFaceSidePx) {
-                const ranked = computeMatchCandidates(knownLabeledDescriptors, det.descriptor);
+                const ranked = computeMatchCandidates(knownLabeledDescriptors, descriptor);
                 const bestCandidate = ranked[0];
                 const second = ranked[1];
                 const margin = second
@@ -1375,6 +1441,17 @@ async function main() {
                   name = bestCandidate.label;
                   distance = Number(bestCandidate.distance) || 0;
                   if (!bestDistance || distance < bestDistance) bestDistance = distance;
+                  descriptorByName.set(name, descriptor);
+                } else if (faceAutoCreate) {
+                  const identified = await identifyFaceDescriptor(descriptor, camMatchThreshold);
+                  if (identified?.shortId) {
+                    name = identified.shortId;
+                    if (Number.isFinite(identified.distance) && identified.distance > 0) {
+                      distance = Number(identified.distance) || 0;
+                      if (!bestDistance || distance < bestDistance) bestDistance = distance;
+                    }
+                    descriptorByName.set(name, descriptor);
+                  }
                 }
               }
             }
@@ -1472,7 +1549,8 @@ async function main() {
             }
           }
 
-          if (enableMatching && enableEmotions && people.length) {
+          if (enableMatching && people.length) {
+            const snapshotBase64 = dbIncludeSnapshot ? jpg.toString("base64") : "";
             for (const person of people) {
               if (isUnknownIdentity(person.name)) continue;
               const sessionKey = person.name;
@@ -1583,6 +1661,8 @@ async function main() {
                     workerZoom: Number(cam.workerZoom.toFixed(2)),
                     frameWidth: cam.workerFrameWidth,
                     frameHeight: cam.workerFrameHeight,
+                    descriptor: descriptorByName.get(person.name) || undefined,
+                    snapshotBase64,
                   },
                   now,
                 ),
@@ -1626,7 +1706,7 @@ async function main() {
             cam.lastErrLogAt = now;
           }
         }
-      } else if ((!enableEmotions && !matcher) || cam.candidate === 0) {
+      } else if ((!enableEmotions && !enableMatching) || cam.candidate === 0) {
         cam.matchedNames = [];
         cam.matchDistance = 0;
         cam.people = [];
@@ -1667,6 +1747,9 @@ async function main() {
       if (now - lastZoomReloadAt >= workerZoomReloadMs) {
         workerZoomMap = await readWorkerZoomState(workerZoomStateFile);
         lastZoomReloadAt = now;
+      }
+      if (enableMatching && now - lastFaceRegistryReloadAt >= faceRegistryRefreshMs) {
+        await reloadFaceRegistry("periodic");
       }
 
       const workers = [];

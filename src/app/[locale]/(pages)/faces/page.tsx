@@ -1,0 +1,159 @@
+"use client";
+
+import Link from "next/link";
+import { use, useEffect, useState } from "react";
+import { Card, Col, Empty, Row, Space, Tag, Typography } from "antd";
+import MainLayout from "@/components/layouts/MainLayout";
+
+const { Text, Title } = Typography;
+
+type AppLocale = "ru" | "kz" | "en";
+
+const L10N = {
+  ru: {
+    title: "\u041b\u0438\u0446\u0430",
+    subtitle: "\u0420\u0435\u0435\u0441\u0442\u0440 \u0440\u0430\u0441\u043f\u043e\u0437\u043d\u0430\u043d\u043d\u044b\u0445 \u043b\u0438\u0446",
+    noData: "\u041b\u0438\u0446\u0430 \u043f\u043e\u043a\u0430 \u043d\u0435 \u0437\u0430\u0440\u0435\u0433\u0438\u0441\u0442\u0440\u0438\u0440\u043e\u0432\u0430\u043d\u044b",
+    noImage: "\u041d\u0435\u0442 \u0441\u043d\u0438\u043c\u043a\u0430",
+    detections: "\u0420\u0430\u0441\u043f\u043e\u0437\u043d\u0430\u0432\u0430\u043d\u0438\u0439",
+    loadError: "\u041e\u0448\u0438\u0431\u043a\u0430 \u0437\u0430\u0433\u0440\u0443\u0437\u043a\u0438",
+  },
+  kz: {
+    title: "\u0422\u04b1\u043b\u0493\u0430\u043b\u0430\u0440",
+    subtitle: "\u0422\u0430\u043d\u044b\u043b\u0493\u0430\u043d \u0442\u04b1\u043b\u0493\u0430\u043b\u0430\u0440 \u0442\u0456\u0437\u0456\u043c\u0456",
+    noData: "\u04d8\u0437\u0456\u0440\u0433\u0435 \u0441\u0430\u049b\u0442\u0430\u043b\u0493\u0430\u043d \u0442\u04b1\u043b\u0493\u0430\u043b\u0430\u0440 \u0436\u043e\u049b",
+    noImage: "\u0421\u0443\u0440\u0435\u0442 \u0436\u043e\u049b",
+    detections: "\u0422\u0430\u043d\u0443\u043b\u0430\u0440",
+    loadError: "\u0416\u04af\u043a\u0442\u0435\u0443 \u049b\u0430\u0442\u0435\u0441\u0456",
+  },
+  en: {
+    title: "Faces",
+    subtitle: "Recognized faces registry",
+    noData: "No registered faces yet",
+    noImage: "No image",
+    detections: "Recognitions",
+    loadError: "Load error",
+  },
+} as const;
+
+type FaceCard = {
+  id: string;
+  shortId: string;
+  recognitionCount: number;
+  snapshotUrl: string;
+  lastDetectedAt: string;
+};
+
+function formatDateTime(value: string, locale: AppLocale) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return value;
+  return date.toLocaleString(locale === "kz" ? "kk-KZ" : locale === "en" ? "en-US" : "ru-RU", {
+    day: "2-digit",
+    month: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+}
+
+export default function FacesPage({
+  params,
+}: {
+  params: Promise<{ locale: string }>;
+}) {
+  const { locale } = use(params);
+  const safeLocale: AppLocale = locale === "kz" || locale === "en" ? locale : "ru";
+  const t = L10N[safeLocale];
+
+  const [items, setItems] = useState<FaceCard[]>([]);
+  const [loadError, setLoadError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let active = true;
+    async function loadFaces() {
+      try {
+        const response = await fetch("/api/faces?limit=300", { cache: "no-store" });
+        if (!response.ok) {
+          if (active) setLoadError(`${t.loadError} (${response.status})`);
+          return;
+        }
+        const payload = await response.json();
+        if (active) {
+          setItems(Array.isArray(payload?.items) ? payload.items : []);
+          setLoadError(null);
+        }
+      } catch {
+        if (active) setLoadError(t.loadError);
+      }
+    }
+
+    void loadFaces();
+    const timer = setInterval(loadFaces, 10_000);
+    return () => {
+      active = false;
+      clearInterval(timer);
+    };
+  }, [t.loadError]);
+
+  return (
+    <MainLayout title={t.title} locale={safeLocale}>
+      <Card className="soft-card">
+        <Space direction="vertical" size={16} style={{ width: "100%" }}>
+          <div>
+            <Title level={4} style={{ marginBottom: 4 }}>
+              {t.subtitle}
+            </Title>
+            {loadError ? <Text type="danger">{loadError}</Text> : null}
+          </div>
+
+          {!items.length ? (
+            <Empty description={t.noData} />
+          ) : (
+            <Row gutter={[16, 16]}>
+              {items.map((item) => (
+                <Col xs={24} sm={12} md={8} lg={6} key={item.id}>
+                  <Link href={`/${safeLocale}/faces/${encodeURIComponent(item.shortId)}`}>
+                    <Card
+                      hoverable
+                      size="small"
+                      cover={
+                        item.snapshotUrl ? (
+                          <img
+                            src={item.snapshotUrl}
+                            alt={item.shortId}
+                            style={{ width: "100%", height: 190, objectFit: "cover" }}
+                          />
+                        ) : (
+                          <div
+                            style={{
+                              width: "100%",
+                              height: 190,
+                              display: "flex",
+                              alignItems: "center",
+                              justifyContent: "center",
+                              background: "#f5f5f5",
+                            }}
+                          >
+                            <Text type="secondary">{t.noImage}</Text>
+                          </div>
+                        )
+                      }
+                    >
+                      <Space direction="vertical" size={6} style={{ width: "100%" }}>
+                        <Text strong>{item.shortId}</Text>
+                        <Tag>{`${t.detections}: ${item.recognitionCount}`}</Tag>
+                        {item.lastDetectedAt ? (
+                          <Text type="secondary">{formatDateTime(item.lastDetectedAt, safeLocale)}</Text>
+                        ) : null}
+                      </Space>
+                    </Card>
+                  </Link>
+                </Col>
+              ))}
+            </Row>
+          )}
+        </Space>
+      </Card>
+    </MainLayout>
+  );
+}
+

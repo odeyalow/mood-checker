@@ -1,5 +1,8 @@
 import { NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
+import fs from "node:fs/promises";
+import path from "node:path";
+import { normalizeDescriptor } from "@/lib/faces";
 
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
@@ -22,6 +25,31 @@ function isUnknownIdentity(name: string) {
     normalized === "none" ||
     normalized === "n/a"
   );
+}
+
+function parseSnapshotBuffer(raw: unknown): Buffer | null {
+  if (typeof raw !== "string") return null;
+  const trimmed = raw.trim();
+  if (!trimmed) return null;
+  const payload = trimmed.includes(",") ? trimmed.split(",").pop() || "" : trimmed;
+  if (!payload) return null;
+  try {
+    const buf = Buffer.from(payload, "base64");
+    if (!buf.length) return null;
+    return buf;
+  } catch {
+    return null;
+  }
+}
+
+async function saveSnapshot(faceShortId: string, buf: Buffer) {
+  const safeId = faceShortId.replace(/[^A-Za-z0-9_-]/g, "").slice(0, 16) || "face";
+  const dirAbs = path.join(process.cwd(), "public", "_faces", safeId);
+  await fs.mkdir(dirAbs, { recursive: true });
+  const fileName = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}.jpg`;
+  const fileAbs = path.join(dirAbs, fileName);
+  await fs.writeFile(fileAbs, buf);
+  return `/_faces/${safeId}/${fileName}`;
 }
 
 export async function GET(request: Request) {
@@ -50,6 +78,8 @@ export async function POST(request: Request) {
     const workerZoomRaw = Number(body?.workerZoom);
     const frameWidthRaw = Number(body?.frameWidth);
     const frameHeightRaw = Number(body?.frameHeight);
+    const snapshotBuffer = parseSnapshotBuffer(body?.snapshotBase64);
+    const descriptor = normalizeDescriptor(body?.descriptor);
     const detectedAtRaw = body?.detectedAt ? new Date(body.detectedAt) : new Date();
 
     if (!name || !mood) {
@@ -58,6 +88,42 @@ export async function POST(request: Request) {
 
     if (isUnknownIdentity(name)) {
       return NextResponse.json({ ok: true, skipped: "unknown_identity" });
+    }
+
+    let snapshotUrl: string | null = null;
+    if (snapshotBuffer) {
+      try {
+        snapshotUrl = await saveSnapshot(name, snapshotBuffer);
+      } catch (error) {
+        console.error("[api/recognitions] snapshot save failed", error);
+      }
+    }
+
+    let faceIdentityId: string | null = null;
+    try {
+      let identity = await prisma.faceIdentity.findUnique({
+        where: { shortId: name },
+        select: { id: true },
+      });
+      if (!identity && descriptor) {
+        try {
+          identity = await prisma.faceIdentity.create({
+            data: {
+              shortId: name,
+              descriptor,
+            },
+            select: { id: true },
+          });
+        } catch {
+          identity = await prisma.faceIdentity.findUnique({
+            where: { shortId: name },
+            select: { id: true },
+          });
+        }
+      }
+      faceIdentityId = identity?.id ?? null;
+    } catch {
+      faceIdentityId = null;
     }
 
     const detectedAt = Number.isNaN(detectedAtRaw.getTime()) ? new Date() : detectedAtRaw;
@@ -71,6 +137,8 @@ export async function POST(request: Request) {
       workerZoom: Number.isFinite(workerZoomRaw) ? workerZoomRaw : null,
       frameWidth: Number.isFinite(frameWidthRaw) ? Math.round(frameWidthRaw) : null,
       frameHeight: Number.isFinite(frameHeightRaw) ? Math.round(frameHeightRaw) : null,
+      snapshotUrl,
+      faceIdentityId,
     };
 
     let item;
