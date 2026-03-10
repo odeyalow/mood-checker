@@ -832,10 +832,10 @@ async function main() {
   const matchMinFaceSidePx = Math.max(0, envInt("WORKER_MATCH_MIN_FACE_SIDE_PX", 26));
   const identityMinScore = Math.max(
     0,
-    Math.min(1, envFloat("WORKER_IDENTITY_MIN_SCORE", 0.2)),
+    Math.min(1, envFloat("WORKER_IDENTITY_MIN_SCORE", 0.14)),
   );
-  const newIdMinSnapshots = Math.max(1, envInt("WORKER_NEW_ID_MIN_SNAPSHOTS", 3));
-  const newIdMinDurationMs = Math.max(0, envInt("WORKER_NEW_ID_MIN_DURATION_MS", 900));
+  const newIdMinSnapshots = Math.max(1, envInt("WORKER_NEW_ID_MIN_SNAPSHOTS", 2));
+  const newIdMinDurationMs = Math.max(0, envInt("WORKER_NEW_ID_MIN_DURATION_MS", 700));
   const newIdDescriptorDistance = Math.max(
     0.05,
     envFloat("WORKER_NEW_ID_DESCRIPTOR_DISTANCE", 0.34),
@@ -990,6 +990,7 @@ async function main() {
     }
   };
 
+  let lastIdentifyErrLogAt = 0;
   const identifyFaceDescriptor = async (descriptor, threshold) => {
     if (!faceIdentifyEndpoint || !faceAutoCreate) return null;
     const safeDescriptor = normalizeDescriptor(descriptor);
@@ -1007,8 +1008,14 @@ async function main() {
       return {
         shortId,
         distance: Number(payload?.distance),
+        created: Boolean(payload?.created),
       };
-    } catch {
+    } catch (err) {
+      const now = Date.now();
+      if (now - lastIdentifyErrLogAt >= 3000) {
+        log(`[faces] identify failed err=${String(err)}`);
+        lastIdentifyErrLogAt = now;
+      }
       return null;
     }
   };
@@ -1702,6 +1709,7 @@ async function main() {
           for (const det of results) {
             let name = "unknown";
             let distance = 0;
+            let justRegistered = false;
             const descriptor = descriptorToArray(det?.descriptor);
             if (enableMatching && descriptor) {
               const faceSide = getFaceSide(det);
@@ -1740,6 +1748,7 @@ async function main() {
                     const identified = await identifyFaceDescriptor(descriptor, camMatchThreshold);
                     if (identified?.shortId) {
                       name = identified.shortId;
+                      justRegistered = Boolean(identified.created);
                       if (Number.isFinite(identified.distance) && identified.distance > 0) {
                         distance = Number(identified.distance) || 0;
                         if (!bestDistance || distance < bestDistance) bestDistance = distance;
@@ -1747,6 +1756,9 @@ async function main() {
                       descriptorByName.set(name, descriptor);
                       cam.pendingNewId = null;
                       cam.lastNewIdAt = now;
+                      if (justRegistered) {
+                        log(`[${cam.cameraId}] new_id created shortId=${name}`);
+                      }
                     }
                   }
                 }
@@ -1791,6 +1803,7 @@ async function main() {
                 emotionKey: emotionKey || "",
                 emotionConfidence: Number(emotionConfidence.toFixed(4)),
                 distance: Number(distance.toFixed(3)),
+                justRegistered,
               });
             }
           }
@@ -1905,15 +1918,19 @@ async function main() {
                   resolvedEmotionConfidence = Number(resolved.emotionConfidence);
                 }
               }
+              if (!moodLabel && person.justRegistered && dbAllowMoodFallback) {
+                moodLabel = dbFallbackMood;
+              }
 
               const readyByDirectEmotion = Boolean(directMoodLabel);
               const readyBySession =
                 session.sampleCount >= camSessionMinSamples &&
                 sessionAgeMs >= camSessionResolveWaitMs &&
                 (session.emotionSampleCount >= camSessionMinEmotionSamples || dbAllowMoodFallback);
+              const readyByNewIdentity = Boolean(person.justRegistered);
               const shouldEmitSessionRecord =
                 !session.emittedAt &&
-                (readyByDirectEmotion || readyBySession) &&
+                (readyByDirectEmotion || readyBySession || readyByNewIdentity) &&
                 Boolean(moodLabel);
               if (!shouldEmitSessionRecord) continue;
 
