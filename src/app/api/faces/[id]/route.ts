@@ -10,6 +10,43 @@ function sanitizeShortId(shortId: string) {
   return shortId.replace(/[^A-Za-z0-9_-]/g, "").slice(0, 32);
 }
 
+async function listDiskSnapshots(shortId: string, limit = 5) {
+  const safeId = sanitizeShortId(shortId);
+  if (!safeId) return [];
+  const dir = path.join(process.cwd(), "public", "_faces", safeId);
+  let entries: Array<{ isFile: () => boolean; name: string }> = [];
+  try {
+    entries = await fs.readdir(dir, { withFileTypes: true });
+  } catch {
+    return [];
+  }
+  const files = entries
+    .filter((entry) => entry.isFile() && /\.(jpe?g|png)$/i.test(entry.name))
+    .map((entry) => entry.name);
+  const stats = await Promise.all(
+    files.map(async (file) => {
+      const abs = path.join(dir, file);
+      const st = await fs.stat(abs).catch(() => null);
+      return st
+        ? {
+            file,
+            mtimeMs: st.mtimeMs,
+          }
+        : null;
+    }),
+  );
+  return (stats.filter(Boolean) as { file: string; mtimeMs: number }[])
+    .sort((a, b) => b.mtimeMs - a.mtimeMs)
+    .slice(0, Math.max(1, limit))
+    .map((item, index) => ({
+      id: `disk-${index}-${item.file}`,
+      snapshotUrl: `/_faces/${safeId}/${item.file}`,
+      mood: "",
+      cameraId: "",
+      detectedAt: new Date(item.mtimeMs).toISOString(),
+    }));
+}
+
 async function removeFaceSnapshots(shortId: string) {
   const safeId = sanitizeShortId(shortId);
   if (!safeId) return;
@@ -59,6 +96,17 @@ export async function GET(
         snapshotUrl: true,
       },
     });
+    const diskFallback = await listDiskSnapshots(face.shortId, 5);
+    const imagesOut =
+      images.length > 0
+        ? images.map((item) => ({
+            id: item.id,
+            snapshotUrl: item.snapshotUrl || "",
+            mood: item.mood,
+            cameraId: item.cameraId || "",
+            detectedAt: item.detectedAt.toISOString(),
+          }))
+        : diskFallback;
 
     const recognitionCount = await prisma.recognition.count({
       where: {
@@ -77,13 +125,7 @@ export async function GET(
         updatedAt: face.updatedAt.toISOString(),
         recognitionCount,
       },
-      images: images.map((item) => ({
-        id: item.id,
-        snapshotUrl: item.snapshotUrl || "",
-        mood: item.mood,
-        cameraId: item.cameraId || "",
-        detectedAt: item.detectedAt.toISOString(),
-      })),
+      images: imagesOut,
     });
   } catch (error) {
     console.error("[api/faces/[id]] GET failed", error);

@@ -480,6 +480,28 @@ function computeMatchCandidates(labeledDescriptors, descriptor) {
   return ranked;
 }
 
+function descriptorDistance(a, b) {
+  if (!Array.isArray(a) || !Array.isArray(b) || a.length !== b.length || !a.length) {
+    return Number.POSITIVE_INFINITY;
+  }
+  let sum = 0;
+  for (let i = 0; i < a.length; i += 1) {
+    const d = Number(a[i]) - Number(b[i]);
+    sum += d * d;
+  }
+  return Math.sqrt(sum);
+}
+
+function blendDescriptor(base, incoming, alpha = 0.35) {
+  if (!Array.isArray(base) || !Array.isArray(incoming) || base.length !== incoming.length) {
+    return incoming;
+  }
+  const safeAlpha = Math.max(0.05, Math.min(0.95, Number(alpha) || 0.35));
+  return base.map((value, index) =>
+    Number(((1 - safeAlpha) * Number(value) + safeAlpha * Number(incoming[index])).toFixed(6)),
+  );
+}
+
 function upsertKnownDescriptor(labeledDescriptors, label, descriptor) {
   const safeLabel = String(label ?? "").trim();
   const safeDescriptor = normalizeDescriptor(descriptor);
@@ -736,6 +758,8 @@ function createState(cameraId, src) {
     lastDbSentAt: new Map(),
     lastSeenMatchedAt: new Map(),
     presenceSessions: new Map(),
+    pendingNewId: null,
+    lastNewIdAt: 0,
   };
 }
 
@@ -809,6 +833,22 @@ async function main() {
   const identityMinScore = Math.max(
     0,
     Math.min(1, envFloat("WORKER_IDENTITY_MIN_SCORE", 0.2)),
+  );
+  const newIdMinSnapshots = Math.max(1, envInt("WORKER_NEW_ID_MIN_SNAPSHOTS", 3));
+  const newIdMinDurationMs = Math.max(0, envInt("WORKER_NEW_ID_MIN_DURATION_MS", 900));
+  const newIdDescriptorDistance = Math.max(
+    0.05,
+    envFloat("WORKER_NEW_ID_DESCRIPTOR_DISTANCE", 0.34),
+  );
+  const newIdCooldownMs = Math.max(0, envInt("WORKER_NEW_ID_COOLDOWN_MS", 6000));
+  const newIdHoldoffAfterKnownMs = Math.max(
+    0,
+    envInt("WORKER_NEW_ID_HOLDOFF_AFTER_KNOWN_MS", 2500),
+  );
+  const newIdPendingTtlMs = Math.max(300, envInt("WORKER_NEW_ID_PENDING_TTL_MS", 5000));
+  const newIdDescriptorAlpha = Math.max(
+    0.05,
+    Math.min(0.95, envFloat("WORKER_NEW_ID_DESCRIPTOR_ALPHA", 0.35)),
   );
   const requireFrontalFace = envBool("WORKER_REQUIRE_FRONTAL_FACE", true);
   const frontalMinEyeDistanceRatio = Math.max(
@@ -1155,6 +1195,73 @@ async function main() {
         ),
       ),
     );
+    const camNewIdMinSnapshots = Math.max(
+      1,
+      parseFiniteInt(
+        getCameraSetting(cameraSettings, cam.cameraId, "newIdMinSnapshots", newIdMinSnapshots),
+        newIdMinSnapshots,
+      ),
+    );
+    const camNewIdMinDurationMs = Math.max(
+      0,
+      parseFiniteInt(
+        getCameraSetting(cameraSettings, cam.cameraId, "newIdMinDurationMs", newIdMinDurationMs),
+        newIdMinDurationMs,
+      ),
+    );
+    const camNewIdDescriptorDistance = Math.max(
+      0.05,
+      parseFiniteFloat(
+        getCameraSetting(
+          cameraSettings,
+          cam.cameraId,
+          "newIdDescriptorDistance",
+          newIdDescriptorDistance,
+        ),
+        newIdDescriptorDistance,
+      ),
+    );
+    const camNewIdCooldownMs = Math.max(
+      0,
+      parseFiniteInt(
+        getCameraSetting(cameraSettings, cam.cameraId, "newIdCooldownMs", newIdCooldownMs),
+        newIdCooldownMs,
+      ),
+    );
+    const camNewIdHoldoffAfterKnownMs = Math.max(
+      0,
+      parseFiniteInt(
+        getCameraSetting(
+          cameraSettings,
+          cam.cameraId,
+          "newIdHoldoffAfterKnownMs",
+          newIdHoldoffAfterKnownMs,
+        ),
+        newIdHoldoffAfterKnownMs,
+      ),
+    );
+    const camNewIdPendingTtlMs = Math.max(
+      300,
+      parseFiniteInt(
+        getCameraSetting(cameraSettings, cam.cameraId, "newIdPendingTtlMs", newIdPendingTtlMs),
+        newIdPendingTtlMs,
+      ),
+    );
+    const camNewIdDescriptorAlpha = Math.max(
+      0.05,
+      Math.min(
+        0.95,
+        parseFiniteFloat(
+          getCameraSetting(
+            cameraSettings,
+            cam.cameraId,
+            "newIdDescriptorAlpha",
+            newIdDescriptorAlpha,
+          ),
+          newIdDescriptorAlpha,
+        ),
+      ),
+    );
     const camRequireFrontalFaceRaw = getCameraSetting(
       cameraSettings,
       cam.cameraId,
@@ -1330,6 +1437,52 @@ async function main() {
         cam.lastDbSentAt.delete(`${cam.cameraId}:${savedName}`);
       }
     };
+    if (cam.pendingNewId && now - Number(cam.pendingNewId?.lastSeenAt ?? 0) > camNewIdPendingTtlMs) {
+      cam.pendingNewId = null;
+    }
+    const shouldPromotePendingNewId = (descriptor) => {
+      if (!faceAutoCreate) return false;
+      if (!Array.isArray(descriptor) || !descriptor.length) return false;
+      if (camNewIdCooldownMs > 0 && now - cam.lastNewIdAt < camNewIdCooldownMs) return false;
+      if (
+        camNewIdHoldoffAfterKnownMs > 0 &&
+        cam.lastRecognitionAt > 0 &&
+        now - cam.lastRecognitionAt < camNewIdHoldoffAfterKnownMs
+      ) {
+        return false;
+      }
+
+      const pending = cam.pendingNewId;
+      if (!pending) {
+        cam.pendingNewId = {
+          descriptor,
+          firstSeenAt: now,
+          lastSeenAt: now,
+          count: 1,
+        };
+        return false;
+      }
+
+      const dist = descriptorDistance(descriptor, pending.descriptor);
+      if (!Number.isFinite(dist) || dist > camNewIdDescriptorDistance) {
+        cam.pendingNewId = {
+          descriptor,
+          firstSeenAt: now,
+          lastSeenAt: now,
+          count: 1,
+        };
+        return false;
+      }
+
+      pending.count += 1;
+      pending.lastSeenAt = now;
+      pending.descriptor = blendDescriptor(pending.descriptor, descriptor, camNewIdDescriptorAlpha);
+
+      return (
+        pending.count >= camNewIdMinSnapshots &&
+        now - pending.firstSeenAt >= camNewIdMinDurationMs
+      );
+    };
 
     const frameUrl = buildFrameUrl(frameApiBase, cam.src, frameApiTimeoutMs);
     const zoomOverride = Number(workerZoomMap?.[cam.cameraId]);
@@ -1348,6 +1501,7 @@ async function main() {
           `person_streak=${camPersonMinStreak} match_th=${camMatchThreshold.toFixed(3)} ` +
           `match_margin=${camMatchMinMargin.toFixed(3)} match_face_px=${camMatchMinFaceSidePx} ` +
           `identity_min=${camIdentityMinScore.toFixed(3)} frontal=${camRequireFrontalFace ? "on" : "off"} ` +
+          `new_id_snaps=${camNewIdMinSnapshots} new_id_ms=${camNewIdMinDurationMs} ` +
           `emotion_min=${camEmotionMinConfidence.toFixed(3)} emotion_floor=${camEmotionLowConfidenceFloor.toFixed(3)} ` +
           `db_reentry_ms=${camDbReentryGapMs} session_ms=${camSessionSnapshotIntervalMs} ` +
           `absence_ms=${camSessionAbsenceMs} resolve_ms=${camSessionResolveWaitMs}`,
@@ -1579,15 +1733,21 @@ async function main() {
                   distance = Number(bestCandidate.distance) || 0;
                   if (!bestDistance || distance < bestDistance) bestDistance = distance;
                   descriptorByName.set(name, descriptor);
+                  cam.pendingNewId = null;
                 } else if (faceAutoCreate) {
-                  const identified = await identifyFaceDescriptor(descriptor, camMatchThreshold);
-                  if (identified?.shortId) {
-                    name = identified.shortId;
-                    if (Number.isFinite(identified.distance) && identified.distance > 0) {
-                      distance = Number(identified.distance) || 0;
-                      if (!bestDistance || distance < bestDistance) bestDistance = distance;
+                  const readyForNewId = shouldPromotePendingNewId(descriptor);
+                  if (readyForNewId) {
+                    const identified = await identifyFaceDescriptor(descriptor, camMatchThreshold);
+                    if (identified?.shortId) {
+                      name = identified.shortId;
+                      if (Number.isFinite(identified.distance) && identified.distance > 0) {
+                        distance = Number(identified.distance) || 0;
+                        if (!bestDistance || distance < bestDistance) bestDistance = distance;
+                      }
+                      descriptorByName.set(name, descriptor);
+                      cam.pendingNewId = null;
+                      cam.lastNewIdAt = now;
                     }
-                    descriptorByName.set(name, descriptor);
                   }
                 }
               }
