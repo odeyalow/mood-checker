@@ -1444,51 +1444,9 @@ async function main() {
         cam.lastDbSentAt.delete(`${cam.cameraId}:${savedName}`);
       }
     };
-    if (cam.pendingNewId && now - Number(cam.pendingNewId?.lastSeenAt ?? 0) > camNewIdPendingTtlMs) {
-      cam.pendingNewId = null;
-    }
     const shouldPromotePendingNewId = (descriptor) => {
       if (!faceAutoCreate) return false;
-      if (!Array.isArray(descriptor) || !descriptor.length) return false;
-      if (camNewIdCooldownMs > 0 && now - cam.lastNewIdAt < camNewIdCooldownMs) return false;
-      if (
-        camNewIdHoldoffAfterKnownMs > 0 &&
-        cam.lastRecognitionAt > 0 &&
-        now - cam.lastRecognitionAt < camNewIdHoldoffAfterKnownMs
-      ) {
-        return false;
-      }
-
-      const pending = cam.pendingNewId;
-      if (!pending) {
-        cam.pendingNewId = {
-          descriptor,
-          firstSeenAt: now,
-          lastSeenAt: now,
-          count: 1,
-        };
-        return false;
-      }
-
-      const dist = descriptorDistance(descriptor, pending.descriptor);
-      if (!Number.isFinite(dist) || dist > camNewIdDescriptorDistance) {
-        cam.pendingNewId = {
-          descriptor,
-          firstSeenAt: now,
-          lastSeenAt: now,
-          count: 1,
-        };
-        return false;
-      }
-
-      pending.count += 1;
-      pending.lastSeenAt = now;
-      pending.descriptor = blendDescriptor(pending.descriptor, descriptor, camNewIdDescriptorAlpha);
-
-      return (
-        pending.count >= camNewIdMinSnapshots &&
-        now - pending.firstSeenAt >= camNewIdMinDurationMs
-      );
+      return Array.isArray(descriptor) && descriptor.length > 0;
     };
 
     const frameUrl = buildFrameUrl(frameApiBase, cam.src, frameApiTimeoutMs);
