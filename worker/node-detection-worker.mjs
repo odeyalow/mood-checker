@@ -480,28 +480,6 @@ function computeMatchCandidates(labeledDescriptors, descriptor) {
   return ranked;
 }
 
-function descriptorDistance(a, b) {
-  if (!Array.isArray(a) || !Array.isArray(b) || a.length !== b.length || !a.length) {
-    return Number.POSITIVE_INFINITY;
-  }
-  let sum = 0;
-  for (let i = 0; i < a.length; i += 1) {
-    const d = Number(a[i]) - Number(b[i]);
-    sum += d * d;
-  }
-  return Math.sqrt(sum);
-}
-
-function blendDescriptor(base, incoming, alpha = 0.35) {
-  if (!Array.isArray(base) || !Array.isArray(incoming) || base.length !== incoming.length) {
-    return incoming;
-  }
-  const safeAlpha = Math.max(0.05, Math.min(0.95, Number(alpha) || 0.35));
-  return base.map((value, index) =>
-    Number(((1 - safeAlpha) * Number(value) + safeAlpha * Number(incoming[index])).toFixed(6)),
-  );
-}
-
 function upsertKnownDescriptor(labeledDescriptors, label, descriptor) {
   const safeLabel = String(label ?? "").trim();
   const safeDescriptor = normalizeDescriptor(descriptor);
@@ -758,8 +736,9 @@ function createState(cameraId, src) {
     lastDbSentAt: new Map(),
     lastSeenMatchedAt: new Map(),
     presenceSessions: new Map(),
-    pendingNewId: null,
-    lastNewIdAt: 0,
+    identityLockName: "",
+    identityLockDistance: 0,
+    identityLockUntil: 0,
   };
 }
 
@@ -834,21 +813,10 @@ async function main() {
     0,
     Math.min(1, envFloat("WORKER_IDENTITY_MIN_SCORE", 0.12)),
   );
-  const newIdMinSnapshots = Math.max(1, envInt("WORKER_NEW_ID_MIN_SNAPSHOTS", 2));
-  const newIdMinDurationMs = Math.max(0, envInt("WORKER_NEW_ID_MIN_DURATION_MS", 450));
-  const newIdDescriptorDistance = Math.max(
-    0.05,
-    envFloat("WORKER_NEW_ID_DESCRIPTOR_DISTANCE", 0.36),
-  );
-  const newIdCooldownMs = Math.max(0, envInt("WORKER_NEW_ID_COOLDOWN_MS", 6000));
-  const newIdHoldoffAfterKnownMs = Math.max(
+  const identityLockMs = Math.max(0, envInt("WORKER_IDENTITY_LOCK_MS", 900));
+  const identityLockSwitchMargin = Math.max(
     0,
-    envInt("WORKER_NEW_ID_HOLDOFF_AFTER_KNOWN_MS", 2500),
-  );
-  const newIdPendingTtlMs = Math.max(300, envInt("WORKER_NEW_ID_PENDING_TTL_MS", 5000));
-  const newIdDescriptorAlpha = Math.max(
-    0.05,
-    Math.min(0.95, envFloat("WORKER_NEW_ID_DESCRIPTOR_ALPHA", 0.35)),
+    envFloat("WORKER_IDENTITY_LOCK_SWITCH_MARGIN", 0.02),
   );
   const requireFrontalFace = envBool("WORKER_REQUIRE_FRONTAL_FACE", true);
   const frontalMinEyeDistanceRatio = Math.max(
@@ -917,7 +885,6 @@ async function main() {
   const dbQueueMaxAttempts = Math.max(1, envInt("WORKER_DB_QUEUE_MAX_ATTEMPTS", 4));
   const dbQueueRetryBaseMs = Math.max(200, envInt("WORKER_DB_QUEUE_RETRY_BASE_MS", 1000));
   const dbQueueWarnAt = Math.max(5, envInt("WORKER_DB_QUEUE_WARN_AT", 60));
-  const dbIncludeSnapshot = envBool("WORKER_DB_INCLUDE_SNAPSHOT", true);
   const saveSnapshots = envBool("WORKER_SAVE_SNAPSHOTS", true);
   const snapshotSaveCooldownMs = Math.max(200, envInt("WORKER_SNAPSHOT_SAVE_COOLDOWN_MS", 500));
   const snapshotDir = process.env.WORKER_SNAPSHOT_DIR || path.join(rootDir, "public", "_worker-snaps");
@@ -1065,7 +1032,7 @@ async function main() {
   );
   log(
     `faces registry=${faceRegistryEndpoint || "off"} identify=${faceIdentifyEndpoint || "off"} ` +
-      `refresh_ms=${faceRegistryRefreshMs} include_snapshot=${dbIncludeSnapshot ? "on" : "off"}`,
+      `refresh_ms=${faceRegistryRefreshMs} include_snapshot=on`,
   );
   log(
     `session snapshot_ms=${sessionSnapshotIntervalMs} absence_ms=${sessionAbsenceMs} ` +
@@ -1202,71 +1169,23 @@ async function main() {
         ),
       ),
     );
-    const camNewIdMinSnapshots = Math.max(
-      1,
-      parseFiniteInt(
-        getCameraSetting(cameraSettings, cam.cameraId, "newIdMinSnapshots", newIdMinSnapshots),
-        newIdMinSnapshots,
-      ),
-    );
-    const camNewIdMinDurationMs = Math.max(
+    const camIdentityLockMs = Math.max(
       0,
       parseFiniteInt(
-        getCameraSetting(cameraSettings, cam.cameraId, "newIdMinDurationMs", newIdMinDurationMs),
-        newIdMinDurationMs,
+        getCameraSetting(cameraSettings, cam.cameraId, "identityLockMs", identityLockMs),
+        identityLockMs,
       ),
     );
-    const camNewIdDescriptorDistance = Math.max(
-      0.05,
+    const camIdentityLockSwitchMargin = Math.max(
+      0,
       parseFiniteFloat(
         getCameraSetting(
           cameraSettings,
           cam.cameraId,
-          "newIdDescriptorDistance",
-          newIdDescriptorDistance,
+          "identityLockSwitchMargin",
+          identityLockSwitchMargin,
         ),
-        newIdDescriptorDistance,
-      ),
-    );
-    const camNewIdCooldownMs = Math.max(
-      0,
-      parseFiniteInt(
-        getCameraSetting(cameraSettings, cam.cameraId, "newIdCooldownMs", newIdCooldownMs),
-        newIdCooldownMs,
-      ),
-    );
-    const camNewIdHoldoffAfterKnownMs = Math.max(
-      0,
-      parseFiniteInt(
-        getCameraSetting(
-          cameraSettings,
-          cam.cameraId,
-          "newIdHoldoffAfterKnownMs",
-          newIdHoldoffAfterKnownMs,
-        ),
-        newIdHoldoffAfterKnownMs,
-      ),
-    );
-    const camNewIdPendingTtlMs = Math.max(
-      300,
-      parseFiniteInt(
-        getCameraSetting(cameraSettings, cam.cameraId, "newIdPendingTtlMs", newIdPendingTtlMs),
-        newIdPendingTtlMs,
-      ),
-    );
-    const camNewIdDescriptorAlpha = Math.max(
-      0.05,
-      Math.min(
-        0.95,
-        parseFiniteFloat(
-          getCameraSetting(
-            cameraSettings,
-            cam.cameraId,
-            "newIdDescriptorAlpha",
-            newIdDescriptorAlpha,
-          ),
-          newIdDescriptorAlpha,
-        ),
+        identityLockSwitchMargin,
       ),
     );
     const camRequireFrontalFaceRaw = getCameraSetting(
@@ -1444,9 +1363,40 @@ async function main() {
         cam.lastDbSentAt.delete(`${cam.cameraId}:${savedName}`);
       }
     };
-    const shouldPromotePendingNewId = (descriptor) => {
+    const shouldCreateNewId = (descriptor) => {
       if (!faceAutoCreate) return false;
       return Array.isArray(descriptor) && descriptor.length > 0;
+    };
+    const applyIdentityLock = (name, distance) => {
+      const safeName = String(name || "").trim();
+      const safeDistance = Number(distance) || 0;
+      if (!safeName || isUnknownIdentity(safeName) || camIdentityLockMs <= 0) {
+        return { name: safeName, distance: safeDistance, overridden: false };
+      }
+
+      const lockActive = cam.identityLockName && now < cam.identityLockUntil;
+      if (lockActive && safeName !== cam.identityLockName) {
+        const lockDistance = Number(cam.identityLockDistance) || 0;
+        const incomingDistance = safeDistance;
+        const incomingClearlyBetter =
+          incomingDistance > 0 &&
+          (lockDistance <= 0 || incomingDistance + camIdentityLockSwitchMargin < lockDistance);
+
+        if (!incomingClearlyBetter) {
+          return {
+            name: cam.identityLockName,
+            distance: lockDistance > 0 ? lockDistance : incomingDistance,
+            overridden: true,
+          };
+        }
+      }
+
+      cam.identityLockName = safeName;
+      if (safeDistance > 0) {
+        cam.identityLockDistance = safeDistance;
+      }
+      cam.identityLockUntil = now + camIdentityLockMs;
+      return { name: safeName, distance: safeDistance, overridden: false };
     };
 
     const frameUrl = buildFrameUrl(frameApiBase, cam.src, frameApiTimeoutMs);
@@ -1466,7 +1416,7 @@ async function main() {
           `person_streak=${camPersonMinStreak} match_th=${camMatchThreshold.toFixed(3)} ` +
           `match_margin=${camMatchMinMargin.toFixed(3)} match_face_px=${camMatchMinFaceSidePx} ` +
           `identity_min=${camIdentityMinScore.toFixed(3)} frontal=${camRequireFrontalFace ? "on" : "off"} ` +
-          `new_id_snaps=${camNewIdMinSnapshots} new_id_ms=${camNewIdMinDurationMs} ` +
+          `lock_ms=${camIdentityLockMs} lock_margin=${camIdentityLockSwitchMargin.toFixed(3)} ` +
           `emotion_min=${camEmotionMinConfidence.toFixed(3)} emotion_floor=${camEmotionLowConfidenceFloor.toFixed(3)} ` +
           `db_reentry_ms=${camDbReentryGapMs} session_ms=${camSessionSnapshotIntervalMs} ` +
           `absence_ms=${camSessionAbsenceMs} resolve_ms=${camSessionResolveWaitMs}`,
@@ -1595,6 +1545,9 @@ async function main() {
           cam.emotionSummary = "";
           cam.topEmotion = "";
           cam.lastRecognitionAt = 0;
+          cam.identityLockName = "";
+          cam.identityLockDistance = 0;
+          cam.identityLockUntil = 0;
         }
       }
       if (isConfirmed) {
@@ -1698,28 +1651,43 @@ async function main() {
                   name = bestCandidate.label;
                   distance = Number(bestCandidate.distance) || 0;
                   if (!bestDistance || distance < bestDistance) bestDistance = distance;
-                  descriptorByName.set(name, descriptor);
-                  cam.pendingNewId = null;
                 } else if (faceAutoCreate) {
-                  const readyForNewId = shouldPromotePendingNewId(descriptor);
-                  if (readyForNewId) {
-                    const identified = await identifyFaceDescriptor(descriptor, camMatchThreshold);
-                    if (identified?.shortId) {
-                      name = identified.shortId;
-                      justRegistered = Boolean(identified.created);
-                      if (Number.isFinite(identified.distance) && identified.distance > 0) {
-                        distance = Number(identified.distance) || 0;
-                        if (!bestDistance || distance < bestDistance) bestDistance = distance;
-                      }
-                      descriptorByName.set(name, descriptor);
-                      cam.pendingNewId = null;
-                      cam.lastNewIdAt = now;
-                      if (justRegistered) {
-                        log(`[${cam.cameraId}] new_id created shortId=${name}`);
+                  const lockActive = cam.identityLockName && now < cam.identityLockUntil;
+                  if (lockActive) {
+                    name = cam.identityLockName;
+                    distance = Number(cam.identityLockDistance) || 0;
+                  } else {
+                    const readyForNewId = shouldCreateNewId(descriptor);
+                    if (readyForNewId) {
+                      const identified = await identifyFaceDescriptor(descriptor, camMatchThreshold);
+                      if (identified?.shortId) {
+                        name = identified.shortId;
+                        justRegistered = Boolean(identified.created);
+                        if (Number.isFinite(identified.distance) && identified.distance > 0) {
+                          distance = Number(identified.distance) || 0;
+                          if (!bestDistance || distance < bestDistance) bestDistance = distance;
+                        }
+                        if (justRegistered) {
+                          log(`[${cam.cameraId}] new_id created shortId=${name}`);
+                        }
                       }
                     }
                   }
                 }
+              }
+            }
+            if (!isUnknownIdentity(name)) {
+              const lock = applyIdentityLock(name, distance);
+              if (lock.overridden) {
+                justRegistered = false;
+              }
+              name = lock.name;
+              distance = Number(lock.distance) || 0;
+              if (descriptor && !lock.overridden) {
+                descriptorByName.set(name, descriptor);
+              }
+              if (distance > 0 && (!bestDistance || distance < bestDistance)) {
+                bestDistance = distance;
               }
             }
 
@@ -1818,7 +1786,7 @@ async function main() {
           }
 
           if (enableMatching && people.length) {
-            const snapshotBase64 = dbIncludeSnapshot ? jpg.toString("base64") : "";
+            const snapshotBase64 = jpg.toString("base64");
             for (const person of people) {
               if (isUnknownIdentity(person.name)) continue;
               const sessionKey = person.name;
@@ -1974,6 +1942,9 @@ async function main() {
           cam.people = [];
           cam.emotionSummary = "";
           cam.topEmotion = "";
+          cam.identityLockName = "";
+          cam.identityLockDistance = 0;
+          cam.identityLockUntil = 0;
           if (now - cam.lastErrLogAt >= 2000) {
             log(`[${cam.cameraId}] snapshot error: ${String(err)}`);
             cam.lastErrLogAt = now;
@@ -1985,6 +1956,9 @@ async function main() {
         cam.people = [];
         cam.emotionSummary = "";
         cam.topEmotion = "";
+        cam.identityLockName = "";
+        cam.identityLockDistance = 0;
+        cam.identityLockUntil = 0;
         evictPresenceSessions(new Set());
       }
     } catch (err) {
@@ -1999,6 +1973,9 @@ async function main() {
       cam.emotionSummary = "";
       cam.topEmotion = "";
       cam.lastRecognitionAt = 0;
+      cam.identityLockName = "";
+      cam.identityLockDistance = 0;
+      cam.identityLockUntil = 0;
       evictPresenceSessions(new Set());
       cam.frameOk = false;
       cam.workerFrameWidth = 0;
