@@ -291,6 +291,66 @@ function getScore(det) {
   return Number.isFinite(score) ? Number(score) : 0;
 }
 
+function getLandmarkCenter(points) {
+  if (!Array.isArray(points) || !points.length) return null;
+  let sx = 0;
+  let sy = 0;
+  let count = 0;
+  for (const point of points) {
+    const x = Number(point?.x ?? point?._x);
+    const y = Number(point?.y ?? point?._y);
+    if (!Number.isFinite(x) || !Number.isFinite(y)) continue;
+    sx += x;
+    sy += y;
+    count += 1;
+  }
+  if (!count) return null;
+  return { x: sx / count, y: sy / count };
+}
+
+function isLikelyFrontalFace(
+  det,
+  {
+    enabled = true,
+    minEyeDistanceRatio = 0.16,
+    maxEyeSlope = 0.2,
+    noseCenterTolerance = 0.3,
+  } = {},
+) {
+  if (!enabled) return true;
+  const box = getBox(det);
+  if (!box) return false;
+  const landmarks = det?.landmarks;
+  if (!landmarks?.getLeftEye || !landmarks?.getRightEye || !landmarks?.getNose) {
+    return false;
+  }
+
+  const leftEye = getLandmarkCenter(landmarks.getLeftEye());
+  const rightEye = getLandmarkCenter(landmarks.getRightEye());
+  const nose = getLandmarkCenter(landmarks.getNose());
+  if (!leftEye || !rightEye || !nose) return false;
+
+  const eyeDx = rightEye.x - leftEye.x;
+  const eyeDy = rightEye.y - leftEye.y;
+  const eyeDist = Math.hypot(eyeDx, eyeDy);
+  const eyeDistRatio = eyeDist / Math.max(1, box.width);
+  if (eyeDistRatio < minEyeDistanceRatio) return false;
+
+  const eyeSlope = Math.abs(eyeDy) / Math.max(1e-6, eyeDist);
+  if (eyeSlope > maxEyeSlope) return false;
+
+  const eyeLeftX = Math.min(leftEye.x, rightEye.x);
+  const eyeRightX = Math.max(leftEye.x, rightEye.x);
+  const noseBetweenEyes = (nose.x - eyeLeftX) / Math.max(1e-6, eyeRightX - eyeLeftX);
+  if (noseBetweenEyes < 0.1 || noseBetweenEyes > 0.9) return false;
+
+  const centerX = box.x + box.width / 2;
+  const noseCenterOffset = Math.abs((nose.x - centerX) / Math.max(1, box.width));
+  if (noseCenterOffset > noseCenterTolerance) return false;
+
+  return true;
+}
+
 function iou(a, b) {
   const ax2 = a.x + a.width;
   const ay2 = a.y + a.height;
@@ -746,6 +806,20 @@ async function main() {
   const matchThreshold = envFloat("WORKER_MATCH_THRESHOLD", 0.52);
   const matchMinMargin = Math.max(0, envFloat("WORKER_MATCH_MIN_MARGIN", 0.035));
   const matchMinFaceSidePx = Math.max(0, envInt("WORKER_MATCH_MIN_FACE_SIDE_PX", 26));
+  const identityMinScore = Math.max(
+    0,
+    Math.min(1, envFloat("WORKER_IDENTITY_MIN_SCORE", 0.2)),
+  );
+  const requireFrontalFace = envBool("WORKER_REQUIRE_FRONTAL_FACE", true);
+  const frontalMinEyeDistanceRatio = Math.max(
+    0.05,
+    envFloat("WORKER_FRONTAL_MIN_EYE_DISTANCE_RATIO", 0.16),
+  );
+  const frontalMaxEyeSlope = Math.max(0.02, envFloat("WORKER_FRONTAL_MAX_EYE_SLOPE", 0.2));
+  const frontalNoseCenterTolerance = Math.max(
+    0.05,
+    envFloat("WORKER_FRONTAL_NOSE_CENTER_TOLERANCE", 0.3),
+  );
   const matchIntervalMs = Math.max(120, envInt("WORKER_MATCH_INTERVAL_MS", 180));
   const matchLogCooldownMs = Math.max(300, envInt("WORKER_MATCH_LOG_COOLDOWN_MS", 1000));
   const enableEmotions = envBool("WORKER_ENABLE_EMOTIONS", true);
@@ -1071,6 +1145,57 @@ async function main() {
         matchMinFaceSidePx,
       ),
     );
+    const camIdentityMinScore = Math.max(
+      0,
+      Math.min(
+        1,
+        parseFiniteFloat(
+          getCameraSetting(cameraSettings, cam.cameraId, "identityMinScore", identityMinScore),
+          identityMinScore,
+        ),
+      ),
+    );
+    const camRequireFrontalFaceRaw = getCameraSetting(
+      cameraSettings,
+      cam.cameraId,
+      "requireFrontalFace",
+      requireFrontalFace,
+    );
+    const camRequireFrontalFace =
+      typeof camRequireFrontalFaceRaw === "boolean"
+        ? camRequireFrontalFaceRaw
+        : requireFrontalFace;
+    const camFrontalMinEyeDistanceRatio = Math.max(
+      0.05,
+      parseFiniteFloat(
+        getCameraSetting(
+          cameraSettings,
+          cam.cameraId,
+          "frontalMinEyeDistanceRatio",
+          frontalMinEyeDistanceRatio,
+        ),
+        frontalMinEyeDistanceRatio,
+      ),
+    );
+    const camFrontalMaxEyeSlope = Math.max(
+      0.02,
+      parseFiniteFloat(
+        getCameraSetting(cameraSettings, cam.cameraId, "frontalMaxEyeSlope", frontalMaxEyeSlope),
+        frontalMaxEyeSlope,
+      ),
+    );
+    const camFrontalNoseCenterTolerance = Math.max(
+      0.05,
+      parseFiniteFloat(
+        getCameraSetting(
+          cameraSettings,
+          cam.cameraId,
+          "frontalNoseCenterTolerance",
+          frontalNoseCenterTolerance,
+        ),
+        frontalNoseCenterTolerance,
+      ),
+    );
     const camMatchIntervalMs = Math.max(
       120,
       parseFiniteInt(
@@ -1222,6 +1347,7 @@ async function main() {
           `person_min=${camPersonMinScore.toFixed(3)} person_side=${camPersonMinSidePx} ` +
           `person_streak=${camPersonMinStreak} match_th=${camMatchThreshold.toFixed(3)} ` +
           `match_margin=${camMatchMinMargin.toFixed(3)} match_face_px=${camMatchMinFaceSidePx} ` +
+          `identity_min=${camIdentityMinScore.toFixed(3)} frontal=${camRequireFrontalFace ? "on" : "off"} ` +
           `emotion_min=${camEmotionMinConfidence.toFixed(3)} emotion_floor=${camEmotionLowConfidenceFloor.toFixed(3)} ` +
           `db_reentry_ms=${camDbReentryGapMs} session_ms=${camSessionSnapshotIntervalMs} ` +
           `absence_ms=${camSessionAbsenceMs} resolve_ms=${camSessionResolveWaitMs}`,
@@ -1425,7 +1551,18 @@ async function main() {
             const descriptor = descriptorToArray(det?.descriptor);
             if (enableMatching && descriptor) {
               const faceSide = getFaceSide(det);
-              if (faceSide >= camMatchMinFaceSidePx) {
+              const identityScore = getScore(det);
+              const isFrontalFace = isLikelyFrontalFace(det, {
+                enabled: camRequireFrontalFace,
+                minEyeDistanceRatio: camFrontalMinEyeDistanceRatio,
+                maxEyeSlope: camFrontalMaxEyeSlope,
+                noseCenterTolerance: camFrontalNoseCenterTolerance,
+              });
+              if (
+                faceSide >= camMatchMinFaceSidePx &&
+                identityScore >= camIdentityMinScore &&
+                isFrontalFace
+              ) {
                 const ranked = computeMatchCandidates(knownLabeledDescriptors, descriptor);
                 const bestCandidate = ranked[0];
                 const second = ranked[1];

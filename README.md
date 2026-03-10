@@ -79,6 +79,10 @@ Optional identity env (app process):
 - `FACE_IDENTITY_MATCH_THRESHOLD=0.56`
 - `FACE_IDENTITY_DESCRIPTOR_ALPHA=0.2`
 
+Face registry maintenance:
+- `npm run faces:clear` - remove all registered faces and related snapshots/records.
+- `npm run faces:delete -- <SHORT_ID>` - remove one registered face by short ID.
+
 Run manually:
 
 ```bash

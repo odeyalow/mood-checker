@@ -29,6 +29,8 @@
     "db:push": "prisma db push",
     "db:reset": "prisma migrate reset --force --skip-generate",
     "create-user": "node scripts/create-user.mjs",
+    "faces:clear": "node scripts/manage-faces.mjs clear",
+    "faces:delete": "node scripts/manage-faces.mjs delete",
     "worker:profile:balanced": "node scripts/apply-worker-profile-balanced.mjs",
     "worker:profile:pre-request": "node scripts/apply-worker-profile-pre-request.mjs",
     "worker:diagnose": "bash scripts/diagnose-worker.sh"
