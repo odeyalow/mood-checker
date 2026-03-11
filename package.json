@@ -31,6 +31,10 @@
     "create-user": "node scripts/create-user.mjs",
     "faces:clear": "node scripts/manage-faces.mjs clear",
     "faces:delete": "node scripts/manage-faces.mjs delete",
+    "faces:block": "node scripts/face-block.mjs block",
+    "faces:unblock": "node scripts/face-block.mjs unblock",
+    "faces:block:list": "node scripts/face-block.mjs list",
+    "faces:block:clear": "node scripts/face-block.mjs clear",
     "worker:profile:balanced": "node scripts/apply-worker-profile-balanced.mjs",
     "worker:profile:pre-request": "node scripts/apply-worker-profile-pre-request.mjs",
     "worker:diagnose": "bash scripts/diagnose-worker.sh"

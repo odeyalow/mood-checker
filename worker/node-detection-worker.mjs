@@ -58,6 +58,35 @@ function envBool(name, fallback) {
   return ["1", "true", "yes", "on"].includes(v);
 }
 
+function normalizeFaceShortId(value) {
+  return String(value ?? "")
+    .trim()
+    .toUpperCase()
+    .replace(/[^A-Z0-9_-]/g, "")
+    .slice(0, 32);
+}
+
+async function loadBlockedFaceIds(filePath) {
+  const out = new Set();
+  if (!filePath) return out;
+  try {
+    const raw = await fsp.readFile(filePath, "utf-8");
+    const parsed = JSON.parse(raw);
+    const items = Array.isArray(parsed)
+      ? parsed
+      : Array.isArray(parsed?.ids)
+      ? parsed.ids
+      : [];
+    for (const item of items) {
+      const id = normalizeFaceShortId(item);
+      if (id) out.add(id);
+    }
+  } catch {
+    // ignore missing or malformed file
+  }
+  return out;
+}
+
 function normalizeDescriptor(value) {
   if (!Array.isArray(value) || value.length !== FACE_DESCRIPTOR_LENGTH) return null;
   const descriptor = value.map((item) => Number(item));
@@ -927,6 +956,7 @@ function createState(cameraId, src) {
     lastEmotionLogAt: 0,
     lastErrLogAt: 0,
     lastPhantomLogAt: 0,
+    lastBlockedMatchLogAt: 0,
     newIdGateDescriptor: null,
     newIdGateStreak: 0,
     newIdGateLastAt: 0,
@@ -1101,6 +1131,12 @@ async function main() {
   const faceIdentifyTimeoutMs = Math.max(500, envInt("WORKER_FACE_IDENTIFY_TIMEOUT_MS", 2000));
   const faceRegistryRefreshMs = Math.max(3000, envInt("WORKER_FACE_REGISTRY_REFRESH_MS", 20000));
   const faceAutoCreate = envBool("WORKER_FACE_AUTO_CREATE", true);
+  const blockedFaceIdsFile =
+    process.env.WORKER_BLOCKED_FACE_IDS_FILE || path.join(rootDir, "worker", "blocked-face-ids.json");
+  const blockedFaceIdsReloadMs = Math.max(
+    1000,
+    envInt("WORKER_BLOCKED_FACE_IDS_RELOAD_MS", 5000),
+  );
   const newIdConfirmFrames = Math.max(1, envInt("WORKER_NEW_ID_CONFIRM_FRAMES", 1));
   const newIdMinScore = Math.max(0, Math.min(1, envFloat("WORKER_NEW_ID_MIN_SCORE", 0.14)));
   const newIdMinFaceSidePx = Math.max(8, envInt("WORKER_NEW_ID_MIN_FACE_SIDE_PX", 20));
@@ -1165,6 +1201,8 @@ async function main() {
   faceapi.tf.enableProdMode();
   await faceapi.nets.tinyFaceDetector.loadFromDisk(modelDir);
   let knownLabeledDescriptors = [];
+  let blockedFaceIds = await loadBlockedFaceIds(blockedFaceIdsFile);
+  let lastBlockedFaceIdsReloadAt = Date.now();
   let lastFaceRegistryReloadAt = 0;
   let ssdLoaded = false;
   if (useSsdFallback) {
@@ -1301,6 +1339,9 @@ async function main() {
   } else {
     log("matching=off reason=env_disabled");
   }
+  log(
+    `blocked_ids file=${blockedFaceIdsFile} count=${blockedFaceIds.size} reload_ms=${blockedFaceIdsReloadMs}`,
+  );
 
   if (enableEmotions) {
     await faceapi.nets.faceExpressionNet.loadFromDisk(modelDir);
@@ -2196,6 +2237,15 @@ async function main() {
                     ).trim();
                   }
                 } else if (accepted) {
+                  const acceptedShortId = normalizeFaceShortId(bestCandidate.label);
+                  if (acceptedShortId && blockedFaceIds.has(acceptedShortId)) {
+                    resetNewIdGate();
+                    if (now - cam.lastBlockedMatchLogAt >= 5000) {
+                      log(`[${cam.cameraId}] blocked_id ignored shortId=${acceptedShortId}`);
+                      cam.lastBlockedMatchLogAt = now;
+                    }
+                    continue;
+                  }
                   resetNewIdGate();
                   name = bestCandidate.label;
                   distance = Number(bestCandidate.distance) || 0;
@@ -2212,6 +2262,15 @@ async function main() {
                       snapshotBase64,
                     );
                     if (identified?.shortId) {
+                      const identifiedShortId = normalizeFaceShortId(identified.shortId);
+                      if (identifiedShortId && blockedFaceIds.has(identifiedShortId)) {
+                        resetNewIdGate();
+                        if (now - cam.lastBlockedMatchLogAt >= 5000) {
+                          log(`[${cam.cameraId}] blocked_id ignored shortId=${identifiedShortId}`);
+                          cam.lastBlockedMatchLogAt = now;
+                        }
+                        continue;
+                      }
                       resetNewIdGate();
                       name = identified.shortId;
                       justRegistered = Boolean(identified.created);
@@ -2628,6 +2687,10 @@ async function main() {
       }
       if (enableMatching && now - lastFaceRegistryReloadAt >= faceRegistryRefreshMs) {
         await reloadFaceRegistry("periodic");
+      }
+      if (now - lastBlockedFaceIdsReloadAt >= blockedFaceIdsReloadMs) {
+        blockedFaceIds = await loadBlockedFaceIds(blockedFaceIdsFile);
+        lastBlockedFaceIdsReloadAt = now;
       }
 
       const workers = [];

@@ -7,6 +7,15 @@ import { normalizeDescriptor } from "@/lib/faces";
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
 
+const BLOCKED_IDS_FILE =
+  process.env.WORKER_BLOCKED_FACE_IDS_FILE || path.join(process.cwd(), "worker", "blocked-face-ids.json");
+const BLOCKED_IDS_RELOAD_MS = Math.max(
+  1000,
+  Number.parseInt(process.env.WORKER_BLOCKED_FACE_IDS_RELOAD_MS || "5000", 10) || 5000,
+);
+let blockedIdsCacheAt = 0;
+let blockedIdsCache = new Set<string>();
+
 function parseLimit(raw: string | null, fallback = 10) {
   const n = Number.parseInt(raw ?? "", 10);
   if (!Number.isFinite(n)) return fallback;
@@ -54,6 +63,34 @@ function parseSnapshotPublicUrl(raw: unknown): string | null {
 
 function sanitizeShortId(shortId: string) {
   return String(shortId || "").replace(/[^A-Za-z0-9_-]/g, "").slice(0, 16);
+}
+
+function normalizeFaceShortId(shortId: string) {
+  return String(shortId || "")
+    .trim()
+    .toUpperCase()
+    .replace(/[^A-Z0-9_-]/g, "")
+    .slice(0, 32);
+}
+
+async function getBlockedFaceIds() {
+  const now = Date.now();
+  if (now - blockedIdsCacheAt <= BLOCKED_IDS_RELOAD_MS) return blockedIdsCache;
+  try {
+    const raw = await fs.readFile(BLOCKED_IDS_FILE, "utf-8");
+    const parsed = JSON.parse(raw);
+    const ids = Array.isArray(parsed) ? parsed : Array.isArray(parsed?.ids) ? parsed.ids : [];
+    const next = new Set<string>();
+    for (const value of ids) {
+      const id = normalizeFaceShortId(String(value || ""));
+      if (id) next.add(id);
+    }
+    blockedIdsCache = next;
+  } catch {
+    blockedIdsCache = new Set();
+  }
+  blockedIdsCacheAt = now;
+  return blockedIdsCache;
 }
 
 function normalizeSnapshotKey(url: string | null | undefined) {
@@ -147,6 +184,10 @@ export async function POST(request: Request) {
 
     if (isUnknownIdentity(name)) {
       return NextResponse.json({ ok: true, skipped: "unknown_identity" });
+    }
+    const blockedIds = await getBlockedFaceIds();
+    if (blockedIds.has(normalizeFaceShortId(name))) {
+      return NextResponse.json({ ok: true, skipped: "blocked_identity" });
     }
 
     let snapshotUrl: string | null = null;
