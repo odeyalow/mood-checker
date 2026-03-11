@@ -272,6 +272,53 @@ async function savePhantomSnapshot(snapshotDir, publicBase, cameraId, jpgBuffer,
   return `${publicBase.replace(/\/+$/, "")}/${safeCameraId}/${fileName}`;
 }
 
+async function archiveFaceSnapshot({
+  archiveDir,
+  archivePublicBase,
+  faceShortId,
+  cameraId,
+  jpgBuffer,
+  now,
+  maxPerFace = 50,
+}) {
+  if (!archiveDir || !archivePublicBase) return "";
+  if (!(jpgBuffer instanceof Buffer) || !jpgBuffer.length) return "";
+  const safeFaceId = sanitizeFileName(faceShortId || "").replace(/\./g, "_").slice(0, 32);
+  if (!safeFaceId) return "";
+
+  const faceDir = path.join(archiveDir, safeFaceId);
+  await fsp.mkdir(faceDir, { recursive: true });
+
+  const safeCameraId = sanitizeFileName(cameraId || "cam").slice(0, 24) || "cam";
+  const fileName = `${now}-${safeCameraId}-${Math.random().toString(36).slice(2, 8)}.jpg`;
+  const fileAbs = path.join(faceDir, fileName);
+  await fsp.writeFile(fileAbs, jpgBuffer);
+
+  const keepLimit = Math.max(5, Number(maxPerFace) || 50);
+  const entries = await fsp.readdir(faceDir, { withFileTypes: true }).catch(() => []);
+  const images = entries.filter((entry) => entry?.isFile?.() && isImageFileName(entry.name));
+  if (images.length > keepLimit) {
+    const withTimes = await Promise.all(
+      images.map(async (entry) => {
+        const abs = path.join(faceDir, entry.name);
+        const st = await fsp.stat(abs).catch(() => null);
+        return st ? { name: entry.name, mtimeMs: st.mtimeMs } : null;
+      }),
+    );
+    const sorted = withTimes
+      .filter(Boolean)
+      .sort((a, b) => b.mtimeMs - a.mtimeMs);
+    const toDelete = sorted.slice(keepLimit);
+    await Promise.all(
+      toDelete.map(async (item) =>
+        fsp.rm(path.join(faceDir, item.name), { force: true }).catch(() => {}),
+      ),
+    );
+  }
+
+  return `${archivePublicBase.replace(/\/+$/, "")}/${safeFaceId}/${fileName}`;
+}
+
 async function loadPhantomBaselines({
   baselineDir,
   baselinePublicDir,
@@ -880,8 +927,12 @@ function createState(cameraId, src) {
     lastEmotionLogAt: 0,
     lastErrLogAt: 0,
     lastPhantomLogAt: 0,
+    newIdGateDescriptor: null,
+    newIdGateStreak: 0,
+    newIdGateLastAt: 0,
     lastDbSentAt: new Map(),
     lastSeenMatchedAt: new Map(),
+    lastFaceArchiveAtByName: new Map(),
     presenceSessions: new Map(),
     identityLockName: "",
     identityLockDistance: 0,
@@ -1049,6 +1100,22 @@ async function main() {
   const faceIdentifyTimeoutMs = Math.max(500, envInt("WORKER_FACE_IDENTIFY_TIMEOUT_MS", 2000));
   const faceRegistryRefreshMs = Math.max(3000, envInt("WORKER_FACE_REGISTRY_REFRESH_MS", 20000));
   const faceAutoCreate = envBool("WORKER_FACE_AUTO_CREATE", true);
+  const newIdConfirmFrames = Math.max(1, envInt("WORKER_NEW_ID_CONFIRM_FRAMES", 2));
+  const newIdMinScore = Math.max(0, Math.min(1, envFloat("WORKER_NEW_ID_MIN_SCORE", 0.18)));
+  const newIdMinFaceSidePx = Math.max(8, envInt("WORKER_NEW_ID_MIN_FACE_SIDE_PX", 28));
+  const newIdStabilityMaxDistance = Math.max(
+    0.01,
+    Math.min(2, envFloat("WORKER_NEW_ID_STABILITY_MAX_DISTANCE", 0.34)),
+  );
+  const newIdMaxGapMs = Math.max(120, envInt("WORKER_NEW_ID_MAX_GAP_MS", 1200));
+  const faceArchiveEnabled = envBool("WORKER_FACE_ARCHIVE_ENABLED", true);
+  const faceArchiveCooldownMs = Math.max(500, envInt("WORKER_FACE_ARCHIVE_COOLDOWN_MS", 2500));
+  const faceArchiveMaxPerFace = Math.max(5, envInt("WORKER_FACE_ARCHIVE_MAX_PER_FACE", 50));
+  const faceArchiveDir = process.env.WORKER_FACE_ARCHIVE_DIR || path.join(rootDir, "public", "_faces");
+  const faceArchivePublicBase = (process.env.WORKER_FACE_ARCHIVE_PUBLIC_BASE || "/_faces").replace(
+    /\/+$/,
+    "",
+  );
   const phantomGuardEnabled = envBool("WORKER_PHANTOM_GUARD_ENABLED", true);
   const phantomBaselineDir =
     process.env.WORKER_PHANTOM_BASELINE_DIR || path.join(rootDir, "worker", "phantom-baselines");
@@ -1071,6 +1138,9 @@ async function main() {
 
   if (saveSnapshots) {
     await fsp.mkdir(snapshotDir, { recursive: true }).catch(() => {});
+  }
+  if (faceArchiveEnabled) {
+    await fsp.mkdir(faceArchiveDir, { recursive: true }).catch(() => {});
   }
   if (phantomGuardEnabled) {
     await fsp.mkdir(phantomSnapshotDir, { recursive: true }).catch(() => {});
@@ -1215,7 +1285,9 @@ async function main() {
     await reloadFaceRegistry("startup");
     log(
       `matching=on known=${knownLabeledDescriptors.length} threshold=${matchThreshold} ` +
-        `min_margin=${matchMinMargin} min_face_px=${matchMinFaceSidePx} auto_create=${faceAutoCreate ? "on" : "off"}`,
+        `min_margin=${matchMinMargin} min_face_px=${matchMinFaceSidePx} auto_create=${faceAutoCreate ? "on" : "off"} ` +
+        `new_id_frames=${newIdConfirmFrames} new_id_min_score=${newIdMinScore.toFixed(3)} ` +
+        `new_id_min_side=${newIdMinFaceSidePx} archive=${faceArchiveEnabled ? "on" : "off"}`,
     );
   } else {
     log("matching=off reason=env_disabled");
@@ -1616,6 +1688,81 @@ async function main() {
         phantomLogCooldownMs,
       ),
     );
+    const camNewIdConfirmFrames = Math.max(
+      1,
+      parseFiniteInt(
+        getCameraSetting(cameraSettings, cam.cameraId, "newIdConfirmFrames", newIdConfirmFrames),
+        newIdConfirmFrames,
+      ),
+    );
+    const camNewIdMinScore = Math.max(
+      0,
+      Math.min(
+        1,
+        parseFiniteFloat(
+          getCameraSetting(cameraSettings, cam.cameraId, "newIdMinScore", newIdMinScore),
+          newIdMinScore,
+        ),
+      ),
+    );
+    const camNewIdMinFaceSidePx = Math.max(
+      8,
+      parseFiniteInt(
+        getCameraSetting(cameraSettings, cam.cameraId, "newIdMinFaceSidePx", newIdMinFaceSidePx),
+        newIdMinFaceSidePx,
+      ),
+    );
+    const camNewIdStabilityMaxDistance = Math.max(
+      0.01,
+      Math.min(
+        2,
+        parseFiniteFloat(
+          getCameraSetting(
+            cameraSettings,
+            cam.cameraId,
+            "newIdStabilityMaxDistance",
+            newIdStabilityMaxDistance,
+          ),
+          newIdStabilityMaxDistance,
+        ),
+      ),
+    );
+    const camNewIdMaxGapMs = Math.max(
+      120,
+      parseFiniteInt(
+        getCameraSetting(cameraSettings, cam.cameraId, "newIdMaxGapMs", newIdMaxGapMs),
+        newIdMaxGapMs,
+      ),
+    );
+    const camFaceArchiveEnabledRaw = getCameraSetting(
+      cameraSettings,
+      cam.cameraId,
+      "faceArchiveEnabled",
+      faceArchiveEnabled,
+    );
+    const camFaceArchiveEnabled =
+      typeof camFaceArchiveEnabledRaw === "boolean"
+        ? camFaceArchiveEnabledRaw
+        : faceArchiveEnabled;
+    const camFaceArchiveCooldownMs = Math.max(
+      500,
+      parseFiniteInt(
+        getCameraSetting(
+          cameraSettings,
+          cam.cameraId,
+          "faceArchiveCooldownMs",
+          faceArchiveCooldownMs,
+        ),
+        faceArchiveCooldownMs,
+      ),
+    );
+    const camFaceArchiveMaxPerFace = Math.max(
+      5,
+      parseFiniteInt(
+        getCameraSetting(cameraSettings, cam.cameraId, "faceArchiveMaxPerFace", faceArchiveMaxPerFace),
+        faceArchiveMaxPerFace,
+      ),
+    );
     const camPhantomBaselines = phantomBaselinesByCamera.get(cam.cameraId) || [];
     const evictPresenceSessions = (activeNames = null) => {
       for (const [savedName, session] of cam.presenceSessions.entries()) {
@@ -1626,8 +1773,34 @@ async function main() {
         cam.lastDbSentAt.delete(`${cam.cameraId}:${savedName}`);
       }
     };
-    const shouldCreateNewId = (descriptor) =>
-      faceAutoCreate && Array.isArray(descriptor) && descriptor.length > 0;
+    const resetNewIdGate = () => {
+      cam.newIdGateDescriptor = null;
+      cam.newIdGateStreak = 0;
+      cam.newIdGateLastAt = 0;
+    };
+    const confirmNewIdCandidate = (descriptor, faceSide, identityScore) => {
+      if (!faceAutoCreate || !Array.isArray(descriptor) || descriptor.length !== FACE_DESCRIPTOR_LENGTH) {
+        resetNewIdGate();
+        return false;
+      }
+      if (faceSide < camNewIdMinFaceSidePx || identityScore < camNewIdMinScore) {
+        resetNewIdGate();
+        return false;
+      }
+
+      const prevDescriptor = Array.isArray(cam.newIdGateDescriptor) ? cam.newIdGateDescriptor : null;
+      const withinGap = now - (cam.newIdGateLastAt || 0) <= camNewIdMaxGapMs;
+      const stableDistance =
+        prevDescriptor && prevDescriptor.length === descriptor.length
+          ? Number(faceapi.euclideanDistance(descriptor, prevDescriptor))
+          : Number.POSITIVE_INFINITY;
+      const isStable = withinGap && Number.isFinite(stableDistance) && stableDistance <= camNewIdStabilityMaxDistance;
+
+      cam.newIdGateStreak = isStable ? cam.newIdGateStreak + 1 : 1;
+      cam.newIdGateLastAt = now;
+      cam.newIdGateDescriptor = descriptor.slice();
+      return cam.newIdGateStreak >= camNewIdConfirmFrames;
+    };
     const applyIdentityLock = (name, distance) => {
       const safeName = String(name || "").trim();
       const safeDistance = Number(distance) || 0;
@@ -1677,10 +1850,13 @@ async function main() {
           `person_streak=${camPersonMinStreak} match_th=${camMatchThreshold.toFixed(3)} ` +
           `match_margin=${camMatchMinMargin.toFixed(3)} match_face_px=${camMatchMinFaceSidePx} ` +
           `identity_min=${camIdentityMinScore.toFixed(3)} frontal=${camRequireFrontalFace ? "on" : "off"} ` +
+          `new_id_frames=${camNewIdConfirmFrames} new_id_min=${camNewIdMinScore.toFixed(3)} ` +
+          `new_id_side=${camNewIdMinFaceSidePx} new_id_stability=${camNewIdStabilityMaxDistance.toFixed(3)} ` +
           `lock_ms=${camIdentityLockMs} lock_margin=${camIdentityLockSwitchMargin.toFixed(3)} ` +
           `emotion_min=${camEmotionMinConfidence.toFixed(3)} emotion_floor=${camEmotionLowConfidenceFloor.toFixed(3)} ` +
           `db_reentry_ms=${camDbReentryGapMs} session_ms=${camSessionSnapshotIntervalMs} ` +
           `absence_ms=${camSessionAbsenceMs} resolve_ms=${camSessionResolveWaitMs} ` +
+          `archive=${camFaceArchiveEnabled ? "on" : "off"} archive_cd=${camFaceArchiveCooldownMs} ` +
           `phantom=${camPhantomGuardEnabled && camPhantomBaselines.length ? "on" : "off"} ` +
           `phantom_base=${camPhantomBaselines.length} phantom_hash=${camPhantomHashDistanceMax}`,
       );
@@ -1777,6 +1953,36 @@ async function main() {
         minAspect: camFilterMinAspect,
         maxAspect: camFilterMaxAspect,
       });
+      if (sceneLooksEmpty && detections.length) {
+        if (now - cam.lastPhantomLogAt >= camPhantomLogCooldownMs) {
+          cam.lastPhantomLogAt = now;
+          try {
+            const sourceSnapshotUrl = await savePhantomSnapshot(
+              phantomSnapshotDir,
+              phantomSnapshotPublicBase,
+              cam.cameraId,
+              jpg,
+              now,
+            );
+            await writePhantomRejectionLog({
+              cameraId: cam.cameraId,
+              action: "phantom_detection_blocked",
+              reason: "Фантомная детекция заблокирована: кадр совпадает с пустой сценой.",
+              sourceSnapshotUrl,
+              targetSnapshotUrl: String(phantomSceneMatch?.baseline?.publicUrl ?? "").trim(),
+              targetShortId: `baseline:${cam.cameraId}`,
+              distance: Number(phantomSceneMatch?.distance ?? Number.NaN),
+              threshold: camPhantomHashDistanceMax,
+            });
+          } catch (err) {
+            if (now - cam.lastErrLogAt >= 2000) {
+              log(`[${cam.cameraId}] phantom block log error: ${String(err)}`);
+              cam.lastErrLogAt = now;
+            }
+          }
+        }
+        detections = [];
+      }
       cam.candidate = detections.length;
 
       const { maxSide, maxScore } = largestFaceStats(detections);
@@ -1810,6 +2016,9 @@ async function main() {
       if (!isConfirmed) {
         cam.matchedNames = [];
         cam.matchDistance = 0;
+        cam.newIdGateDescriptor = null;
+        cam.newIdGateStreak = 0;
+        cam.newIdGateLastAt = 0;
         if (now - cam.lastConfirmedAt >= camRecognitionHoldMs) {
           cam.people = [];
           cam.emotionSummary = "";
@@ -1923,7 +2132,7 @@ async function main() {
                   Boolean(bestCandidate) &&
                   bestCandidate.distance <= camMatchThreshold &&
                   margin >= camMatchMinMargin;
-                const readyForNewId = shouldCreateNewId(descriptor);
+                const readyForNewId = confirmNewIdCandidate(descriptor, faceSide, identityScore);
 
                 if (sceneLooksEmpty) {
                   if (accepted && !phantomRejectAction) {
@@ -1948,6 +2157,7 @@ async function main() {
                     ).trim();
                   }
                 } else if (accepted) {
+                  resetNewIdGate();
                   name = bestCandidate.label;
                   distance = Number(bestCandidate.distance) || 0;
                   if (!bestDistance || distance < bestDistance) bestDistance = distance;
@@ -1963,6 +2173,7 @@ async function main() {
                       snapshotBase64,
                     );
                     if (identified?.shortId) {
+                      resetNewIdGate();
                       name = identified.shortId;
                       justRegistered = Boolean(identified.created);
                       if (Number.isFinite(identified.distance) && identified.distance > 0) {
@@ -2076,6 +2287,42 @@ async function main() {
             if (now - seenAt > emotionEmaTtlMs) {
               cam.emotionSeenAtByName.delete(savedName);
               cam.emotionEmaByName.delete(savedName);
+            }
+          }
+          if (camFaceArchiveEnabled && people.length) {
+            const seenNames = new Set();
+            for (const person of people) {
+              const personName = String(person?.name ?? "").trim();
+              if (!personName || isUnknownIdentity(personName) || seenNames.has(personName)) continue;
+              seenNames.add(personName);
+              const lastArchivedAt = Number(cam.lastFaceArchiveAtByName.get(personName) ?? 0);
+              if (now - lastArchivedAt < camFaceArchiveCooldownMs) continue;
+              try {
+                const archived = await archiveFaceSnapshot({
+                  archiveDir: faceArchiveDir,
+                  archivePublicBase: faceArchivePublicBase,
+                  faceShortId: personName,
+                  cameraId: cam.cameraId,
+                  jpgBuffer: jpg,
+                  now,
+                  maxPerFace: camFaceArchiveMaxPerFace,
+                });
+                if (archived) {
+                  cam.lastFaceArchiveAtByName.set(personName, now);
+                }
+              } catch (err) {
+                if (now - cam.lastErrLogAt >= 2000) {
+                  log(`[${cam.cameraId}] face archive error: ${String(err)}`);
+                  cam.lastErrLogAt = now;
+                }
+              }
+            }
+            const archiveTtl = Math.max(camFaceArchiveCooldownMs * 10, 60_000);
+            for (const [savedName, savedAt] of cam.lastFaceArchiveAtByName.entries()) {
+              if (seenNames.has(savedName)) continue;
+              if (now - Number(savedAt || 0) > archiveTtl) {
+                cam.lastFaceArchiveAtByName.delete(savedName);
+              }
             }
           }
 

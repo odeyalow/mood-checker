@@ -80,7 +80,7 @@ function getActionTag(action: string, t: (typeof L10N)[AppLocale]) {
   if (normalized === "deleted_duplicate") {
     return { color: "red", label: t.deleted };
   }
-  if (normalized === "phantom_registration_rejected" || normalized === "phantom_recognition_rejected") {
+  if (normalized.startsWith("phantom_")) {
     return { color: "orange", label: t.phantomRejected };
   }
   return { color: "blue", label: t.event };

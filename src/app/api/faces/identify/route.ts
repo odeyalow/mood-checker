@@ -22,10 +22,24 @@ function parseThreshold(raw: unknown) {
 }
 
 function parsePostCheckThreshold(raw: unknown, baseThreshold: number) {
-  const fallback = Math.min(1, baseThreshold + 0.04);
+  const fallback = Math.min(1, Math.max(0.68, baseThreshold + 0.08));
   const value = Number(raw ?? process.env.FACE_IDENTITY_POSTCHECK_THRESHOLD ?? fallback);
   if (!Number.isFinite(value)) return fallback;
   return Math.max(0.2, Math.min(1, value));
+}
+
+function parsePostCheckRelaxedThreshold(raw: unknown, strictThreshold: number) {
+  const fallback = Math.min(1, Math.max(0.78, strictThreshold + 0.12));
+  const value = Number(raw ?? process.env.FACE_IDENTITY_POSTCHECK_RELAXED_THRESHOLD ?? fallback);
+  if (!Number.isFinite(value)) return fallback;
+  return Math.max(0.2, Math.min(1, value));
+}
+
+function parsePostCheckWindowMs(raw: unknown) {
+  const fallback = 30 * 60 * 1000;
+  const value = Number(raw ?? process.env.FACE_IDENTITY_POSTCHECK_WINDOW_MS ?? fallback);
+  if (!Number.isFinite(value)) return fallback;
+  return Math.max(10_000, Math.min(24 * 60 * 60 * 1000, Math.floor(value)));
 }
 
 function parseSnapshotBuffer(raw: unknown): Buffer | null {
@@ -152,6 +166,11 @@ export async function POST(request: Request) {
 
     const threshold = parseThreshold(body?.threshold);
     const postCheckThreshold = parsePostCheckThreshold(body?.postCheckThreshold, threshold);
+    const postCheckRelaxedThreshold = parsePostCheckRelaxedThreshold(
+      body?.postCheckRelaxedThreshold,
+      postCheckThreshold,
+    );
+    const postCheckWindowMs = parsePostCheckWindowMs(body?.postCheckWindowMs);
     const updateAlpha = Number(process.env.FACE_IDENTITY_DESCRIPTOR_ALPHA ?? 0.2);
     const idLength = normalizeFaceIdLength(
       process.env.FACE_IDENTITY_ID_LENGTH ? Number(process.env.FACE_IDENTITY_ID_LENGTH) : 6,
@@ -239,13 +258,25 @@ export async function POST(request: Request) {
       }
     }
 
-    if (
+    const createdAtDeltaMs =
+      duplicateCandidate && duplicateCandidate.createdAt
+        ? Math.abs(created.createdAt.getTime() - duplicateCandidate.createdAt.getTime())
+        : Number.POSITIVE_INFINITY;
+    const mergeByStrict = Boolean(
+      duplicateCandidate && duplicateCandidate.distance <= postCheckThreshold,
+    );
+    const mergeByRelaxed = Boolean(
       duplicateCandidate &&
-      duplicateCandidate.distance <= postCheckThreshold &&
-      duplicateCandidate.createdAt <= created.createdAt
-    ) {
+        createdAtDeltaMs <= postCheckWindowMs &&
+        duplicateCandidate.distance <= postCheckRelaxedThreshold,
+    );
+    const shouldMerge = mergeByStrict || mergeByRelaxed;
+
+    if (duplicateCandidate && shouldMerge && duplicateCandidate.createdAt <= created.createdAt) {
       const targetSnapshotUrl = await getBestIdentitySnapshot(duplicateCandidate.id, duplicateCandidate.shortId);
       const mergedDescriptor = mergeDescriptor(duplicateCandidate.descriptor, descriptor, updateAlpha);
+      const usedThreshold = mergeByStrict ? postCheckThreshold : postCheckRelaxedThreshold;
+      const mergeRule = mergeByStrict ? "strict" : "relaxed";
 
       await prisma.$transaction(async (tx) => {
         await tx.faceIdentity.update({
@@ -274,7 +305,7 @@ export async function POST(request: Request) {
             targetShortId: duplicateCandidate.shortId,
             targetSnapshotUrl: targetSnapshotUrl || null,
             distance: Number(duplicateCandidate.distance.toFixed(6)),
-            threshold: Number(postCheckThreshold.toFixed(6)),
+            threshold: Number(usedThreshold.toFixed(6)),
           },
         });
 
@@ -286,6 +317,7 @@ export async function POST(request: Request) {
         faceIdentityId: duplicateCandidate.id,
         created: false,
         merged: true,
+        mergeRule,
         distance: Number(duplicateCandidate.distance.toFixed(6)),
         descriptor: mergedDescriptor,
       });
