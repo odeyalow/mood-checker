@@ -197,7 +197,7 @@ export async function POST(request: Request) {
         shortId,
         descriptor,
       },
-      select: { id: true, shortId: true, descriptor: true },
+      select: { id: true, shortId: true, descriptor: true, createdAt: true },
     });
 
     let sourceSnapshotUrl = "";
@@ -205,17 +205,47 @@ export async function POST(request: Request) {
       sourceSnapshotUrl = await saveSnapshot(created.shortId, snapshotBuffer).catch(() => "");
     }
 
-    const duplicateCandidate = ranked[0] ?? null;
-    if (duplicateCandidate && duplicateCandidate.distance <= postCheckThreshold) {
-      const targetSnapshotUrl = await getBestIdentitySnapshot(
-        duplicateCandidate.id,
-        duplicateCandidate.shortId,
-      );
-      const mergedDescriptor = mergeDescriptor(
-        duplicateCandidate.descriptor,
-        descriptor,
-        updateAlpha,
-      );
+    const postCheckCandidates = await prisma.faceIdentity.findMany({
+      where: { id: { not: created.id } },
+      select: { id: true, shortId: true, descriptor: true, createdAt: true },
+    });
+
+    let duplicateCandidate:
+      | {
+          id: string;
+          shortId: string;
+          descriptor: number[];
+          createdAt: Date;
+          distance: number;
+        }
+      | null = null;
+    for (const item of postCheckCandidates) {
+      const known = normalizeDescriptor(item.descriptor);
+      if (!known) continue;
+      const distance = descriptorDistance(descriptor, known);
+      if (!Number.isFinite(distance)) continue;
+      if (
+        !duplicateCandidate ||
+        distance < duplicateCandidate.distance ||
+        (distance === duplicateCandidate.distance && item.createdAt < duplicateCandidate.createdAt)
+      ) {
+        duplicateCandidate = {
+          id: item.id,
+          shortId: item.shortId,
+          descriptor: known,
+          createdAt: item.createdAt,
+          distance,
+        };
+      }
+    }
+
+    if (
+      duplicateCandidate &&
+      duplicateCandidate.distance <= postCheckThreshold &&
+      duplicateCandidate.createdAt <= created.createdAt
+    ) {
+      const targetSnapshotUrl = await getBestIdentitySnapshot(duplicateCandidate.id, duplicateCandidate.shortId);
+      const mergedDescriptor = mergeDescriptor(duplicateCandidate.descriptor, descriptor, updateAlpha);
 
       await prisma.$transaction(async (tx) => {
         await tx.faceIdentity.update({
