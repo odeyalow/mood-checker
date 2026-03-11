@@ -191,6 +191,152 @@ function parseEmotionFromExpressions(expressions, keys) {
   };
 }
 
+function isImageFileName(fileName) {
+  return /\.(jpe?g|png)$/i.test(fileName);
+}
+
+function sanitizeFileName(fileName) {
+  return String(fileName || "")
+    .replace(/[^A-Za-z0-9._-]/g, "_")
+    .slice(0, 120);
+}
+
+function computeDHash64FromRgb(rgb, width, height, hashSize = 8) {
+  if (!(rgb instanceof Uint8Array) || width < 2 || height < 2) return null;
+  const size = Math.max(4, Math.min(16, Math.trunc(hashSize)));
+  const cols = size + 1;
+  const rows = size;
+  const gray = new Array(rows * cols);
+
+  for (let y = 0; y < rows; y += 1) {
+    const sy = Math.floor((y * (height - 1)) / Math.max(1, rows - 1));
+    for (let x = 0; x < cols; x += 1) {
+      const sx = Math.floor((x * (width - 1)) / Math.max(1, cols - 1));
+      const idx = (sy * width + sx) * 3;
+      const r = rgb[idx] ?? 0;
+      const g = rgb[idx + 1] ?? 0;
+      const b = rgb[idx + 2] ?? 0;
+      gray[y * cols + x] = Math.floor((r * 30 + g * 59 + b * 11) / 100);
+    }
+  }
+
+  let hash = 0n;
+  for (let y = 0; y < rows; y += 1) {
+    for (let x = 0; x < size; x += 1) {
+      const left = gray[y * cols + x];
+      const right = gray[y * cols + x + 1];
+      hash = (hash << 1n) | (left > right ? 1n : 0n);
+    }
+  }
+  return hash;
+}
+
+function hammingDistance64(left, right) {
+  if (typeof left !== "bigint" || typeof right !== "bigint") return Number.POSITIVE_INFINITY;
+  let value = left ^ right;
+  let bits = 0;
+  while (value > 0n) {
+    bits += Number(value & 1n);
+    value >>= 1n;
+  }
+  return bits;
+}
+
+function findClosestPhantomBaseline(baselines, rgb, width, height) {
+  if (!Array.isArray(baselines) || !baselines.length) return null;
+  const frameHash = computeDHash64FromRgb(rgb, width, height);
+  if (frameHash == null) return null;
+
+  let best = null;
+  for (const baseline of baselines) {
+    const distance = hammingDistance64(frameHash, baseline?.hash);
+    if (!Number.isFinite(distance)) continue;
+    if (!best || distance < best.distance) {
+      best = {
+        distance,
+        baseline,
+      };
+    }
+  }
+  return best;
+}
+
+async function savePhantomSnapshot(snapshotDir, publicBase, cameraId, jpgBuffer, now) {
+  if (!snapshotDir || !publicBase || !(jpgBuffer instanceof Buffer) || !jpgBuffer.length) return "";
+  const safeCameraId = sanitizeFileName(cameraId || "cam");
+  if (!safeCameraId) return "";
+  const dirAbs = path.join(snapshotDir, safeCameraId);
+  await fsp.mkdir(dirAbs, { recursive: true });
+  const fileName = `${now}-${Math.random().toString(36).slice(2, 8)}.jpg`;
+  await fsp.writeFile(path.join(dirAbs, fileName), jpgBuffer);
+  return `${publicBase.replace(/\/+$/, "")}/${safeCameraId}/${fileName}`;
+}
+
+async function loadPhantomBaselines({
+  baselineDir,
+  baselinePublicDir,
+  baselinePublicBase,
+  cameras,
+}) {
+  const out = new Map();
+  for (const camera of cameras) {
+    const cameraId = String(camera?.cameraId ?? "").trim();
+    if (!cameraId) continue;
+    const cameraDir = path.join(baselineDir, cameraId);
+    let entries = [];
+    try {
+      entries = await fsp.readdir(cameraDir, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+
+    const rows = [];
+    for (const entry of entries) {
+      if (!entry?.isFile?.()) continue;
+      if (!isImageFileName(entry.name)) continue;
+      const safeName = sanitizeFileName(entry.name);
+      const sourceFile = path.join(cameraDir, entry.name);
+      try {
+        const fileBuffer = await fsp.readFile(sourceFile);
+        const image = await loadImage(fileBuffer);
+        const width = Number(image.width ?? 0);
+        const height = Number(image.height ?? 0);
+        if (!width || !height) continue;
+
+        const canvas = createCanvas(width, height);
+        const ctx = canvas.getContext("2d");
+        ctx.drawImage(image, 0, 0, width, height);
+        const rgba = ctx.getImageData(0, 0, width, height).data;
+        const rgb = rgbaToRgbTensorData(rgba);
+        const hash = computeDHash64FromRgb(rgb, width, height);
+        if (hash == null) continue;
+
+        let publicUrl = "";
+        if (baselinePublicDir && baselinePublicBase) {
+          const publicCameraDir = path.join(baselinePublicDir, cameraId);
+          await fsp.mkdir(publicCameraDir, { recursive: true });
+          const publicAbs = path.join(publicCameraDir, safeName);
+          await fsp.writeFile(publicAbs, fileBuffer);
+          publicUrl = `${baselinePublicBase.replace(/\/+$/, "")}/${cameraId}/${safeName}`;
+        }
+
+        rows.push({
+          name: safeName,
+          hash,
+          publicUrl,
+        });
+      } catch (err) {
+        log(`[phantom] baseline load failed camera=${cameraId} file=${entry.name} err=${String(err)}`);
+      }
+    }
+
+    if (rows.length) {
+      out.set(cameraId, rows);
+    }
+  }
+  return out;
+}
+
 function createPresenceSession(now) {
   return {
     startedAt: now,
@@ -733,6 +879,7 @@ function createState(cameraId, src) {
     lastMatchLogAt: 0,
     lastEmotionLogAt: 0,
     lastErrLogAt: 0,
+    lastPhantomLogAt: 0,
     lastDbSentAt: new Map(),
     lastSeenMatchedAt: new Map(),
     presenceSessions: new Map(),
@@ -902,9 +1049,32 @@ async function main() {
   const faceIdentifyTimeoutMs = Math.max(500, envInt("WORKER_FACE_IDENTIFY_TIMEOUT_MS", 2000));
   const faceRegistryRefreshMs = Math.max(3000, envInt("WORKER_FACE_REGISTRY_REFRESH_MS", 20000));
   const faceAutoCreate = envBool("WORKER_FACE_AUTO_CREATE", true);
+  const phantomGuardEnabled = envBool("WORKER_PHANTOM_GUARD_ENABLED", true);
+  const phantomBaselineDir =
+    process.env.WORKER_PHANTOM_BASELINE_DIR || path.join(rootDir, "worker", "phantom-baselines");
+  const phantomBaselinePublicDir =
+    process.env.WORKER_PHANTOM_BASELINE_PUBLIC_DIR ||
+    path.join(rootDir, "public", "_phantom-baselines");
+  const phantomBaselinePublicBase = (
+    process.env.WORKER_PHANTOM_BASELINE_PUBLIC_BASE || "/_phantom-baselines"
+  ).replace(/\/+$/, "");
+  const phantomHashDistanceMax = Math.max(0, envInt("WORKER_PHANTOM_HASH_DISTANCE_MAX", 10));
+  const phantomLogEndpoint =
+    (process.env.WORKER_PHANTOM_LOG_ENDPOINT || "http://127.0.0.1:3000/api/faces/dedup-logs").trim();
+  const phantomLogTimeoutMs = Math.max(400, envInt("WORKER_PHANTOM_LOG_TIMEOUT_MS", 1200));
+  const phantomLogCooldownMs = Math.max(1000, envInt("WORKER_PHANTOM_LOG_COOLDOWN_MS", 9000));
+  const phantomSnapshotDir =
+    process.env.WORKER_PHANTOM_SNAPSHOT_DIR || path.join(rootDir, "public", "_phantom-rejects");
+  const phantomSnapshotPublicBase = (
+    process.env.WORKER_PHANTOM_SNAPSHOT_PUBLIC_BASE || "/_phantom-rejects"
+  ).replace(/\/+$/, "");
 
   if (saveSnapshots) {
     await fsp.mkdir(snapshotDir, { recursive: true }).catch(() => {});
+  }
+  if (phantomGuardEnabled) {
+    await fsp.mkdir(phantomSnapshotDir, { recursive: true }).catch(() => {});
+    await fsp.mkdir(phantomBaselinePublicDir, { recursive: true }).catch(() => {});
   }
 
   const modelDir = path.join(rootDir, "public", "models");
@@ -931,6 +1101,14 @@ async function main() {
     scoreThreshold: tinyScoreThreshold,
   });
   const ssdOptions = new faceapi.SsdMobilenetv1Options({ minConfidence: ssdMinConfidence });
+  const phantomBaselinesByCamera = phantomGuardEnabled
+    ? await loadPhantomBaselines({
+        baselineDir: phantomBaselineDir,
+        baselinePublicDir: phantomBaselinePublicDir,
+        baselinePublicBase: phantomBaselinePublicBase,
+        cameras,
+      })
+    : new Map();
 
   const reloadFaceRegistry = async (reason) => {
     const loadedAt = Date.now();
@@ -995,6 +1173,41 @@ async function main() {
       return null;
     }
   };
+  let lastPhantomErrLogAt = 0;
+  const writePhantomRejectionLog = async ({
+    cameraId,
+    action,
+    reason,
+    sourceSnapshotUrl = "",
+    targetSnapshotUrl = "",
+    targetShortId = "",
+    distance = Number.NaN,
+    threshold = Number.NaN,
+  }) => {
+    if (!phantomLogEndpoint || !reason) return;
+    try {
+      await postJsonWithTimeout(
+        phantomLogEndpoint,
+        {
+          action,
+          reason,
+          sourceShortId: cameraId || null,
+          targetShortId: targetShortId || null,
+          sourceSnapshotUrl: sourceSnapshotUrl || null,
+          targetSnapshotUrl: targetSnapshotUrl || null,
+          distance: Number.isFinite(distance) ? Number(distance.toFixed(6)) : null,
+          threshold: Number.isFinite(threshold) ? Number(threshold.toFixed(6)) : null,
+        },
+        phantomLogTimeoutMs,
+      );
+    } catch (err) {
+      const now = Date.now();
+      if (now - lastPhantomErrLogAt >= 3000) {
+        log(`[phantom] log write failed err=${String(err)}`);
+        lastPhantomErrLogAt = now;
+      }
+    }
+  };
 
   if (enableMatching) {
     await faceapi.nets.faceLandmark68TinyNet.loadFromDisk(modelDir);
@@ -1025,6 +1238,17 @@ async function main() {
     state.workerZoom = clampWorkerZoom(workerZoomDefaults[c.cameraId] ?? 1, 1);
     return state;
   });
+  if (phantomGuardEnabled) {
+    const baselineSummary = states
+      .map((cam) => `${cam.cameraId}:${(phantomBaselinesByCamera.get(cam.cameraId) || []).length}`)
+      .join(", ");
+    log(
+      `phantom_guard=on hash_max=${phantomHashDistanceMax} cooldown_ms=${phantomLogCooldownMs} ` +
+        `baselines=[${baselineSummary || "none"}]`,
+    );
+  } else {
+    log("phantom_guard=off");
+  }
   log(`started cameras=${states.length} frame_api=${frameApiBase}`);
   log(
     `pipeline parallel_cameras=${parallelCameraLimit} db_queue_max=${dbQueueMaxSize} ` +
@@ -1363,6 +1587,36 @@ async function main() {
         sessionMinEmotionSamples,
       ),
     );
+    const camPhantomGuardEnabledRaw = getCameraSetting(
+      cameraSettings,
+      cam.cameraId,
+      "phantomGuardEnabled",
+      phantomGuardEnabled,
+    );
+    const camPhantomGuardEnabled =
+      typeof camPhantomGuardEnabledRaw === "boolean"
+        ? camPhantomGuardEnabledRaw
+        : phantomGuardEnabled;
+    const camPhantomHashDistanceMax = Math.max(
+      0,
+      parseFiniteInt(
+        getCameraSetting(
+          cameraSettings,
+          cam.cameraId,
+          "phantomHashDistanceMax",
+          phantomHashDistanceMax,
+        ),
+        phantomHashDistanceMax,
+      ),
+    );
+    const camPhantomLogCooldownMs = Math.max(
+      1000,
+      parseFiniteInt(
+        getCameraSetting(cameraSettings, cam.cameraId, "phantomLogCooldownMs", phantomLogCooldownMs),
+        phantomLogCooldownMs,
+      ),
+    );
+    const camPhantomBaselines = phantomBaselinesByCamera.get(cam.cameraId) || [];
     const evictPresenceSessions = (activeNames = null) => {
       for (const [savedName, session] of cam.presenceSessions.entries()) {
         if (activeNames && activeNames.has(savedName)) continue;
@@ -1426,7 +1680,9 @@ async function main() {
           `lock_ms=${camIdentityLockMs} lock_margin=${camIdentityLockSwitchMargin.toFixed(3)} ` +
           `emotion_min=${camEmotionMinConfidence.toFixed(3)} emotion_floor=${camEmotionLowConfidenceFloor.toFixed(3)} ` +
           `db_reentry_ms=${camDbReentryGapMs} session_ms=${camSessionSnapshotIntervalMs} ` +
-          `absence_ms=${camSessionAbsenceMs} resolve_ms=${camSessionResolveWaitMs}`,
+          `absence_ms=${camSessionAbsenceMs} resolve_ms=${camSessionResolveWaitMs} ` +
+          `phantom=${camPhantomGuardEnabled && camPhantomBaselines.length ? "on" : "off"} ` +
+          `phantom_base=${camPhantomBaselines.length} phantom_hash=${camPhantomHashDistanceMax}`,
       );
     }
 
@@ -1486,6 +1742,13 @@ async function main() {
       );
       const rgba = ctx.getImageData(0, 0, workerWidth, workerHeight).data;
       const rgb = rgbaToRgbTensorData(rgba);
+      const phantomSceneMatch =
+        camPhantomGuardEnabled && camPhantomBaselines.length
+          ? findClosestPhantomBaseline(camPhantomBaselines, rgb, workerWidth, workerHeight)
+          : null;
+      const sceneLooksEmpty =
+        Boolean(phantomSceneMatch) &&
+        Number(phantomSceneMatch.distance) <= camPhantomHashDistanceMax;
       const frameTensor = faceapi.tf.tensor3d(rgb, [workerHeight, workerWidth, 3], "int32");
 
       let detections = [];
@@ -1625,6 +1888,12 @@ async function main() {
           const people = [];
           const descriptorByName = new Map();
           let bestDistance = 0;
+          let phantomRejectAction = "";
+          let phantomRejectReason = "";
+          let phantomRejectDistance = Number.NaN;
+          let phantomRejectThreshold = Number.NaN;
+          let phantomRejectTargetShortId = "";
+          let phantomRejectTargetSnapshotUrl = "";
           for (const det of results) {
             let name = "unknown";
             let distance = 0;
@@ -1654,8 +1923,31 @@ async function main() {
                   Boolean(bestCandidate) &&
                   bestCandidate.distance <= camMatchThreshold &&
                   margin >= camMatchMinMargin;
+                const readyForNewId = shouldCreateNewId(descriptor);
 
-                if (accepted) {
+                if (sceneLooksEmpty) {
+                  if (accepted && !phantomRejectAction) {
+                    phantomRejectAction = "phantom_recognition_rejected";
+                    phantomRejectReason =
+                      "Фантомное распознавание отклонено: кадр совпадает с пустой сценой.";
+                    phantomRejectDistance = Number(bestCandidate?.distance ?? Number.NaN);
+                    phantomRejectThreshold = camMatchThreshold;
+                    phantomRejectTargetShortId = String(bestCandidate?.label ?? "").trim();
+                    phantomRejectTargetSnapshotUrl = String(
+                      phantomSceneMatch?.baseline?.publicUrl ?? "",
+                    ).trim();
+                  } else if (readyForNewId && !phantomRejectAction) {
+                    phantomRejectAction = "phantom_registration_rejected";
+                    phantomRejectReason =
+                      "Фантомная регистрация отклонена: кадр совпадает с пустой сценой.";
+                    phantomRejectDistance = Number(bestCandidate?.distance ?? Number.NaN);
+                    phantomRejectThreshold = camMatchThreshold;
+                    phantomRejectTargetShortId = `baseline:${cam.cameraId}`;
+                    phantomRejectTargetSnapshotUrl = String(
+                      phantomSceneMatch?.baseline?.publicUrl ?? "",
+                    ).trim();
+                  }
+                } else if (accepted) {
                   name = bestCandidate.label;
                   distance = Number(bestCandidate.distance) || 0;
                   if (!bestDistance || distance < bestDistance) bestDistance = distance;
@@ -1664,24 +1956,21 @@ async function main() {
                   if (lockActive) {
                     name = cam.identityLockName;
                     distance = Number(cam.identityLockDistance) || 0;
-                  } else {
-                    const readyForNewId = shouldCreateNewId(descriptor);
-                    if (readyForNewId) {
-                      const identified = await identifyFaceDescriptor(
-                        descriptor,
-                        camMatchThreshold,
-                        snapshotBase64,
-                      );
-                      if (identified?.shortId) {
-                        name = identified.shortId;
-                        justRegistered = Boolean(identified.created);
-                        if (Number.isFinite(identified.distance) && identified.distance > 0) {
-                          distance = Number(identified.distance) || 0;
-                          if (!bestDistance || distance < bestDistance) bestDistance = distance;
-                        }
-                        if (justRegistered) {
-                          log(`[${cam.cameraId}] new_id created shortId=${name}`);
-                        }
+                  } else if (readyForNewId) {
+                    const identified = await identifyFaceDescriptor(
+                      descriptor,
+                      camMatchThreshold,
+                      snapshotBase64,
+                    );
+                    if (identified?.shortId) {
+                      name = identified.shortId;
+                      justRegistered = Boolean(identified.created);
+                      if (Number.isFinite(identified.distance) && identified.distance > 0) {
+                        distance = Number(identified.distance) || 0;
+                        if (!bestDistance || distance < bestDistance) bestDistance = distance;
+                      }
+                      if (justRegistered) {
+                        log(`[${cam.cameraId}] new_id created shortId=${name}`);
                       }
                     }
                   }
@@ -1743,6 +2032,43 @@ async function main() {
                 distance: Number(distance.toFixed(3)),
                 justRegistered,
               });
+            }
+          }
+
+          if (
+            sceneLooksEmpty &&
+            phantomRejectAction &&
+            now - cam.lastPhantomLogAt >= camPhantomLogCooldownMs
+          ) {
+            cam.lastPhantomLogAt = now;
+            try {
+              const sourceSnapshotUrl = await savePhantomSnapshot(
+                phantomSnapshotDir,
+                phantomSnapshotPublicBase,
+                cam.cameraId,
+                jpg,
+                now,
+              );
+              await writePhantomRejectionLog({
+                cameraId: cam.cameraId,
+                action: phantomRejectAction,
+                reason: phantomRejectReason,
+                sourceSnapshotUrl,
+                targetSnapshotUrl: phantomRejectTargetSnapshotUrl,
+                targetShortId: phantomRejectTargetShortId,
+                distance: phantomRejectDistance,
+                threshold: phantomRejectThreshold,
+              });
+              log(
+                `[${cam.cameraId}] phantom_rejected action=${phantomRejectAction} ` +
+                  `hash_distance=${Number(phantomSceneMatch?.distance ?? 0)} ` +
+                  `hash_threshold=${camPhantomHashDistanceMax}`,
+              );
+            } catch (err) {
+              if (now - cam.lastErrLogAt >= 2000) {
+                log(`[${cam.cameraId}] phantom log error: ${String(err)}`);
+                cam.lastErrLogAt = now;
+              }
             }
           }
 

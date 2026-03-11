@@ -15,6 +15,8 @@ const L10N = {
     title: "Детали матчинга",
     back: "Назад к журналу",
     deleted: "Удалено",
+    phantomRejected: "Фантом отклонен",
+    event: "Событие",
     reason: "Причина",
     from: "Фото при регистрации",
     to: "Фото существующего лица",
@@ -29,6 +31,8 @@ const L10N = {
     title: "Матчинг деректері",
     back: "Журналға қайту",
     deleted: "Жойылды",
+    phantomRejected: "Фантом қабылданбады",
+    event: "Оқиға",
     reason: "Себеп",
     from: "Тіркеу кезіндегі фото",
     to: "Базадағы бар фото",
@@ -43,6 +47,8 @@ const L10N = {
     title: "Matching Details",
     back: "Back to journal",
     deleted: "Deleted",
+    phantomRejected: "Phantom Rejected",
+    event: "Event",
     reason: "Reason",
     from: "Photo at registration",
     to: "Existing face photo",
@@ -81,6 +87,17 @@ function formatDateTime(value: string, locale: AppLocale) {
   });
 }
 
+function getActionTag(action: string, t: (typeof L10N)[AppLocale]) {
+  const normalized = String(action || "").trim().toLowerCase();
+  if (normalized === "deleted_duplicate") {
+    return { color: "red", label: t.deleted };
+  }
+  if (normalized === "phantom_registration_rejected" || normalized === "phantom_recognition_rejected") {
+    return { color: "orange", label: t.phantomRejected };
+  }
+  return { color: "blue", label: t.event };
+}
+
 function SnapshotCard({
   title,
   url,
@@ -117,6 +134,7 @@ export default function FaceDedupJournalDetailsPage({
   const t = L10N[safeLocale];
 
   const [item, setItem] = useState<DedupLogItem | null>(null);
+  const actionTag = item ? getActionTag(item.action, t) : null;
 
   useEffect(() => {
     let mounted = true;
@@ -151,14 +169,18 @@ export default function FaceDedupJournalDetailsPage({
           <Card>
             <Space direction="vertical" size={8} style={{ width: "100%" }}>
               <Space wrap>
-                <Tag color="red">{t.deleted}</Tag>
+                <Tag color={actionTag?.color}>{actionTag?.label}</Tag>
                 <Text type="secondary">{formatDateTime(item.createdAt, safeLocale)}</Text>
               </Space>
               <Text>{`${t.reason}: ${item.reason}`}</Text>
               <Text>{`${t.sourceId}: ${item.sourceShortId || "-"}`}</Text>
               <Text>{`${t.targetId}: ${item.targetShortId || "-"}`}</Text>
-              <Text type="secondary">{`${t.distance}: ${Number(item.distance ?? 0).toFixed(6)}`}</Text>
-              <Text type="secondary">{`${t.threshold}: ${Number(item.threshold ?? 0).toFixed(6)}`}</Text>
+              {item.distance != null ? (
+                <Text type="secondary">{`${t.distance}: ${Number(item.distance).toFixed(6)}`}</Text>
+              ) : null}
+              {item.threshold != null ? (
+                <Text type="secondary">{`${t.threshold}: ${Number(item.threshold).toFixed(6)}`}</Text>
+              ) : null}
             </Space>
           </Card>
         )}

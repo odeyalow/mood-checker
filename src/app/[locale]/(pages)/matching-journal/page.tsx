@@ -12,10 +12,12 @@ type AppLocale = "ru" | "kz" | "en";
 const L10N = {
   ru: {
     title: "Журнал матчинга",
-    subtitle: "События дедупликации и удаления дублей",
+    subtitle: "События дедупликации и отклонения фантомов",
     noData: "Событий пока нет",
     open: "Открыть",
     deleted: "Удалено",
+    phantomRejected: "Фантом отклонен",
+    event: "Событие",
     from: "Новое лицо",
     to: "Совпало с",
     distance: "Дистанция",
@@ -23,10 +25,12 @@ const L10N = {
   },
   kz: {
     title: "Матчинг журналы",
-    subtitle: "Дубликаттарды жою және сәйкестік оқиғалары",
+    subtitle: "Дубликаттарды жою және фантомды қабылдамау оқиғалары",
     noData: "Оқиғалар әлі жоқ",
     open: "Ашу",
     deleted: "Жойылды",
+    phantomRejected: "Фантом қабылданбады",
+    event: "Оқиға",
     from: "Жаңа тұлға",
     to: "Сәйкес келген",
     distance: "Қашықтық",
@@ -34,10 +38,12 @@ const L10N = {
   },
   en: {
     title: "Matching Journal",
-    subtitle: "Deduplication and duplicate removal events",
+    subtitle: "Deduplication and phantom rejection events",
     noData: "No events yet",
     open: "Open",
     deleted: "Deleted",
+    phantomRejected: "Phantom Rejected",
+    event: "Event",
     from: "New face",
     to: "Matched with",
     distance: "Distance",
@@ -67,6 +73,17 @@ function formatDateTime(value: string, locale: AppLocale) {
     hour: "2-digit",
     minute: "2-digit",
   });
+}
+
+function getActionTag(action: string, t: (typeof L10N)[AppLocale]) {
+  const normalized = String(action || "").trim().toLowerCase();
+  if (normalized === "deleted_duplicate") {
+    return { color: "red", label: t.deleted };
+  }
+  if (normalized === "phantom_registration_rejected" || normalized === "phantom_recognition_rejected") {
+    return { color: "orange", label: t.phantomRejected };
+  }
+  return { color: "blue", label: t.event };
 }
 
 export default function FaceDedupJournalPage({
@@ -114,7 +131,9 @@ export default function FaceDedupJournalPage({
             <List
               itemLayout="vertical"
               dataSource={items}
-              renderItem={(item) => (
+              renderItem={(item) => {
+                const tag = getActionTag(item.action, t);
+                return (
                 <List.Item
                   key={item.id}
                   actions={[
@@ -125,17 +144,22 @@ export default function FaceDedupJournalPage({
                 >
                   <Space direction="vertical" size={6} style={{ width: "100%" }}>
                     <Space wrap>
-                      <Tag color="red">{t.deleted}</Tag>
+                      <Tag color={tag.color}>{tag.label}</Tag>
                       <Text type="secondary">{formatDateTime(item.createdAt, safeLocale)}</Text>
                     </Space>
                     <Text>{item.reason}</Text>
                     <Text>{`${t.from}: ${item.sourceShortId || "-"}`}</Text>
                     <Text>{`${t.to}: ${item.targetShortId || "-"}`}</Text>
-                    <Text type="secondary">{`${t.distance}: ${Number(item.distance ?? 0).toFixed(4)}`}</Text>
-                    <Text type="secondary">{`${t.threshold}: ${Number(item.threshold ?? 0).toFixed(4)}`}</Text>
+                    {item.distance != null ? (
+                      <Text type="secondary">{`${t.distance}: ${Number(item.distance).toFixed(4)}`}</Text>
+                    ) : null}
+                    {item.threshold != null ? (
+                      <Text type="secondary">{`${t.threshold}: ${Number(item.threshold).toFixed(4)}`}</Text>
+                    ) : null}
                   </Space>
                 </List.Item>
-              )}
+                );
+              }}
             />
           )}
         </Space>
