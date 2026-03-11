@@ -22,6 +22,7 @@ const L10N = {
     deleteSuccess: "\u041b\u0438\u0446\u043e \u0443\u0434\u0430\u043b\u0435\u043d\u043e",
     deleteError: "\u041d\u0435 \u0443\u0434\u0430\u043b\u043e\u0441\u044c \u0443\u0434\u0430\u043b\u0438\u0442\u044c",
     loadError: "\u041e\u0448\u0438\u0431\u043a\u0430 \u0437\u0430\u0433\u0440\u0443\u0437\u043a\u0438",
+    dedupJournal: "\u0416\u0443\u0440\u043d\u0430\u043b \u043c\u0430\u0442\u0447\u0438\u043d\u0433\u0430",
   },
   kz: {
     title: "\u0422\u04b1\u043b\u0493\u0430\u043b\u0430\u0440",
@@ -35,6 +36,7 @@ const L10N = {
     deleteSuccess: "\u0422\u04b1\u043b\u0493\u0430 \u0436\u043e\u0439\u044b\u043b\u0434\u044b",
     deleteError: "\u0416\u043e\u044e \u0441\u04d9\u0442\u0441\u0456\u0437 \u0430\u044f\u049b\u0442\u0430\u043b\u0434\u044b",
     loadError: "\u0416\u04af\u043a\u0442\u0435\u0443 \u049b\u0430\u0442\u0435\u0441\u0456",
+    dedupJournal: "\u041c\u0430\u0442\u0447\u0438\u043d\u0433 \u0436\u0443\u0440\u043d\u0430\u043b\u044b",
   },
   en: {
     title: "Faces",
@@ -48,6 +50,7 @@ const L10N = {
     deleteSuccess: "Face deleted",
     deleteError: "Delete failed",
     loadError: "Load error",
+    dedupJournal: "Matching Journal",
   },
 } as const;
 
@@ -135,7 +138,12 @@ export default function FacesPage({
             <Title level={4} style={{ marginBottom: 4 }}>
               {t.subtitle}
             </Title>
-            {loadError ? <Text type="danger">{loadError}</Text> : null}
+            <Space size={12} wrap>
+              {loadError ? <Text type="danger">{loadError}</Text> : null}
+              <Link href={`/${safeLocale}/faces/dedup`}>
+                <Button size="small">{t.dedupJournal}</Button>
+              </Link>
+            </Space>
           </div>
 
           {!items.length ? (

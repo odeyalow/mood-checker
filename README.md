@@ -80,6 +80,14 @@ Optional identity env (app process):
 - `FACE_IDENTITY_POSTCHECK_THRESHOLD=0.60` (optional, background duplicate cleanup threshold)
 - `FACE_IDENTITY_DESCRIPTOR_ALPHA=0.2`
 
+Worker anti-phantom auto-create (optional, `.env.worker`):
+- `WORKER_NEW_ID_MIN_SCORE=0.18`
+- `WORKER_NEW_ID_MIN_FACE_SIDE_PX=34`
+- `WORKER_NEW_ID_MIN_STREAK=2`
+- `WORKER_NEW_ID_CONFIRM_SAMPLES=2`
+- `WORKER_NEW_ID_SAMPLE_WINDOW_MS=1800`
+- `WORKER_NEW_ID_COOLDOWN_MS=2200`
+
 Face registry maintenance:
 - `npm run faces:clear` - remove all registered faces and related snapshots/records.
 - `npm run faces:delete -- <SHORT_ID>` - remove one registered face by short ID.
