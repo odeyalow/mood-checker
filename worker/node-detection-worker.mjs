@@ -71,17 +71,6 @@ function descriptorToArray(value) {
   return normalizeDescriptor(raw);
 }
 
-function descriptorSignature(descriptor, length = 24, precision = 100) {
-  const safe = normalizeDescriptor(descriptor);
-  if (!safe) return "";
-  const cap = Math.max(8, Math.min(FACE_DESCRIPTOR_LENGTH, Math.trunc(length)));
-  const scale = Math.max(1, Math.trunc(precision));
-  return safe
-    .slice(0, cap)
-    .map((v) => Math.round(v * scale))
-    .join(",");
-}
-
 function isUnknownIdentity(name) {
   const normalized = String(name ?? "").trim().toLowerCase();
   if (!normalized) return true;
@@ -750,10 +739,6 @@ function createState(cameraId, src) {
     identityLockName: "",
     identityLockDistance: 0,
     identityLockUntil: 0,
-    pendingNewIdSignature: "",
-    pendingNewIdCount: 0,
-    pendingNewIdSeenAt: 0,
-    lastAutoCreateAt: 0,
   };
 }
 
@@ -833,21 +818,6 @@ async function main() {
     0,
     envFloat("WORKER_IDENTITY_LOCK_SWITCH_MARGIN", 0.02),
   );
-  const newIdMinScore = Math.max(
-    0,
-    Math.min(1, envFloat("WORKER_NEW_ID_MIN_SCORE", Math.max(identityMinScore, 0.24))),
-  );
-  const newIdMinFaceSidePx = Math.max(
-    0,
-    envInt("WORKER_NEW_ID_MIN_FACE_SIDE_PX", Math.max(matchMinFaceSidePx, 52)),
-  );
-  const newIdMinStreak = Math.max(
-    1,
-    envInt("WORKER_NEW_ID_MIN_STREAK", Math.max(3, personMinStreak)),
-  );
-  const newIdConfirmSamples = Math.max(1, envInt("WORKER_NEW_ID_CONFIRM_SAMPLES", 3));
-  const newIdSampleWindowMs = Math.max(300, envInt("WORKER_NEW_ID_SAMPLE_WINDOW_MS", 2200));
-  const newIdCooldownMs = Math.max(0, envInt("WORKER_NEW_ID_COOLDOWN_MS", 2600));
   const requireFrontalFace = envBool("WORKER_REQUIRE_FRONTAL_FACE", true);
   const frontalMinEyeDistanceRatio = Math.max(
     0.05,
@@ -992,7 +962,6 @@ async function main() {
     descriptor,
     threshold,
     snapshotBase64 = "",
-    meta = null,
   ) => {
     if (!faceIdentifyEndpoint || !faceAutoCreate) return null;
     const safeDescriptor = normalizeDescriptor(descriptor);
@@ -1002,10 +971,6 @@ async function main() {
         descriptor: safeDescriptor,
         threshold,
         snapshotBase64: typeof snapshotBase64 === "string" ? snapshotBase64 : "",
-        faceScore: Number(meta?.faceScore ?? 0),
-        faceSidePx: Number(meta?.faceSidePx ?? 0),
-        isFrontalFace: Boolean(meta?.isFrontalFace),
-        streak: Number(meta?.streak ?? 0),
       };
       const payload = await postJsonExpectJsonWithTimeout(
         faceIdentifyEndpoint,
@@ -1037,9 +1002,7 @@ async function main() {
     await reloadFaceRegistry("startup");
     log(
       `matching=on known=${knownLabeledDescriptors.length} threshold=${matchThreshold} ` +
-        `min_margin=${matchMinMargin} min_face_px=${matchMinFaceSidePx} auto_create=${faceAutoCreate ? "on" : "off"} ` +
-        `new_id_min=${newIdMinScore.toFixed(3)} new_id_face_px=${newIdMinFaceSidePx} ` +
-        `new_id_streak=${newIdMinStreak} new_id_samples=${newIdConfirmSamples}`,
+        `min_margin=${matchMinMargin} min_face_px=${matchMinFaceSidePx} auto_create=${faceAutoCreate ? "on" : "off"}`,
     );
   } else {
     log("matching=off reason=env_disabled");
@@ -1234,51 +1197,6 @@ async function main() {
         identityLockSwitchMargin,
       ),
     );
-    const camNewIdMinScore = Math.max(
-      0,
-      Math.min(
-        1,
-        parseFiniteFloat(
-          getCameraSetting(cameraSettings, cam.cameraId, "newIdMinScore", newIdMinScore),
-          newIdMinScore,
-        ),
-      ),
-    );
-    const camNewIdMinFaceSidePx = Math.max(
-      0,
-      parseFiniteInt(
-        getCameraSetting(cameraSettings, cam.cameraId, "newIdMinFaceSidePx", newIdMinFaceSidePx),
-        newIdMinFaceSidePx,
-      ),
-    );
-    const camNewIdMinStreak = Math.max(
-      1,
-      parseFiniteInt(
-        getCameraSetting(cameraSettings, cam.cameraId, "newIdMinStreak", newIdMinStreak),
-        newIdMinStreak,
-      ),
-    );
-    const camNewIdConfirmSamples = Math.max(
-      1,
-      parseFiniteInt(
-        getCameraSetting(cameraSettings, cam.cameraId, "newIdConfirmSamples", newIdConfirmSamples),
-        newIdConfirmSamples,
-      ),
-    );
-    const camNewIdSampleWindowMs = Math.max(
-      300,
-      parseFiniteInt(
-        getCameraSetting(cameraSettings, cam.cameraId, "newIdSampleWindowMs", newIdSampleWindowMs),
-        newIdSampleWindowMs,
-      ),
-    );
-    const camNewIdCooldownMs = Math.max(
-      0,
-      parseFiniteInt(
-        getCameraSetting(cameraSettings, cam.cameraId, "newIdCooldownMs", newIdCooldownMs),
-        newIdCooldownMs,
-      ),
-    );
     const camRequireFrontalFaceRaw = getCameraSetting(
       cameraSettings,
       cam.cameraId,
@@ -1454,45 +1372,8 @@ async function main() {
         cam.lastDbSentAt.delete(`${cam.cameraId}:${savedName}`);
       }
     };
-    const resetPendingNewId = () => {
-      cam.pendingNewIdSignature = "";
-      cam.pendingNewIdCount = 0;
-      cam.pendingNewIdSeenAt = 0;
-    };
-    const shouldCreateNewId = ({
-      descriptor,
-      faceSide,
-      identityScore,
-      isFrontalFace,
-    }) => {
-      if (!faceAutoCreate) return false;
-      if (!Array.isArray(descriptor) || descriptor.length === 0) return false;
-      if (faceSide < camNewIdMinFaceSidePx) return false;
-      if (identityScore < camNewIdMinScore) return false;
-      if (!isFrontalFace) return false;
-      if (cam.streak < camNewIdMinStreak) return false;
-      if (camNewIdCooldownMs > 0 && now - cam.lastAutoCreateAt < camNewIdCooldownMs) return false;
-
-      const signature = descriptorSignature(descriptor);
-      if (!signature) return false;
-
-      const isExpired =
-        !cam.pendingNewIdSeenAt || now - cam.pendingNewIdSeenAt > camNewIdSampleWindowMs;
-      if (isExpired || cam.pendingNewIdSignature !== signature) {
-        cam.pendingNewIdSignature = signature;
-        cam.pendingNewIdCount = 1;
-        cam.pendingNewIdSeenAt = now;
-        return camNewIdConfirmSamples <= 1;
-      }
-
-      cam.pendingNewIdCount += 1;
-      cam.pendingNewIdSeenAt = now;
-      if (cam.pendingNewIdCount < camNewIdConfirmSamples) return false;
-
-      resetPendingNewId();
-      cam.lastAutoCreateAt = now;
-      return true;
-    };
+    const shouldCreateNewId = (descriptor) =>
+      faceAutoCreate && Array.isArray(descriptor) && descriptor.length > 0;
     const applyIdentityLock = (name, distance) => {
       const safeName = String(name || "").trim();
       const safeDistance = Number(distance) || 0;
@@ -1542,8 +1423,6 @@ async function main() {
           `person_streak=${camPersonMinStreak} match_th=${camMatchThreshold.toFixed(3)} ` +
           `match_margin=${camMatchMinMargin.toFixed(3)} match_face_px=${camMatchMinFaceSidePx} ` +
           `identity_min=${camIdentityMinScore.toFixed(3)} frontal=${camRequireFrontalFace ? "on" : "off"} ` +
-          `new_id_min=${camNewIdMinScore.toFixed(3)} new_id_face_px=${camNewIdMinFaceSidePx} ` +
-          `new_id_streak=${camNewIdMinStreak} new_id_samples=${camNewIdConfirmSamples} ` +
           `lock_ms=${camIdentityLockMs} lock_margin=${camIdentityLockSwitchMargin.toFixed(3)} ` +
           `emotion_min=${camEmotionMinConfidence.toFixed(3)} emotion_floor=${camEmotionLowConfidenceFloor.toFixed(3)} ` +
           `db_reentry_ms=${camDbReentryGapMs} session_ms=${camSessionSnapshotIntervalMs} ` +
@@ -1777,34 +1656,21 @@ async function main() {
                   margin >= camMatchMinMargin;
 
                 if (accepted) {
-                  resetPendingNewId();
                   name = bestCandidate.label;
                   distance = Number(bestCandidate.distance) || 0;
                   if (!bestDistance || distance < bestDistance) bestDistance = distance;
                 } else if (faceAutoCreate) {
                   const lockActive = cam.identityLockName && now < cam.identityLockUntil;
                   if (lockActive) {
-                    resetPendingNewId();
                     name = cam.identityLockName;
                     distance = Number(cam.identityLockDistance) || 0;
                   } else {
-                    const readyForNewId = shouldCreateNewId({
-                      descriptor,
-                      faceSide,
-                      identityScore,
-                      isFrontalFace,
-                    });
+                    const readyForNewId = shouldCreateNewId(descriptor);
                     if (readyForNewId) {
                       const identified = await identifyFaceDescriptor(
                         descriptor,
                         camMatchThreshold,
                         snapshotBase64,
-                        {
-                          faceScore: identityScore,
-                          faceSidePx: faceSide,
-                          isFrontalFace,
-                          streak: cam.streak,
-                        },
                       );
                       if (identified?.shortId) {
                         name = identified.shortId;
@@ -1823,7 +1689,6 @@ async function main() {
               }
             }
             if (!isUnknownIdentity(name)) {
-              resetPendingNewId();
               const lock = applyIdentityLock(name, distance);
               if (lock.overridden) {
                 justRegistered = false;

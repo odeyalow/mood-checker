@@ -28,53 +28,6 @@ function parsePostCheckThreshold(raw: unknown, baseThreshold: number) {
   return Math.max(0.2, Math.min(1, value));
 }
 
-function parseCreateMinScore(raw: unknown) {
-  const value = Number(raw ?? process.env.FACE_IDENTITY_CREATE_MIN_SCORE ?? 0.24);
-  if (!Number.isFinite(value)) return 0.24;
-  return Math.max(0.05, Math.min(1, value));
-}
-
-function parseCreateMinFaceSidePx(raw: unknown) {
-  const value = Number(raw ?? process.env.FACE_IDENTITY_CREATE_MIN_FACE_SIDE_PX ?? 52);
-  if (!Number.isFinite(value)) return 52;
-  return Math.max(8, Math.round(value));
-}
-
-function parseCreateMinStreak(raw: unknown) {
-  const value = Number(raw ?? process.env.FACE_IDENTITY_CREATE_MIN_STREAK ?? 3);
-  if (!Number.isFinite(value)) return 3;
-  return Math.max(1, Math.round(value));
-}
-
-function parseCreateRequireFrontal(raw: unknown) {
-  const source = raw ?? process.env.FACE_IDENTITY_CREATE_REQUIRE_FRONTAL ?? "true";
-  const normalized = String(source).trim().toLowerCase();
-  if (!normalized) return true;
-  return ["1", "true", "yes", "on"].includes(normalized);
-}
-
-function parseFaceCreateContext(body: Record<string, unknown>) {
-  const scoreRaw = Number(body?.faceScore);
-  const faceSideRaw = Number(body?.faceSidePx);
-  const streakRaw = Number(body?.streak);
-  const score = Number.isFinite(scoreRaw) ? scoreRaw : 0;
-  const faceSidePx = Number.isFinite(faceSideRaw) ? faceSideRaw : 0;
-  const streak = Number.isFinite(streakRaw) ? streakRaw : 0;
-
-  const frontalRaw = body?.isFrontalFace;
-  const isFrontalFace =
-    typeof frontalRaw === "boolean"
-      ? frontalRaw
-      : ["1", "true", "yes", "on"].includes(String(frontalRaw ?? "").trim().toLowerCase());
-
-  return {
-    score,
-    faceSidePx,
-    streak,
-    isFrontalFace,
-  };
-}
-
 function parseSnapshotBuffer(raw: unknown): Buffer | null {
   if (typeof raw !== "string") return null;
   const trimmed = raw.trim();
@@ -205,12 +158,6 @@ export async function POST(request: Request) {
     );
     const snapshotBuffer = parseSnapshotBuffer(body?.snapshotBase64);
 
-    const createMinScore = parseCreateMinScore(body?.createMinScore);
-    const createMinFaceSidePx = parseCreateMinFaceSidePx(body?.createMinFaceSidePx);
-    const createMinStreak = parseCreateMinStreak(body?.createMinStreak);
-    const createRequireFrontal = parseCreateRequireFrontal(body?.createRequireFrontal);
-    const createCtx = parseFaceCreateContext(body);
-
     const identities = await prisma.faceIdentity.findMany({
       select: { id: true, shortId: true, descriptor: true },
     });
@@ -241,22 +188,6 @@ export async function POST(request: Request) {
         created: false,
         distance: Number(best.distance.toFixed(6)),
         descriptor: nextDescriptor,
-      });
-    }
-
-    const canCreateIdentity =
-      createCtx.score >= createMinScore &&
-      createCtx.faceSidePx >= createMinFaceSidePx &&
-      createCtx.streak >= createMinStreak &&
-      (!createRequireFrontal || createCtx.isFrontalFace);
-
-    if (!canCreateIdentity) {
-      return NextResponse.json({
-        created: false,
-        merged: false,
-        skipped: "create_guard_rejected",
-        reason: "no_face_or_low_quality",
-        distance: best ? Number(best.distance.toFixed(6)) : null,
       });
     }
 
