@@ -957,6 +957,8 @@ function createState(cameraId, src) {
     lastErrLogAt: 0,
     lastPhantomLogAt: 0,
     lastBlockedMatchLogAt: 0,
+    lastIdentifyAt: 0,
+    lastAutoCreatedAt: 0,
     newIdGateDescriptor: null,
     newIdGateStreak: 0,
     newIdGateLastAt: 0,
@@ -1047,6 +1049,8 @@ async function main() {
     0,
     envFloat("WORKER_IDENTITY_LOCK_SWITCH_MARGIN", 0.02),
   );
+  const identifyMinIntervalMs = Math.max(400, envInt("WORKER_IDENTIFY_MIN_INTERVAL_MS", 1500));
+  const autoCreateCooldownMs = Math.max(0, envInt("WORKER_AUTO_CREATE_COOLDOWN_MS", 4500));
   const requireFrontalFace = envBool("WORKER_REQUIRE_FRONTAL_FACE", true);
   const frontalMinEyeDistanceRatio = Math.max(
     0.05,
@@ -1806,6 +1810,30 @@ async function main() {
         newIdMaxGapMs,
       ),
     );
+    const camIdentifyMinIntervalMs = Math.max(
+      400,
+      parseFiniteInt(
+        getCameraSetting(
+          cameraSettings,
+          cam.cameraId,
+          "identifyMinIntervalMs",
+          identifyMinIntervalMs,
+        ),
+        identifyMinIntervalMs,
+      ),
+    );
+    const camAutoCreateCooldownMs = Math.max(
+      0,
+      parseFiniteInt(
+        getCameraSetting(
+          cameraSettings,
+          cam.cameraId,
+          "autoCreateCooldownMs",
+          autoCreateCooldownMs,
+        ),
+        autoCreateCooldownMs,
+      ),
+    );
     const camFaceArchiveEnabledRaw = getCameraSetting(
       cameraSettings,
       cam.cameraId,
@@ -1932,6 +1960,7 @@ async function main() {
           `new_id_frames=${camNewIdConfirmFrames} new_id_min=${camNewIdMinScore.toFixed(3)} ` +
           `new_id_side=${camNewIdMinFaceSidePx} new_id_empty_min=${camNewIdEmptyMinScore.toFixed(3)} ` +
           `new_id_empty_side=${camNewIdEmptyMinFaceSidePx} new_id_stability=${camNewIdStabilityMaxDistance.toFixed(3)} ` +
+          `identify_cd=${camIdentifyMinIntervalMs} auto_create_cd=${camAutoCreateCooldownMs} ` +
           `lock_ms=${camIdentityLockMs} lock_margin=${camIdentityLockSwitchMargin.toFixed(3)} ` +
           `emotion_min=${camEmotionMinConfidence.toFixed(3)} emotion_floor=${camEmotionLowConfidenceFloor.toFixed(3)} ` +
           `db_reentry_ms=${camDbReentryGapMs} session_ms=${camSessionSnapshotIntervalMs} ` +
@@ -2256,6 +2285,14 @@ async function main() {
                     name = cam.identityLockName;
                     distance = Number(cam.identityLockDistance) || 0;
                   } else if (readyForNewId) {
+                    const identifyReady = now - (cam.lastIdentifyAt || 0) >= camIdentifyMinIntervalMs;
+                    const autoCreateCoolingDown =
+                      cam.lastAutoCreatedAt > 0 &&
+                      now - cam.lastAutoCreatedAt < camAutoCreateCooldownMs;
+                    if (!identifyReady || autoCreateCoolingDown) {
+                      continue;
+                    }
+                    cam.lastIdentifyAt = now;
                     const identified = await identifyFaceDescriptor(
                       descriptor,
                       camMatchThreshold,
@@ -2279,6 +2316,7 @@ async function main() {
                         if (!bestDistance || distance < bestDistance) bestDistance = distance;
                       }
                       if (justRegistered) {
+                        cam.lastAutoCreatedAt = now;
                         log(`[${cam.cameraId}] new_id created shortId=${name}`);
                       }
                     }

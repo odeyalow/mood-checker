@@ -13,7 +13,6 @@ type WorkerStatus = {
   confirmed?: number;
   matchedNames?: string[];
   people?: { name?: string }[];
-  personInFrame?: boolean;
   faceInFrame?: boolean;
   frameOk?: boolean;
   frameError?: string;
@@ -21,7 +20,6 @@ type WorkerStatus = {
 };
 
 type WorkerStatusPayload = {
-  ts?: string;
   cameras?: Record<string, WorkerStatus>;
 };
 
@@ -45,11 +43,13 @@ type Labels = {
   frameRestored: string;
 };
 
-type Item = {
+type LogItem = {
   id: string;
   ts: number;
   message: string;
 };
+
+type Stage = "frame_error" | "idle" | "matching" | "registering" | "matched";
 
 function getMatchedNames(status: WorkerStatus | null | undefined) {
   const names = new Set<string>();
@@ -65,10 +65,10 @@ function getMatchedNames(status: WorkerStatus | null | undefined) {
       if (safe) names.add(safe);
     }
   }
-  return Array.from(names);
+  return Array.from(names).sort();
 }
 
-function areSameNames(left: string[], right: string[]) {
+function sameNames(left: string[], right: string[]) {
   if (left.length !== right.length) return false;
   for (let i = 0; i < left.length; i += 1) {
     if (left[i] !== right[i]) return false;
@@ -90,29 +90,31 @@ export default function CameraPipelineLogPanel({
   locale: AppLocale;
   labels: Labels;
 }) {
-  const [itemsByCamera, setItemsByCamera] = useState<Record<string, Item[]>>(() =>
+  const [itemsByCamera, setItemsByCamera] = useState<Record<string, LogItem[]>>(() =>
     Object.fromEntries(CAMERA_CONFIGS.map((camera) => [camera.id, []])),
   );
+
+  const stageRef = useRef<Record<string, Stage>>({});
   const lastStatusRef = useRef<Record<string, WorkerStatus | null>>({});
   const lastByKeyRef = useRef<Record<string, number>>({});
   const seenDedupIdsRef = useRef<Set<string>>(new Set());
 
-  const cameraNameById = useMemo(() => {
-    return Object.fromEntries(
-      CAMERA_CONFIGS.map((camera) => [camera.id, camera.name || camera.id]),
-    ) as Record<string, string>;
-  }, []);
+  const cameraNameById = useMemo(
+    () => Object.fromEntries(CAMERA_CONFIGS.map((camera) => [camera.id, camera.name || camera.id])),
+    [],
+  ) as Record<string, string>;
 
-  const push = (cameraId: string, message: string, key = message, cooldownMs = 1500) => {
+  const push = (cameraId: string, message: string, key = message, cooldownMs = 1200) => {
     const now = Date.now();
     const dedupeKey = `${cameraId}:${key}`;
     const lastAt = Number(lastByKeyRef.current[dedupeKey] || 0);
     if (now - lastAt < cooldownMs) return;
     lastByKeyRef.current[dedupeKey] = now;
+
     setItemsByCamera((prev) => {
-      const prevList = Array.isArray(prev[cameraId]) ? prev[cameraId] : [];
-      const nextList = [{ id: `${now}-${Math.random()}`, ts: now, message }, ...prevList].slice(0, 80);
-      return { ...prev, [cameraId]: nextList };
+      const prevItems = prev[cameraId] || [];
+      const nextItems = [{ id: `${now}-${Math.random()}`, ts: now, message }, ...prevItems].slice(0, 80);
+      return { ...prev, [cameraId]: nextItems };
     });
   };
 
@@ -134,59 +136,62 @@ export default function CameraPipelineLogPanel({
           const prev = lastStatusRef.current[cameraId] || null;
           if (!current) continue;
 
-          const currentFrameOk = current.frameOk !== false;
+          const frameOk = current.frameOk !== false;
           const prevFrameOk = prev ? prev.frameOk !== false : true;
-          const currentFace = Boolean(current.faceInFrame);
-          const prevFace = Boolean(prev?.faceInFrame);
-          const currentNames = getMatchedNames(current).sort();
-          const prevNames = getMatchedNames(prev).sort();
-          const hasMatch = currentNames.length > 0;
-          const hadMatch = prevNames.length > 0;
+          const faceInFrame = Boolean(current.faceInFrame);
+          const confirmed = Number(current.confirmed || 0) > 0;
+          const names = getMatchedNames(current);
+          const prevNames = getMatchedNames(prev);
+          const hasMatch = names.length > 0;
 
-          if (!currentFrameOk && prevFrameOk) {
-            const frameError = String(current.frameError || "").trim();
-            push(
-              cameraId,
-              frameError ? `${labels.frameError}: ${frameError}` : labels.frameError,
-              "frame_error",
-              3000,
-            );
-          }
-          if (currentFrameOk && !prevFrameOk) {
-            push(cameraId, labels.frameRestored, "frame_restored", 2500);
-          }
+          let stage: Stage;
+          if (!frameOk) stage = "frame_error";
+          else if (!faceInFrame) stage = "idle";
+          else if (hasMatch) stage = "matched";
+          else if (confirmed) stage = "registering";
+          else stage = "matching";
 
-          if (currentFrameOk && currentFace && !prevFace) {
-            push(cameraId, labels.faceFound, "face_found", 800);
-          }
-          if (currentFrameOk && !currentFace && (prev == null || prevFace)) {
-            push(cameraId, labels.noFace, "no_face", 1800);
-          }
-
-          if (currentFrameOk && currentFace && !hasMatch) {
-            push(cameraId, labels.matchingPending, "matching_pending", 2400);
-            if (Number(current.confirmed || 0) > 0) {
-              push(cameraId, labels.registrationAttempt, "registration_attempt", 2800);
+          const prevStage = stageRef.current[cameraId];
+          if (stage !== prevStage) {
+            if (stage === "frame_error") {
+              const frameError = String(current.frameError || "").trim();
+              push(
+                cameraId,
+                frameError ? `${labels.frameError}: ${frameError}` : labels.frameError,
+                "stage_frame_error",
+                2000,
+              );
+            } else if (stage === "idle") {
+              push(cameraId, labels.noFace, "stage_idle", 1000);
+            } else if (stage === "matching") {
+              push(cameraId, labels.matchingPending, "stage_matching", 1000);
+            } else if (stage === "registering") {
+              push(cameraId, labels.registrationAttempt, "stage_registering", 1000);
+            } else if (stage === "matched") {
+              const namesLabel = names.join(", ");
+              push(cameraId, `${labels.matchingSuccess}: ${namesLabel}`, `stage_matched:${namesLabel}`, 1000);
             }
           }
 
-          if (hasMatch && (!hadMatch || !areSameNames(currentNames, prevNames))) {
-            push(
-              cameraId,
-              `${labels.matchingSuccess}: ${currentNames.join(", ")}`,
-              `matching_success:${currentNames.join(",")}`,
-              1200,
-            );
+          if (frameOk && !prevFrameOk) {
+            push(cameraId, labels.frameRestored, "frame_restored", 1200);
           }
-
+          if (faceInFrame && !Boolean(prev?.faceInFrame)) {
+            push(cameraId, labels.faceFound, "face_found", 900);
+          }
+          if (hasMatch && !sameNames(names, prevNames)) {
+            const namesLabel = names.join(", ");
+            push(cameraId, `${labels.matchingSuccess}: ${namesLabel}`, `matched_names:${namesLabel}`, 900);
+          }
           if (current.lastRecognitionAt && current.lastRecognitionAt !== prev?.lastRecognitionAt) {
             push(cameraId, labels.dbAdded, "db_added", 700);
           }
 
+          stageRef.current[cameraId] = stage;
           lastStatusRef.current[cameraId] = current;
         }
       } catch {
-        // ignore UI polling failures
+        // no-op
       }
 
       timer = window.setTimeout(() => {
@@ -212,21 +217,22 @@ export default function CameraPipelineLogPanel({
         if (response.ok) {
           const payload = (await response.json()) as { items?: DedupLogItem[] };
           const logs = Array.isArray(payload?.items) ? payload.items : [];
+
           for (let idx = logs.length - 1; idx >= 0; idx -= 1) {
             const item = logs[idx];
             if (!item?.id || seenDedupIdsRef.current.has(item.id)) continue;
             seenDedupIdsRef.current.add(item.id);
 
-            const action = String(item.action || "").trim().toLowerCase();
+            const action = String(item.action || "").toLowerCase();
             if (!action.startsWith("phantom_")) continue;
 
             const cameraId = String(item.sourceShortId || "").trim();
             if (!cameraId || !cameraNameById[cameraId]) continue;
-            push(cameraId, labels.phantomBlocked, `phantom:${action}`, 800);
+            push(cameraId, labels.phantomBlocked, `phantom:${action}`, 1000);
           }
         }
       } catch {
-        // ignore UI polling failures
+        // no-op
       }
 
       timer = window.setTimeout(() => {
@@ -256,11 +262,11 @@ export default function CameraPipelineLogPanel({
                       <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description={labels.empty} />
                     ) : (
                       <Space direction="vertical" size={6} style={{ width: "100%" }}>
-                        {rows.map((item) => (
-                          <div key={item.id}>
-                            <Text type="secondary">{formatTime(item.ts, locale)}</Text>
+                        {rows.map((row) => (
+                          <div key={row.id}>
+                            <Text type="secondary">{formatTime(row.ts, locale)}</Text>
                             <div>
-                              <Text>{item.message}</Text>
+                              <Text>{row.message}</Text>
                             </div>
                           </div>
                         ))}
