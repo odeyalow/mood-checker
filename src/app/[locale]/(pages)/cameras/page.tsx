@@ -66,7 +66,7 @@ export default function CamerasPage({
       <FaceScripts includeFaceApi={false} />
       <Card className="soft-card">
         <Space orientation="vertical" size={12} style={{ width: "100%" }}>
-          <Link href={`/${safeLocale}/faces/dedup`}>
+          <Link href={`/${safeLocale}/matching-journal`}>
             <Button size="small">{t.dedupJournal}</Button>
           </Link>
           <CameraGrid

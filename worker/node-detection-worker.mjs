@@ -835,19 +835,19 @@ async function main() {
   );
   const newIdMinScore = Math.max(
     0,
-    Math.min(1, envFloat("WORKER_NEW_ID_MIN_SCORE", Math.max(identityMinScore, 0.18))),
+    Math.min(1, envFloat("WORKER_NEW_ID_MIN_SCORE", Math.max(identityMinScore, 0.24))),
   );
   const newIdMinFaceSidePx = Math.max(
     0,
-    envInt("WORKER_NEW_ID_MIN_FACE_SIDE_PX", Math.max(matchMinFaceSidePx, 34)),
+    envInt("WORKER_NEW_ID_MIN_FACE_SIDE_PX", Math.max(matchMinFaceSidePx, 52)),
   );
   const newIdMinStreak = Math.max(
     1,
-    envInt("WORKER_NEW_ID_MIN_STREAK", Math.max(2, personMinStreak)),
+    envInt("WORKER_NEW_ID_MIN_STREAK", Math.max(3, personMinStreak)),
   );
-  const newIdConfirmSamples = Math.max(1, envInt("WORKER_NEW_ID_CONFIRM_SAMPLES", 2));
-  const newIdSampleWindowMs = Math.max(300, envInt("WORKER_NEW_ID_SAMPLE_WINDOW_MS", 1800));
-  const newIdCooldownMs = Math.max(0, envInt("WORKER_NEW_ID_COOLDOWN_MS", 2200));
+  const newIdConfirmSamples = Math.max(1, envInt("WORKER_NEW_ID_CONFIRM_SAMPLES", 3));
+  const newIdSampleWindowMs = Math.max(300, envInt("WORKER_NEW_ID_SAMPLE_WINDOW_MS", 2200));
+  const newIdCooldownMs = Math.max(0, envInt("WORKER_NEW_ID_COOLDOWN_MS", 2600));
   const requireFrontalFace = envBool("WORKER_REQUIRE_FRONTAL_FACE", true);
   const frontalMinEyeDistanceRatio = Math.max(
     0.05,

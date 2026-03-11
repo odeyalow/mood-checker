@@ -29,20 +29,20 @@ function parsePostCheckThreshold(raw: unknown, baseThreshold: number) {
 }
 
 function parseCreateMinScore(raw: unknown) {
-  const value = Number(raw ?? process.env.FACE_IDENTITY_CREATE_MIN_SCORE ?? 0.2);
-  if (!Number.isFinite(value)) return 0.2;
+  const value = Number(raw ?? process.env.FACE_IDENTITY_CREATE_MIN_SCORE ?? 0.24);
+  if (!Number.isFinite(value)) return 0.24;
   return Math.max(0.05, Math.min(1, value));
 }
 
 function parseCreateMinFaceSidePx(raw: unknown) {
-  const value = Number(raw ?? process.env.FACE_IDENTITY_CREATE_MIN_FACE_SIDE_PX ?? 44);
-  if (!Number.isFinite(value)) return 44;
+  const value = Number(raw ?? process.env.FACE_IDENTITY_CREATE_MIN_FACE_SIDE_PX ?? 52);
+  if (!Number.isFinite(value)) return 52;
   return Math.max(8, Math.round(value));
 }
 
 function parseCreateMinStreak(raw: unknown) {
-  const value = Number(raw ?? process.env.FACE_IDENTITY_CREATE_MIN_STREAK ?? 2);
-  if (!Number.isFinite(value)) return 2;
+  const value = Number(raw ?? process.env.FACE_IDENTITY_CREATE_MIN_STREAK ?? 3);
+  if (!Number.isFinite(value)) return 3;
   return Math.max(1, Math.round(value));
 }
 

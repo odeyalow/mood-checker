@@ -140,7 +140,7 @@ export default function FacesPage({
             </Title>
             <Space size={12} wrap>
               {loadError ? <Text type="danger">{loadError}</Text> : null}
-              <Link href={`/${safeLocale}/faces/dedup`}>
+              <Link href={`/${safeLocale}/matching-journal`}>
                 <Button size="small">{t.dedupJournal}</Button>
               </Link>
             </Space>

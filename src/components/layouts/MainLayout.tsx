@@ -92,7 +92,7 @@ export default function MainLayout({
   const [searchLoading, setSearchLoading] = useState(false);
   const [studentOptions, setStudentOptions] = useState<StudentOption[]>([]);
 
-  const selectedKey = pathname?.includes("/faces/dedup")
+  const selectedKey = pathname?.includes("/matching-journal")
     ? "dedup"
     : pathname?.includes("/students/")
     ? "top"
@@ -123,7 +123,7 @@ export default function MainLayout({
     {
       key: "dedup",
       icon: <UserOutlined />,
-      label: <Link href={`/${safeLocale}/faces/dedup`}>{t.menu.dedup}</Link>,
+      label: <Link href={`/${safeLocale}/matching-journal`}>{t.menu.dedup}</Link>,
     },
     {
       key: "top",

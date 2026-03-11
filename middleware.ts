@@ -2,7 +2,14 @@ import { NextResponse } from "next/server";
 import type { NextRequest } from "next/server";
 import { jwtVerify } from "jose";
 
-const protectedSections = new Set(["dashboard", "students", "cameras", "faces", "by-date"]);
+const protectedSections = new Set([
+  "dashboard",
+  "students",
+  "cameras",
+  "faces",
+  "matching-journal",
+  "by-date",
+]);
 
 async function isValidToken(token: string) {
   const secret = process.env.AUTH_SECRET;
