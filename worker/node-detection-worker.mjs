@@ -1100,14 +1100,14 @@ async function main() {
   const faceIdentifyTimeoutMs = Math.max(500, envInt("WORKER_FACE_IDENTIFY_TIMEOUT_MS", 2000));
   const faceRegistryRefreshMs = Math.max(3000, envInt("WORKER_FACE_REGISTRY_REFRESH_MS", 20000));
   const faceAutoCreate = envBool("WORKER_FACE_AUTO_CREATE", true);
-  const newIdConfirmFrames = Math.max(1, envInt("WORKER_NEW_ID_CONFIRM_FRAMES", 2));
-  const newIdMinScore = Math.max(0, Math.min(1, envFloat("WORKER_NEW_ID_MIN_SCORE", 0.18)));
-  const newIdMinFaceSidePx = Math.max(8, envInt("WORKER_NEW_ID_MIN_FACE_SIDE_PX", 28));
+  const newIdConfirmFrames = Math.max(1, envInt("WORKER_NEW_ID_CONFIRM_FRAMES", 1));
+  const newIdMinScore = Math.max(0, Math.min(1, envFloat("WORKER_NEW_ID_MIN_SCORE", 0.14)));
+  const newIdMinFaceSidePx = Math.max(8, envInt("WORKER_NEW_ID_MIN_FACE_SIDE_PX", 20));
   const newIdStabilityMaxDistance = Math.max(
     0.01,
-    Math.min(2, envFloat("WORKER_NEW_ID_STABILITY_MAX_DISTANCE", 0.34)),
+    Math.min(2, envFloat("WORKER_NEW_ID_STABILITY_MAX_DISTANCE", 0.48)),
   );
-  const newIdMaxGapMs = Math.max(120, envInt("WORKER_NEW_ID_MAX_GAP_MS", 1200));
+  const newIdMaxGapMs = Math.max(120, envInt("WORKER_NEW_ID_MAX_GAP_MS", 1500));
   const faceArchiveEnabled = envBool("WORKER_FACE_ARCHIVE_ENABLED", true);
   const faceArchiveCooldownMs = Math.max(500, envInt("WORKER_FACE_ARCHIVE_COOLDOWN_MS", 2500));
   const faceArchiveMaxPerFace = Math.max(5, envInt("WORKER_FACE_ARCHIVE_MAX_PER_FACE", 50));

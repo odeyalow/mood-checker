@@ -6,6 +6,7 @@ import { Button, Card, Space } from "antd";
 import MainLayout from "@/components/layouts/MainLayout";
 import CameraGrid from "@/components/face/CameraGrid";
 import FaceScripts from "@/components/face/FaceScripts";
+import CameraPipelineLogPanel from "@/components/face/CameraPipelineLogPanel";
 
 const TEXT = {
   ru: {
@@ -23,6 +24,15 @@ const TEXT = {
     downloadFrame: "\u0421\u043a\u0430\u0447\u0430\u0442\u044c \u043a\u0430\u0434\u0440",
     downloadingFrame: "\u0421\u043a\u0430\u0447\u0438\u0432\u0430\u0435\u043c...",
     dedupJournal: "\u0416\u0443\u0440\u043d\u0430\u043b \u043c\u0430\u0442\u0447\u0438\u043d\u0433\u0430",
+    pipelineTitle: "\u041b\u043e\u0433 \u044d\u0442\u0430\u043f\u043e\u0432",
+    pipelineEmpty: "\u041f\u043e\u043a\u0430 \u043d\u0435\u0442 \u0441\u043e\u0431\u044b\u0442\u0438\u0439",
+    pipelineNoFace: "\u041b\u0438\u0446 \u043d\u0435 \u043d\u0430\u0439\u0434\u0435\u043d\u043e",
+    pipelineFaceFound: "\u041d\u0430\u0439\u0434\u0435\u043d\u043e \u043b\u0438\u0446\u043e",
+    pipelineRegistration: "\u041f\u0440\u043e\u0446\u0435\u0441\u0441 \u0440\u0435\u0433\u0438\u0441\u0442\u0440\u0430\u0446\u0438\u0438",
+    pipelineMatchingFailed: "\u041c\u0430\u0442\u0447\u0438\u043d\u0433 - \u043f\u0440\u043e\u0432\u0430\u043b",
+    pipelinePhantomOk: "\u041f\u0440\u043e\u0432\u0435\u0440\u043a\u0430 \u043d\u0430 \u0444\u0430\u043d\u0442\u043e\u043c - \u0443\u0441\u043f\u0435\u0448\u043d\u043e",
+    pipelineDbAdded: "\u0414\u043e\u0431\u0430\u0432\u043b\u0435\u043d\u0438\u0435 \u0432 \u0431\u0430\u0437\u0443",
+    pipelineFrameError: "\u041a\u0430\u0434\u0440 \u043d\u0435\u0434\u043e\u0441\u0442\u0443\u043f\u0435\u043d",
   },
   kz: {
     title: "\u041a\u0430\u043c\u0435\u0440\u0430\u043b\u0430\u0440",
@@ -39,6 +49,15 @@ const TEXT = {
     downloadFrame: "\u041a\u0430\u0434\u0440\u0434\u044b \u0436\u04af\u043a\u0442\u0435\u0443",
     downloadingFrame: "\u0416\u04af\u043a\u0442\u0435\u043b\u0443\u0434\u0435...",
     dedupJournal: "\u041c\u0430\u0442\u0447\u0438\u043d\u0433 \u0436\u0443\u0440\u043d\u0430\u043b\u044b",
+    pipelineTitle: "\u041a\u0435\u0437\u0435\u04a3 \u0436\u0443\u0440\u043d\u0430\u043b\u044b",
+    pipelineEmpty: "\u04d8\u0437\u0456\u0440\u0433\u0435 \u043e\u049b\u0438\u0493\u0430 \u0436\u043e\u049b",
+    pipelineNoFace: "\u0411\u0435\u0442 \u0430\u043d\u044b\u049b\u0442\u0430\u043b\u043c\u0430\u0434\u044b",
+    pipelineFaceFound: "\u0411\u0435\u0442 \u0430\u043d\u044b\u049b\u0442\u0430\u043b\u0434\u044b",
+    pipelineRegistration: "\u0422\u0456\u0440\u043a\u0435\u0443 \u04af\u0434\u0435\u0440\u0456\u0441\u0456",
+    pipelineMatchingFailed: "\u0421\u04d9\u0439\u043a\u0435\u0441\u0442\u0435\u043d\u0434\u0456\u0440\u0443 - \u0441\u04d9\u0442\u0441\u0456\u0437",
+    pipelinePhantomOk: "\u0424\u0430\u043d\u0442\u043e\u043c\u0493\u0430 \u0442\u0435\u043a\u0441\u0435\u0440\u0443 - \u0441\u04d9\u0442\u0442\u0456",
+    pipelineDbAdded: "\u0411\u0430\u0437\u0430\u0493\u0430 \u049b\u043e\u0441\u0443",
+    pipelineFrameError: "\u041a\u0430\u0434\u0440 \u049b\u043e\u043b\u0436\u0435\u0442\u0456\u043c\u0441\u0456\u0437",
   },
   en: {
     title: "Cameras",
@@ -55,6 +74,15 @@ const TEXT = {
     downloadFrame: "Download frame",
     downloadingFrame: "Downloading...",
     dedupJournal: "Matching Journal",
+    pipelineTitle: "Pipeline Log",
+    pipelineEmpty: "No events yet",
+    pipelineNoFace: "No faces found",
+    pipelineFaceFound: "Face found",
+    pipelineRegistration: "Registration in progress",
+    pipelineMatchingFailed: "Matching failed",
+    pipelinePhantomOk: "Phantom check passed",
+    pipelineDbAdded: "Added to database",
+    pipelineFrameError: "Frame unavailable",
   },
 };
 
@@ -72,6 +100,20 @@ export default function CamerasPage({
       <FaceScripts includeFaceApi={false} />
       <Card className="soft-card">
         <Space orientation="vertical" size={12} style={{ width: "100%" }}>
+          <CameraPipelineLogPanel
+            locale={safeLocale}
+            labels={{
+              title: t.pipelineTitle,
+              empty: t.pipelineEmpty,
+              noFace: t.pipelineNoFace,
+              faceFound: t.pipelineFaceFound,
+              registration: t.pipelineRegistration,
+              matchingFailed: t.pipelineMatchingFailed,
+              phantomOk: t.pipelinePhantomOk,
+              dbAdded: t.pipelineDbAdded,
+              frameError: t.pipelineFrameError,
+            }}
+          />
           <Link href={`/${safeLocale}/matching-journal`}>
             <Button size="small">{t.dedupJournal}</Button>
           </Link>
