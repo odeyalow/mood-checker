@@ -109,7 +109,7 @@ export async function GET(
         snapshotUrl: { not: null },
       },
       orderBy: { detectedAt: "desc" },
-      take: 5,
+      take: 200,
       select: {
         id: true,
         mood: true,
@@ -130,16 +130,26 @@ export async function GET(
       .map((entry) => entry.item);
 
     const diskFallback = await listDiskSnapshots(face.shortId, 5);
-    const imagesOut =
-      validImages.length > 0
-        ? validImages.map((item) => ({
-            id: item.id,
-            snapshotUrl: item.snapshotUrl || "",
-            mood: item.mood,
-            cameraId: item.cameraId || "",
-            detectedAt: item.detectedAt.toISOString(),
-          }))
-        : diskFallback;
+    const dbImages = validImages.map((item) => ({
+      id: item.id,
+      snapshotUrl: item.snapshotUrl || "",
+      mood: item.mood,
+      cameraId: item.cameraId || "",
+      detectedAt: item.detectedAt.toISOString(),
+    }));
+    const seen = new Set(dbImages.map((item) => item.snapshotUrl.split("?")[0]));
+    const mergedImages = [...dbImages];
+    for (const diskItem of diskFallback) {
+      const clean = String(diskItem.snapshotUrl || "").split("?")[0];
+      if (!clean || seen.has(clean)) continue;
+      seen.add(clean);
+      mergedImages.push(diskItem);
+    }
+    mergedImages.sort(
+      (a, b) =>
+        new Date(b.detectedAt).getTime() - new Date(a.detectedAt).getTime(),
+    );
+    const imagesOut = mergedImages.slice(0, 5);
 
     const recognitionCount = await prisma.recognition.count({
       where: {

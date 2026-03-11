@@ -72,6 +72,22 @@ async function saveSnapshotFromPublicUrl(faceShortId: string, publicUrl: string)
   return saveSnapshot(faceShortId, source);
 }
 
+async function saveSnapshotFromPublicUrlWithRetry(
+  faceShortId: string,
+  publicUrl: string,
+  attempts = 3,
+) {
+  const tries = Math.max(1, attempts);
+  for (let i = 0; i < tries; i += 1) {
+    const snapshotUrl = await saveSnapshotFromPublicUrl(faceShortId, publicUrl).catch(() => null);
+    if (snapshotUrl) return snapshotUrl;
+    if (i < tries - 1) {
+      await new Promise((resolve) => setTimeout(resolve, 120));
+    }
+  }
+  return null;
+}
+
 export async function GET(request: Request) {
   try {
     const url = new URL(request.url);
@@ -121,9 +137,20 @@ export async function POST(request: Request) {
     }
     if (!snapshotUrl && snapshotPublicUrl) {
       try {
-        snapshotUrl = await saveSnapshotFromPublicUrl(name, snapshotPublicUrl);
+        snapshotUrl = await saveSnapshotFromPublicUrlWithRetry(name, snapshotPublicUrl, 3);
       } catch (error) {
         console.error("[api/recognitions] snapshot copy failed", error);
+      }
+    }
+    if (!snapshotUrl && cameraId) {
+      try {
+        snapshotUrl = await saveSnapshotFromPublicUrlWithRetry(
+          name,
+          `/_worker-snaps/${cameraId}.jpg`,
+          2,
+        );
+      } catch (error) {
+        console.error("[api/recognitions] camera snapshot fallback failed", error);
       }
     }
 

@@ -1,6 +1,6 @@
 "use client";
 
-import { use, useEffect, useState } from "react";
+import { use, useCallback, useEffect, useState } from "react";
 import { Card, Col, Empty, Row, Space, Tag, Typography } from "antd";
 import MainLayout from "@/components/layouts/MainLayout";
 
@@ -86,23 +86,36 @@ export default function FaceDetailPage({
   const [data, setData] = useState<FacePayload | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
 
-  useEffect(() => {
-    async function loadFace() {
-      try {
-        const response = await fetch(`/api/faces/${encodeURIComponent(id)}`, { cache: "no-store" });
-        if (!response.ok) {
-          setLoadError(response.status === 404 ? t.notFound : `${t.loadError} (${response.status})`);
-          return;
-        }
-        const payload = await response.json();
-        setData(payload);
-        setLoadError(null);
-      } catch {
-        setLoadError(t.loadError);
+  const loadFace = useCallback(async () => {
+    try {
+      const response = await fetch(`/api/faces/${encodeURIComponent(id)}`, { cache: "no-store" });
+      if (!response.ok) {
+        setLoadError(response.status === 404 ? t.notFound : `${t.loadError} (${response.status})`);
+        return;
       }
+      const payload = await response.json();
+      setData(payload);
+      setLoadError(null);
+    } catch {
+      setLoadError(t.loadError);
     }
-    void loadFace();
   }, [id, t.loadError, t.notFound]);
+
+  useEffect(() => {
+    let mounted = true;
+    const run = async () => {
+      if (!mounted) return;
+      await loadFace();
+    };
+    void run();
+    const timer = setInterval(() => {
+      void run();
+    }, 5000);
+    return () => {
+      mounted = false;
+      clearInterval(timer);
+    };
+  }, [loadFace]);
 
   const title = data?.face?.shortId ? `${t.title}: ${data.face.shortId}` : t.title;
 
