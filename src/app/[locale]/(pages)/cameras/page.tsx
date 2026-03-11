@@ -1,7 +1,8 @@
 "use client";
 
+import Link from "next/link";
 import { use } from "react";
-import { Card, Space } from "antd";
+import { Button, Card, Space } from "antd";
 import MainLayout from "@/components/layouts/MainLayout";
 import CameraGrid from "@/components/face/CameraGrid";
 import FaceScripts from "@/components/face/FaceScripts";
@@ -19,6 +20,7 @@ const TEXT = {
     emotionLabel: "\u042d\u043c\u043e\u0446\u0438\u044f",
     unknownLabel: "\u043d\u0435 \u043e\u043f\u0440\u0435\u0434\u0435\u043b\u0435\u043d",
     noneLabel: "\u043d\u0435\u0442",
+    dedupJournal: "\u0416\u0443\u0440\u043d\u0430\u043b \u043c\u0430\u0442\u0447\u0438\u043d\u0433\u0430",
   },
   kz: {
     title: "\u041a\u0430\u043c\u0435\u0440\u0430\u043b\u0430\u0440",
@@ -32,6 +34,7 @@ const TEXT = {
     emotionLabel: "\u042d\u043c\u043e\u0446\u0438\u044f",
     unknownLabel: "\u0430\u043d\u044b\u049b\u0442\u0430\u043b\u043c\u0430\u0434\u044b",
     noneLabel: "\u0436\u043e\u049b",
+    dedupJournal: "\u041c\u0430\u0442\u0447\u0438\u043d\u0433 \u0436\u0443\u0440\u043d\u0430\u043b\u044b",
   },
   en: {
     title: "Cameras",
@@ -45,6 +48,7 @@ const TEXT = {
     emotionLabel: "Emotion",
     unknownLabel: "unknown",
     noneLabel: "none",
+    dedupJournal: "Matching Journal",
   },
 };
 
@@ -62,6 +66,9 @@ export default function CamerasPage({
       <FaceScripts includeFaceApi={false} />
       <Card className="soft-card">
         <Space orientation="vertical" size={12} style={{ width: "100%" }}>
+          <Link href={`/${safeLocale}/faces/dedup`}>
+            <Button size="small">{t.dedupJournal}</Button>
+          </Link>
           <CameraGrid
             labels={{
               loading: t.loading,

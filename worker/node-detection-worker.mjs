@@ -988,7 +988,12 @@ async function main() {
   };
 
   let lastIdentifyErrLogAt = 0;
-  const identifyFaceDescriptor = async (descriptor, threshold, snapshotBase64 = "") => {
+  const identifyFaceDescriptor = async (
+    descriptor,
+    threshold,
+    snapshotBase64 = "",
+    meta = null,
+  ) => {
     if (!faceIdentifyEndpoint || !faceAutoCreate) return null;
     const safeDescriptor = normalizeDescriptor(descriptor);
     if (!safeDescriptor) return null;
@@ -997,6 +1002,10 @@ async function main() {
         descriptor: safeDescriptor,
         threshold,
         snapshotBase64: typeof snapshotBase64 === "string" ? snapshotBase64 : "",
+        faceScore: Number(meta?.faceScore ?? 0),
+        faceSidePx: Number(meta?.faceSidePx ?? 0),
+        isFrontalFace: Boolean(meta?.isFrontalFace),
+        streak: Number(meta?.streak ?? 0),
       };
       const payload = await postJsonExpectJsonWithTimeout(
         faceIdentifyEndpoint,
@@ -1790,6 +1799,12 @@ async function main() {
                         descriptor,
                         camMatchThreshold,
                         snapshotBase64,
+                        {
+                          faceScore: identityScore,
+                          faceSidePx: faceSide,
+                          isFrontalFace,
+                          streak: cam.streak,
+                        },
                       );
                       if (identified?.shortId) {
                         name = identified.shortId;

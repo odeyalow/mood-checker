@@ -79,6 +79,10 @@ Optional identity env (app process):
 - `FACE_IDENTITY_MATCH_THRESHOLD=0.56`
 - `FACE_IDENTITY_POSTCHECK_THRESHOLD=0.60` (optional, background duplicate cleanup threshold)
 - `FACE_IDENTITY_DESCRIPTOR_ALPHA=0.2`
+- `FACE_IDENTITY_CREATE_MIN_SCORE=0.20` (block new ID creation on weak face confidence)
+- `FACE_IDENTITY_CREATE_MIN_FACE_SIDE_PX=44` (block tiny face auto-registration)
+- `FACE_IDENTITY_CREATE_MIN_STREAK=2` (require stable face before new ID)
+- `FACE_IDENTITY_CREATE_REQUIRE_FRONTAL=true` (block side/body-based auto-registration)
 
 Worker anti-phantom auto-create (optional, `.env.worker`):
 - `WORKER_NEW_ID_MIN_SCORE=0.18`
