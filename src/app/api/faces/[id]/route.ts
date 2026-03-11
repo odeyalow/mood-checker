@@ -10,6 +10,28 @@ function sanitizeShortId(shortId: string) {
   return shortId.replace(/[^A-Za-z0-9_-]/g, "").slice(0, 32);
 }
 
+function snapshotPathToPublicFile(snapshotUrl: string) {
+  const clean = String(snapshotUrl || "").split("?")[0];
+  if (!clean.startsWith("/")) return "";
+  const rel = clean.replace(/^\/+/, "");
+  const publicRoot = path.resolve(process.cwd(), "public");
+  const abs = path.resolve(publicRoot, rel);
+  if (!abs.startsWith(publicRoot)) return "";
+  return abs;
+}
+
+async function snapshotExists(snapshotUrl: string | null | undefined) {
+  if (!snapshotUrl) return false;
+  const abs = snapshotPathToPublicFile(snapshotUrl);
+  if (!abs) return false;
+  try {
+    const st = await fs.stat(abs);
+    return st.isFile();
+  } catch {
+    return false;
+  }
+}
+
 async function listDiskSnapshots(shortId: string, limit = 5) {
   const safeId = sanitizeShortId(shortId);
   if (!safeId) return [];
@@ -96,10 +118,21 @@ export async function GET(
         snapshotUrl: true,
       },
     });
+    const validImages = (
+      await Promise.all(
+        images.map(async (item) => ({
+          item,
+          ok: await snapshotExists(item.snapshotUrl),
+        })),
+      )
+    )
+      .filter((entry) => entry.ok)
+      .map((entry) => entry.item);
+
     const diskFallback = await listDiskSnapshots(face.shortId, 5);
     const imagesOut =
-      images.length > 0
-        ? images.map((item) => ({
+      validImages.length > 0
+        ? validImages.map((item) => ({
             id: item.id,
             snapshotUrl: item.snapshotUrl || "",
             mood: item.mood,

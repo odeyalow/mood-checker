@@ -16,6 +16,28 @@ function sanitizeShortId(shortId: string) {
   return shortId.replace(/[^A-Za-z0-9_-]/g, "").slice(0, 32);
 }
 
+function snapshotPathToPublicFile(snapshotUrl: string) {
+  const clean = String(snapshotUrl || "").split("?")[0];
+  if (!clean.startsWith("/")) return "";
+  const rel = clean.replace(/^\/+/, "");
+  const publicRoot = path.resolve(process.cwd(), "public");
+  const abs = path.resolve(publicRoot, rel);
+  if (!abs.startsWith(publicRoot)) return "";
+  return abs;
+}
+
+async function snapshotExists(snapshotUrl: string | null | undefined) {
+  if (!snapshotUrl) return false;
+  const abs = snapshotPathToPublicFile(snapshotUrl);
+  if (!abs) return false;
+  try {
+    const st = await fs.stat(abs);
+    return st.isFile();
+  } catch {
+    return false;
+  }
+}
+
 async function getLatestDiskSnapshot(shortId: string) {
   const safeId = sanitizeShortId(shortId);
   if (!safeId) return null;
@@ -113,18 +135,23 @@ export async function GET(request: Request) {
     );
     const diskByFaceId = new Map(diskSnapshots.map((item) => [item.faceId, item.disk]));
 
-    const items = identities.map((identity) => {
-      const latest = latestByFaceId.get(identity.id);
-      const disk = diskByFaceId.get(identity.id);
-      return {
-        id: identity.id,
-        shortId: identity.shortId,
-        recognitionCount: identity._count.recognitions,
-        snapshotUrl: latest?.snapshotUrl || disk?.snapshotUrl || "",
-        lastDetectedAt: latest?.detectedAt?.toISOString() || disk?.detectedAt || "",
-        createdAt: identity.createdAt.toISOString(),
-      };
-    });
+    const items = await Promise.all(
+      identities.map(async (identity) => {
+        const latest = latestByFaceId.get(identity.id);
+        const disk = diskByFaceId.get(identity.id);
+        const latestSnapshotOk = await snapshotExists(latest?.snapshotUrl);
+        return {
+          id: identity.id,
+          shortId: identity.shortId,
+          recognitionCount: identity._count.recognitions,
+          snapshotUrl: latestSnapshotOk ? latest?.snapshotUrl || "" : disk?.snapshotUrl || "",
+          lastDetectedAt: latestSnapshotOk
+            ? latest?.detectedAt?.toISOString() || ""
+            : disk?.detectedAt || "",
+          createdAt: identity.createdAt.toISOString(),
+        };
+      }),
+    );
 
     return NextResponse.json({ items });
   } catch (error) {
