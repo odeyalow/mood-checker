@@ -2,6 +2,7 @@ const http = require("http");
 const express = require("express");
 const next = require("next");
 const rtspRelay = require("rtsp-relay");
+const path = require("path");
 const dev = process.argv.includes("--dev");
 process.env.NODE_ENV = dev ? "development" : "production";
 
@@ -69,6 +70,11 @@ app
     const expressApp = express();
     const server = http.createServer(expressApp);
     const { proxy } = rtspRelay(expressApp, server);
+    const publicDir = path.join(__dirname, "public");
+
+    // Serve worker/face snapshots directly to avoid Next.js 404 on underscored paths.
+    expressApp.use("/_faces", express.static(path.join(publicDir, "_faces")));
+    expressApp.use("/_worker-snaps", express.static(path.join(publicDir, "_worker-snaps")));
 
     expressApp.ws("/api/stream", (ws, req) => {
       ws.on("error", (error) => {
