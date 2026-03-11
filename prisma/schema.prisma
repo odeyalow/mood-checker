@@ -45,6 +45,23 @@ model FaceIdentity {
   @@index([createdAt])
 }
 
+model FaceDedupLog {
+  id                String   @id @default(cuid())
+  action            String
+  reason            String
+  sourceFaceId      String?
+  sourceShortId     String?
+  sourceSnapshotUrl String?
+  targetFaceId      String?
+  targetShortId     String?
+  targetSnapshotUrl String?
+  distance          Float?
+  threshold         Float?
+  createdAt         DateTime @default(now())
+
+  @@index([createdAt])
+}
+
 model EmotionSnapshot {
   id            String   @id @default(cuid())
   bucketStart   DateTime @unique

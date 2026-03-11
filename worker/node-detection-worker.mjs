@@ -958,14 +958,19 @@ async function main() {
   };
 
   let lastIdentifyErrLogAt = 0;
-  const identifyFaceDescriptor = async (descriptor, threshold) => {
+  const identifyFaceDescriptor = async (descriptor, threshold, snapshotBase64 = "") => {
     if (!faceIdentifyEndpoint || !faceAutoCreate) return null;
     const safeDescriptor = normalizeDescriptor(descriptor);
     if (!safeDescriptor) return null;
     try {
+      const payloadBody = {
+        descriptor: safeDescriptor,
+        threshold,
+        snapshotBase64: typeof snapshotBase64 === "string" ? snapshotBase64 : "",
+      };
       const payload = await postJsonExpectJsonWithTimeout(
         faceIdentifyEndpoint,
-        { descriptor: safeDescriptor, threshold },
+        payloadBody,
         faceIdentifyTimeoutMs,
       );
       const shortId = String(payload?.shortId ?? "").trim();
@@ -1614,6 +1619,7 @@ async function main() {
             maxAspect: camFilterMaxAspect,
           });
 
+          const snapshotBase64 = jpg.toString("base64");
           const people = [];
           const descriptorByName = new Map();
           let bestDistance = 0;
@@ -1659,7 +1665,11 @@ async function main() {
                   } else {
                     const readyForNewId = shouldCreateNewId(descriptor);
                     if (readyForNewId) {
-                      const identified = await identifyFaceDescriptor(descriptor, camMatchThreshold);
+                      const identified = await identifyFaceDescriptor(
+                        descriptor,
+                        camMatchThreshold,
+                        snapshotBase64,
+                      );
                       if (identified?.shortId) {
                         name = identified.shortId;
                         justRegistered = Boolean(identified.created);
@@ -1786,7 +1796,6 @@ async function main() {
           }
 
           if (enableMatching && people.length) {
-            const snapshotBase64 = jpg.toString("base64");
             for (const person of people) {
               if (isUnknownIdentity(person.name)) continue;
               const sessionKey = person.name;

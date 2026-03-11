@@ -30,6 +30,7 @@ const L10N = {
       dashboard: "\u0414\u044d\u0448\u0431\u043e\u0440\u0434",
       cameras: "\u041a\u0430\u043c\u0435\u0440\u044b",
       faces: "\u041b\u0438\u0446\u0430",
+      dedup: "\u0416\u0443\u0440\u043d\u0430\u043b \u043c\u0430\u0442\u0447\u0438\u043d\u0433\u0430",
       top: "\u0422\u043e\u043f \u043d\u0435\u0433\u0430\u0442\u0438\u0432\u043d\u044b\u0445",
       byDate: "\u041f\u043e \u0434\u0430\u0442\u0435",
     },
@@ -45,6 +46,7 @@ const L10N = {
       dashboard: "\u0411\u0430\u0441\u049b\u0430\u0440\u0443 \u043f\u0430\u043d\u0435\u043b\u0456",
       cameras: "\u041a\u0430\u043c\u0435\u0440\u0430\u043b\u0430\u0440",
       faces: "\u0422\u04b1\u043b\u0493\u0430\u043b\u0430\u0440",
+      dedup: "\u041c\u0430\u0442\u0447\u0438\u043d\u0433 \u0436\u0443\u0440\u043d\u0430\u043b\u044b",
       top: "\u041d\u0435\u0433\u0430\u0442\u0438\u0432 \u0442\u043e\u043f",
       byDate: "\u041a\u04af\u043d\u0456 \u0431\u043e\u0439\u044b\u043d\u0448\u0430",
     },
@@ -60,6 +62,7 @@ const L10N = {
       dashboard: "Dashboard",
       cameras: "Cameras",
       faces: "Faces",
+      dedup: "Matching Journal",
       top: "Top Negative",
       byDate: "By Date",
     },
@@ -89,7 +92,9 @@ export default function MainLayout({
   const [searchLoading, setSearchLoading] = useState(false);
   const [studentOptions, setStudentOptions] = useState<StudentOption[]>([]);
 
-  const selectedKey = pathname?.includes("/students/")
+  const selectedKey = pathname?.includes("/faces/dedup")
+    ? "dedup"
+    : pathname?.includes("/students/")
     ? "top"
     : pathname?.includes("/by-date")
       ? "by-date"
@@ -114,6 +119,11 @@ export default function MainLayout({
       key: "faces",
       icon: <UserOutlined />,
       label: <Link href={`/${safeLocale}/faces`}>{t.menu.faces}</Link>,
+    },
+    {
+      key: "dedup",
+      icon: <UserOutlined />,
+      label: <Link href={`/${safeLocale}/faces/dedup`}>{t.menu.dedup}</Link>,
     },
     {
       key: "top",
@@ -231,4 +241,3 @@ export default function MainLayout({
     </Layout>
   );
 }
-

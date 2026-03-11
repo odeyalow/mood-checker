@@ -77,6 +77,7 @@ and async writes to `/api/recognitions` with retry queue.
 Optional identity env (app process):
 - `FACE_IDENTITY_ID_LENGTH=6` (`4..8`)
 - `FACE_IDENTITY_MATCH_THRESHOLD=0.56`
+- `FACE_IDENTITY_POSTCHECK_THRESHOLD=0.60` (optional, background duplicate cleanup threshold)
 - `FACE_IDENTITY_DESCRIPTOR_ALPHA=0.2`
 
 Face registry maintenance:
