@@ -99,7 +99,7 @@ export default function CamerasPage({
     <MainLayout title={t.title} locale={safeLocale}>
       <FaceScripts includeFaceApi={false} />
       <Card className="soft-card">
-        <Space orientation="vertical" size={12} style={{ width: "100%" }}>
+        <Space direction="vertical" size={12} style={{ width: "100%" }}>
           <CameraPipelineLogPanel
             locale={safeLocale}
             labels={{

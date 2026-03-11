@@ -933,6 +933,7 @@ function createState(cameraId, src) {
     lastDbSentAt: new Map(),
     lastSeenMatchedAt: new Map(),
     lastFaceArchiveAtByName: new Map(),
+    lastFaceArchiveUrlByName: new Map(),
     presenceSessions: new Map(),
     identityLockName: "",
     identityLockDistance: 0,
@@ -1103,6 +1104,14 @@ async function main() {
   const newIdConfirmFrames = Math.max(1, envInt("WORKER_NEW_ID_CONFIRM_FRAMES", 1));
   const newIdMinScore = Math.max(0, Math.min(1, envFloat("WORKER_NEW_ID_MIN_SCORE", 0.14)));
   const newIdMinFaceSidePx = Math.max(8, envInt("WORKER_NEW_ID_MIN_FACE_SIDE_PX", 20));
+  const newIdEmptyMinScore = Math.max(
+    0,
+    Math.min(1, envFloat("WORKER_NEW_ID_EMPTY_MIN_SCORE", 0.2)),
+  );
+  const newIdEmptyMinFaceSidePx = Math.max(
+    8,
+    envInt("WORKER_NEW_ID_EMPTY_MIN_FACE_SIDE_PX", 30),
+  );
   const newIdStabilityMaxDistance = Math.max(
     0.01,
     Math.min(2, envFloat("WORKER_NEW_ID_STABILITY_MAX_DISTANCE", 0.48)),
@@ -1712,6 +1721,28 @@ async function main() {
         newIdMinFaceSidePx,
       ),
     );
+    const camNewIdEmptyMinScore = Math.max(
+      0,
+      Math.min(
+        1,
+        parseFiniteFloat(
+          getCameraSetting(cameraSettings, cam.cameraId, "newIdEmptyMinScore", newIdEmptyMinScore),
+          newIdEmptyMinScore,
+        ),
+      ),
+    );
+    const camNewIdEmptyMinFaceSidePx = Math.max(
+      8,
+      parseFiniteInt(
+        getCameraSetting(
+          cameraSettings,
+          cam.cameraId,
+          "newIdEmptyMinFaceSidePx",
+          newIdEmptyMinFaceSidePx,
+        ),
+        newIdEmptyMinFaceSidePx,
+      ),
+    );
     const camNewIdStabilityMaxDistance = Math.max(
       0.01,
       Math.min(
@@ -1783,7 +1814,14 @@ async function main() {
         resetNewIdGate();
         return false;
       }
-      if (faceSide < camNewIdMinFaceSidePx || identityScore < camNewIdMinScore) {
+      const noKnownIdentities = !Array.isArray(knownLabeledDescriptors) || knownLabeledDescriptors.length === 0;
+      const effectiveMinScore = noKnownIdentities
+        ? Math.max(camNewIdMinScore, camNewIdEmptyMinScore)
+        : camNewIdMinScore;
+      const effectiveMinFaceSide = noKnownIdentities
+        ? Math.max(camNewIdMinFaceSidePx, camNewIdEmptyMinFaceSidePx)
+        : camNewIdMinFaceSidePx;
+      if (faceSide < effectiveMinFaceSide || identityScore < effectiveMinScore) {
         resetNewIdGate();
         return false;
       }
@@ -1851,7 +1889,8 @@ async function main() {
           `match_margin=${camMatchMinMargin.toFixed(3)} match_face_px=${camMatchMinFaceSidePx} ` +
           `identity_min=${camIdentityMinScore.toFixed(3)} frontal=${camRequireFrontalFace ? "on" : "off"} ` +
           `new_id_frames=${camNewIdConfirmFrames} new_id_min=${camNewIdMinScore.toFixed(3)} ` +
-          `new_id_side=${camNewIdMinFaceSidePx} new_id_stability=${camNewIdStabilityMaxDistance.toFixed(3)} ` +
+          `new_id_side=${camNewIdMinFaceSidePx} new_id_empty_min=${camNewIdEmptyMinScore.toFixed(3)} ` +
+          `new_id_empty_side=${camNewIdEmptyMinFaceSidePx} new_id_stability=${camNewIdStabilityMaxDistance.toFixed(3)} ` +
           `lock_ms=${camIdentityLockMs} lock_margin=${camIdentityLockSwitchMargin.toFixed(3)} ` +
           `emotion_min=${camEmotionMinConfidence.toFixed(3)} emotion_floor=${camEmotionLowConfidenceFloor.toFixed(3)} ` +
           `db_reentry_ms=${camDbReentryGapMs} session_ms=${camSessionSnapshotIntervalMs} ` +
@@ -2309,6 +2348,7 @@ async function main() {
                 });
                 if (archived) {
                   cam.lastFaceArchiveAtByName.set(personName, now);
+                  cam.lastFaceArchiveUrlByName.set(personName, archived);
                 }
               } catch (err) {
                 if (now - cam.lastErrLogAt >= 2000) {
@@ -2322,6 +2362,7 @@ async function main() {
               if (seenNames.has(savedName)) continue;
               if (now - Number(savedAt || 0) > archiveTtl) {
                 cam.lastFaceArchiveAtByName.delete(savedName);
+                cam.lastFaceArchiveUrlByName.delete(savedName);
               }
             }
           }
@@ -2339,6 +2380,7 @@ async function main() {
             if (!matchedNamesNow.has(savedName) && now - seenAt > dbSeenTtlMs) {
               cam.lastSeenMatchedAt.delete(savedName);
               cam.lastDbSentAt.delete(`${cam.cameraId}:${savedName}`);
+              cam.lastFaceArchiveUrlByName.delete(savedName);
             }
           }
           evictPresenceSessions(matchedNamesNow);
@@ -2486,8 +2528,10 @@ async function main() {
                     frameWidth: cam.workerFrameWidth,
                     frameHeight: cam.workerFrameHeight,
                     descriptor: descriptorByName.get(person.name) || undefined,
-                    snapshotUrl: cam.snapshotUrl || undefined,
-                    snapshotBase64,
+                    snapshotUrl:
+                      cam.lastFaceArchiveUrlByName.get(person.name) ||
+                      cam.snapshotUrl ||
+                      undefined,
                   },
                   now,
                 ),

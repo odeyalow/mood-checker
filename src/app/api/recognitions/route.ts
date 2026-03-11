@@ -52,6 +52,28 @@ function parseSnapshotPublicUrl(raw: unknown): string | null {
   return urlPath;
 }
 
+function sanitizeShortId(shortId: string) {
+  return String(shortId || "").replace(/[^A-Za-z0-9_-]/g, "").slice(0, 16);
+}
+
+function normalizeSnapshotKey(url: string | null | undefined) {
+  return String(url || "").split("?")[0].trim();
+}
+
+async function publicSnapshotExists(publicUrl: string) {
+  const clean = normalizeSnapshotKey(publicUrl);
+  if (!clean.startsWith("/")) return false;
+  const publicRoot = path.resolve(process.cwd(), "public");
+  const abs = path.resolve(publicRoot, clean.replace(/^\/+/, ""));
+  if (!abs.startsWith(publicRoot)) return false;
+  try {
+    const stat = await fs.stat(abs);
+    return stat.isFile();
+  } catch {
+    return false;
+  }
+}
+
 async function saveSnapshot(faceShortId: string, buf: Buffer) {
   const safeId = faceShortId.replace(/[^A-Za-z0-9_-]/g, "").slice(0, 16) || "face";
   const dirAbs = path.join(process.cwd(), "public", "_faces", safeId);
@@ -135,6 +157,10 @@ export async function POST(request: Request) {
         console.error("[api/recognitions] snapshot save failed", error);
       }
     }
+    if (!snapshotUrl && snapshotPublicUrl && snapshotPublicUrl.startsWith(`/_faces/${sanitizeShortId(name)}/`)) {
+      const exists = await publicSnapshotExists(snapshotPublicUrl);
+      if (exists) snapshotUrl = snapshotPublicUrl;
+    }
     if (!snapshotUrl && snapshotPublicUrl) {
       try {
         snapshotUrl = await saveSnapshotFromPublicUrlWithRetry(name, snapshotPublicUrl, 3);
@@ -182,6 +208,37 @@ export async function POST(request: Request) {
     }
 
     const detectedAt = Number.isNaN(detectedAtRaw.getTime()) ? new Date() : detectedAtRaw;
+    const dedupeMs = Math.max(
+      500,
+      Number.parseInt(process.env.RECOGNITION_DEDUP_MS || "1800", 10) || 1800,
+    );
+    const dedupeSince = new Date(detectedAt.getTime() - dedupeMs);
+    const recent = await prisma.recognition.findFirst({
+      where: {
+        name,
+        cameraId: cameraId ?? null,
+        detectedAt: { gte: dedupeSince },
+      },
+      orderBy: { detectedAt: "desc" },
+      select: {
+        id: true,
+        name: true,
+        mood: true,
+        detectedAt: true,
+        snapshotUrl: true,
+        faceIdentityId: true,
+      },
+    });
+    if (recent) {
+      const sameFace =
+        (faceIdentityId && recent.faceIdentityId && faceIdentityId === recent.faceIdentityId) ||
+        (!faceIdentityId && !recent.faceIdentityId);
+      const sameMood = String(recent.mood || "") === mood;
+      if (sameFace && sameMood) {
+        return NextResponse.json({ item: recent, deduped: true });
+      }
+    }
+
     const data = {
       name,
       mood,
