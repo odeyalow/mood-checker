@@ -20,6 +20,8 @@ const TEXT = {
     emotionLabel: "\u042d\u043c\u043e\u0446\u0438\u044f",
     unknownLabel: "\u043d\u0435 \u043e\u043f\u0440\u0435\u0434\u0435\u043b\u0435\u043d",
     noneLabel: "\u043d\u0435\u0442",
+    downloadFrame: "\u0421\u043a\u0430\u0447\u0430\u0442\u044c \u043a\u0430\u0434\u0440",
+    downloadingFrame: "\u0421\u043a\u0430\u0447\u0438\u0432\u0430\u0435\u043c...",
     dedupJournal: "\u0416\u0443\u0440\u043d\u0430\u043b \u043c\u0430\u0442\u0447\u0438\u043d\u0433\u0430",
   },
   kz: {
@@ -34,6 +36,8 @@ const TEXT = {
     emotionLabel: "\u042d\u043c\u043e\u0446\u0438\u044f",
     unknownLabel: "\u0430\u043d\u044b\u049b\u0442\u0430\u043b\u043c\u0430\u0434\u044b",
     noneLabel: "\u0436\u043e\u049b",
+    downloadFrame: "\u041a\u0430\u0434\u0440\u0434\u044b \u0436\u04af\u043a\u0442\u0435\u0443",
+    downloadingFrame: "\u0416\u04af\u043a\u0442\u0435\u043b\u0443\u0434\u0435...",
     dedupJournal: "\u041c\u0430\u0442\u0447\u0438\u043d\u0433 \u0436\u0443\u0440\u043d\u0430\u043b\u044b",
   },
   en: {
@@ -48,6 +52,8 @@ const TEXT = {
     emotionLabel: "Emotion",
     unknownLabel: "unknown",
     noneLabel: "none",
+    downloadFrame: "Download frame",
+    downloadingFrame: "Downloading...",
     dedupJournal: "Matching Journal",
   },
 };
@@ -81,6 +87,8 @@ export default function CamerasPage({
               emotionLabel: t.emotionLabel,
               unknownLabel: t.unknownLabel,
               noneLabel: t.noneLabel,
+              downloadFrame: t.downloadFrame,
+              downloadingFrame: t.downloadingFrame,
             }}
           />
         </Space>

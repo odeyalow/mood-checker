@@ -15,6 +15,8 @@ type CameraLabels = {
   emotionLabel: string;
   unknownLabel: string;
   noneLabel: string;
+  downloadFrame: string;
+  downloadingFrame: string;
 };
 
 export default function CameraGrid({ labels }: { labels: CameraLabels }) {

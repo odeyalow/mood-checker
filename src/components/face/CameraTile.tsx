@@ -46,6 +46,8 @@ type WorkerStatus = {
   lastRecognitionAt?: string;
   frameOk?: boolean;
   workerZoom?: number;
+  frameWidth?: number;
+  frameHeight?: number;
 };
 
 type SnapshotHistoryItem = {
@@ -142,6 +144,67 @@ function loadPlayerWithTimeout(
   });
 }
 
+function renderZoomedCanvas(
+  source: CanvasImageSource,
+  sourceWidth: number,
+  sourceHeight: number,
+  zoom: number,
+) {
+  const safeZoom = clampWorkerZoom(zoom);
+  const cropWidth =
+    safeZoom > 1 ? Math.max(64, Math.floor(sourceWidth / safeZoom)) : sourceWidth;
+  const cropHeight =
+    safeZoom > 1 ? Math.max(64, Math.floor(sourceHeight / safeZoom)) : sourceHeight;
+  const cropX = Math.max(0, Math.floor((sourceWidth - cropWidth) / 2));
+  const cropY = Math.max(0, Math.floor((sourceHeight - cropHeight) / 2));
+
+  const canvas = document.createElement("canvas");
+  canvas.width = cropWidth;
+  canvas.height = cropHeight;
+  const ctx = canvas.getContext("2d");
+  if (!ctx) throw new Error("snapshot_context_unavailable");
+
+  ctx.drawImage(
+    source,
+    cropX,
+    cropY,
+    cropWidth,
+    cropHeight,
+    0,
+    0,
+    cropWidth,
+    cropHeight,
+  );
+  return canvas;
+}
+
+function canvasToJpegBlob(canvas: HTMLCanvasElement, quality = 0.92): Promise<Blob> {
+  return new Promise((resolve, reject) => {
+    canvas.toBlob(
+      (blob) => {
+        if (blob) {
+          resolve(blob);
+          return;
+        }
+        reject(new Error("snapshot_blob_empty"));
+      },
+      "image/jpeg",
+      quality,
+    );
+  });
+}
+
+function triggerDownload(blob: Blob, filename: string) {
+  const href = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = href;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(href);
+}
+
 export default function CameraTile({
   camera,
   labels,
@@ -158,6 +221,8 @@ export default function CameraTile({
     emotionLabel: string;
     unknownLabel: string;
     noneLabel: string;
+    downloadFrame: string;
+    downloadingFrame: string;
   };
 }) {
   const streamRef = useRef<HTMLCanvasElement | null>(null);
@@ -165,6 +230,7 @@ export default function CameraTile({
   const streamTokenRef = useRef(0);
   const reconnectTimerRef = useRef<number | null>(null);
   const lastSnapshotKeyRef = useRef("");
+  const frameSizeRef = useRef({ width: 0, height: 0 });
 
   const [status, setStatus] = useState<"loading" | "ready" | "error">("loading");
   const [people, setPeople] = useState<WorkerPerson[]>([]);
@@ -176,6 +242,7 @@ export default function CameraTile({
   const [zoomValue, setZoomValue] = useState<number>(clampZoom(camera.digitalZoom));
   const [workerZoom, setWorkerZoom] = useState(1);
   const [workerZoomSaving, setWorkerZoomSaving] = useState(false);
+  const [frameDownloading, setFrameDownloading] = useState(false);
 
   useEffect(() => {
     setPeople([]);
@@ -185,6 +252,7 @@ export default function CameraTile({
     setLastRecognitionAt("");
     setHistory([]);
     setWorkerZoom(1);
+    frameSizeRef.current = { width: 0, height: 0 };
     lastSnapshotKeyRef.current = "";
   }, [camera.id]);
 
@@ -292,6 +360,10 @@ export default function CameraTile({
           const zoom = clampWorkerZoom(Number(ws.workerZoom ?? 1));
 
           setWorkerZoom(zoom);
+          frameSizeRef.current = {
+            width: Number.isFinite(Number(ws.frameWidth)) ? Number(ws.frameWidth) : 0,
+            height: Number.isFinite(Number(ws.frameHeight)) ? Number(ws.frameHeight) : 0,
+          };
 
           const nextPeople = Array.isArray(ws.people)
             ? ws.people
@@ -376,6 +448,69 @@ export default function CameraTile({
     }
   }
 
+  async function fetchFrameBlobFromApi() {
+    if (!camera.go2rtcSrc) return null;
+    const frameWidth = frameSizeRef.current.width;
+    const frameHeight = frameSizeRef.current.height;
+
+    const url = new URL("/api/camera/frame", window.location.origin);
+    url.searchParams.set("src", camera.go2rtcSrc);
+    if (frameWidth > 0) {
+      url.searchParams.set("width", String(frameWidth));
+    }
+    if (frameHeight > 0) {
+      url.searchParams.set("height", String(frameHeight));
+    }
+    url.searchParams.set("quality", "92");
+    url.searchParams.set("timeoutMs", "4500");
+
+    const res = await fetch(url.toString(), { cache: "no-store" });
+    if (!res.ok) {
+      throw new Error(`frame_http_${res.status}`);
+    }
+    return res.blob();
+  }
+
+  async function downloadCurrentFrame() {
+    setFrameDownloading(true);
+    const zoom = clampWorkerZoom(workerZoom);
+    try {
+      let exportCanvas: HTMLCanvasElement | null = null;
+
+      try {
+        const frameBlob = await fetchFrameBlobFromApi();
+        if (frameBlob) {
+          const bitmap = await createImageBitmap(frameBlob);
+          try {
+            exportCanvas = renderZoomedCanvas(bitmap, bitmap.width, bitmap.height, zoom);
+          } finally {
+            bitmap.close();
+          }
+        }
+      } catch (error) {
+        console.error("[camera] frame api download fallback:", error);
+      }
+
+      if (!exportCanvas) {
+        const liveCanvas = streamRef.current;
+        const sourceWidth = Number(liveCanvas?.width ?? 0);
+        const sourceHeight = Number(liveCanvas?.height ?? 0);
+        if (!liveCanvas || !sourceWidth || !sourceHeight) {
+          throw new Error("live_canvas_unavailable");
+        }
+        exportCanvas = renderZoomedCanvas(liveCanvas, sourceWidth, sourceHeight, zoom);
+      }
+
+      const blob = await canvasToJpegBlob(exportCanvas, 0.92);
+      const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+      triggerDownload(blob, `${camera.id}-${stamp}-worker-z${zoom.toFixed(1)}x.jpg`);
+    } catch (error) {
+      console.error("[camera] download frame error:", error);
+    } finally {
+      setFrameDownloading(false);
+    }
+  }
+
   return (
     <Card className="camera-card" size="small">
       <div className="camera-media">
@@ -443,6 +578,19 @@ export default function CameraTile({
                 </button>
               ))}
             </div>
+          </div>
+
+          <div className="camera-actions">
+            <button
+              type="button"
+              className="camera-action-button"
+              disabled={frameDownloading}
+              onClick={() => {
+                void downloadCurrentFrame();
+              }}
+            >
+              {frameDownloading ? labels.downloadingFrame : labels.downloadFrame}
+            </button>
           </div>
 
           {people.length ? (

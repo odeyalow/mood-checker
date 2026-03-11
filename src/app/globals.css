@@ -254,6 +254,29 @@ body {
   cursor: not-allowed;
 }
 
+.camera-actions {
+  margin-top: 10px;
+}
+
+.camera-action-button {
+  border: 1px solid #cbd5e1;
+  background: #ffffff;
+  border-radius: 8px;
+  padding: 6px 10px;
+  font-size: 12px;
+  color: #334155;
+  cursor: pointer;
+}
+
+.camera-action-button:hover {
+  border-color: #94a3b8;
+}
+
+.camera-action-button:disabled {
+  opacity: 0.65;
+  cursor: not-allowed;
+}
+
 .chart-placeholder {
   height: 220px;
   border-radius: 16px;
