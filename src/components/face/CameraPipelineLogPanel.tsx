@@ -166,7 +166,10 @@ export default function CameraPipelineLogPanel({
             } else if (stage === "matching") {
               push(cameraId, labels.matchingPending, "stage_matching", 1000);
             } else if (stage === "registering") {
-              push(cameraId, labels.registrationAttempt, "stage_registering", 1000);
+              if (prevStage !== "matching") {
+                push(cameraId, labels.matchingPending, "stage_matching_before_register", 1000);
+              }
+              push(cameraId, labels.registrationAttempt, "stage_registering", 1400);
             } else if (stage === "matched") {
               const namesLabel = names.join(", ");
               push(cameraId, `${labels.matchingSuccess}: ${namesLabel}`, `stage_matched:${namesLabel}`, 1000);
@@ -178,6 +181,9 @@ export default function CameraPipelineLogPanel({
           }
           if (faceInFrame && !Boolean(prev?.faceInFrame)) {
             push(cameraId, labels.faceFound, "face_found", 900);
+            if (!hasMatch) {
+              push(cameraId, labels.matchingPending, "face_found_matching", 900);
+            }
           }
           if (hasMatch && !sameNames(names, prevNames)) {
             const namesLabel = names.join(", ");

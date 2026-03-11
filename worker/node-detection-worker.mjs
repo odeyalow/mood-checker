@@ -2265,59 +2265,64 @@ async function main() {
                       phantomSceneMatch?.baseline?.publicUrl ?? "",
                     ).trim();
                   }
-                } else if (accepted) {
-                  const acceptedShortId = normalizeFaceShortId(bestCandidate.label);
-                  if (acceptedShortId && blockedFaceIds.has(acceptedShortId)) {
-                    resetNewIdGate();
-                    if (now - cam.lastBlockedMatchLogAt >= 5000) {
-                      log(`[${cam.cameraId}] blocked_id ignored shortId=${acceptedShortId}`);
-                      cam.lastBlockedMatchLogAt = now;
-                    }
-                    continue;
-                  }
-                  resetNewIdGate();
-                  name = bestCandidate.label;
-                  distance = Number(bestCandidate.distance) || 0;
-                  if (!bestDistance || distance < bestDistance) bestDistance = distance;
-                } else if (faceAutoCreate) {
-                  const lockActive = cam.identityLockName && now < cam.identityLockUntil;
-                  if (lockActive) {
-                    name = cam.identityLockName;
-                    distance = Number(cam.identityLockDistance) || 0;
-                  } else if (readyForNewId) {
-                    const identifyReady = now - (cam.lastIdentifyAt || 0) >= camIdentifyMinIntervalMs;
-                    const autoCreateCoolingDown =
-                      cam.lastAutoCreatedAt > 0 &&
-                      now - cam.lastAutoCreatedAt < camAutoCreateCooldownMs;
-                    if (!identifyReady || autoCreateCoolingDown) {
-                      continue;
-                    }
-                    cam.lastIdentifyAt = now;
-                    const identified = await identifyFaceDescriptor(
-                      descriptor,
-                      camMatchThreshold,
-                      snapshotBase64,
-                    );
-                    if (identified?.shortId) {
-                      const identifiedShortId = normalizeFaceShortId(identified.shortId);
-                      if (identifiedShortId && blockedFaceIds.has(identifiedShortId)) {
-                        resetNewIdGate();
-                        if (now - cam.lastBlockedMatchLogAt >= 5000) {
-                          log(`[${cam.cameraId}] blocked_id ignored shortId=${identifiedShortId}`);
-                          cam.lastBlockedMatchLogAt = now;
-                        }
-                        continue;
-                      }
+                } else {
+                  let acceptedBlocked = false;
+                  if (accepted) {
+                    const acceptedShortId = normalizeFaceShortId(bestCandidate.label);
+                    if (acceptedShortId && blockedFaceIds.has(acceptedShortId)) {
+                      acceptedBlocked = true;
                       resetNewIdGate();
-                      name = identified.shortId;
-                      justRegistered = Boolean(identified.created);
-                      if (Number.isFinite(identified.distance) && identified.distance > 0) {
-                        distance = Number(identified.distance) || 0;
-                        if (!bestDistance || distance < bestDistance) bestDistance = distance;
+                      if (now - cam.lastBlockedMatchLogAt >= 5000) {
+                        log(`[${cam.cameraId}] blocked_id ignored shortId=${acceptedShortId}`);
+                        cam.lastBlockedMatchLogAt = now;
                       }
-                      if (justRegistered) {
-                        cam.lastAutoCreatedAt = now;
-                        log(`[${cam.cameraId}] new_id created shortId=${name}`);
+                    } else {
+                      resetNewIdGate();
+                      name = bestCandidate.label;
+                      distance = Number(bestCandidate.distance) || 0;
+                      if (!bestDistance || distance < bestDistance) bestDistance = distance;
+                    }
+                  }
+
+                  if ((!accepted || acceptedBlocked) && faceAutoCreate) {
+                    const lockActive = cam.identityLockName && now < cam.identityLockUntil;
+                    if (lockActive) {
+                      name = cam.identityLockName;
+                      distance = Number(cam.identityLockDistance) || 0;
+                    } else if (readyForNewId) {
+                      const identifyReady = now - (cam.lastIdentifyAt || 0) >= camIdentifyMinIntervalMs;
+                      const autoCreateCoolingDown =
+                        cam.lastAutoCreatedAt > 0 &&
+                        now - cam.lastAutoCreatedAt < camAutoCreateCooldownMs;
+                      if (identifyReady && !autoCreateCoolingDown) {
+                        cam.lastIdentifyAt = now;
+                        const identified = await identifyFaceDescriptor(
+                          descriptor,
+                          camMatchThreshold,
+                          snapshotBase64,
+                        );
+                        if (identified?.shortId) {
+                          const identifiedShortId = normalizeFaceShortId(identified.shortId);
+                          if (identifiedShortId && blockedFaceIds.has(identifiedShortId)) {
+                            resetNewIdGate();
+                            if (now - cam.lastBlockedMatchLogAt >= 5000) {
+                              log(`[${cam.cameraId}] blocked_id ignored shortId=${identifiedShortId}`);
+                              cam.lastBlockedMatchLogAt = now;
+                            }
+                          } else {
+                            resetNewIdGate();
+                            name = identified.shortId;
+                            justRegistered = Boolean(identified.created);
+                            if (Number.isFinite(identified.distance) && identified.distance > 0) {
+                              distance = Number(identified.distance) || 0;
+                              if (!bestDistance || distance < bestDistance) bestDistance = distance;
+                            }
+                            if (justRegistered) {
+                              cam.lastAutoCreatedAt = now;
+                              log(`[${cam.cameraId}] new_id created shortId=${name}`);
+                            }
+                          }
+                        }
                       }
                     }
                   }

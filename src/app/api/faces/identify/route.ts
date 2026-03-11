@@ -14,6 +14,14 @@ export const dynamic = "force-dynamic";
 export const revalidate = 0;
 
 const DUPLICATE_REASON = "Удалено, такое лицо уже существует в базе.";
+const BLOCKED_IDS_FILE =
+  process.env.WORKER_BLOCKED_FACE_IDS_FILE || path.join(process.cwd(), "worker", "blocked-face-ids.json");
+const BLOCKED_IDS_RELOAD_MS = Math.max(
+  1000,
+  Number.parseInt(process.env.WORKER_BLOCKED_FACE_IDS_RELOAD_MS || "5000", 10) || 5000,
+);
+let blockedIdsCacheAt = 0;
+let blockedIdsCache = new Set<string>();
 
 function parseThreshold(raw: unknown) {
   const value = Number(raw ?? process.env.FACE_IDENTITY_MATCH_THRESHOLD ?? 0.56);
@@ -59,6 +67,34 @@ function parseSnapshotBuffer(raw: unknown): Buffer | null {
 
 function sanitizeShortId(shortId: string) {
   return shortId.replace(/[^A-Za-z0-9_-]/g, "").slice(0, 32);
+}
+
+function normalizeFaceShortId(shortId: string) {
+  return String(shortId || "")
+    .trim()
+    .toUpperCase()
+    .replace(/[^A-Z0-9_-]/g, "")
+    .slice(0, 32);
+}
+
+async function getBlockedFaceIds() {
+  const now = Date.now();
+  if (now - blockedIdsCacheAt <= BLOCKED_IDS_RELOAD_MS) return blockedIdsCache;
+  try {
+    const raw = await fs.readFile(BLOCKED_IDS_FILE, "utf-8");
+    const parsed = JSON.parse(raw);
+    const ids = Array.isArray(parsed) ? parsed : Array.isArray(parsed?.ids) ? parsed.ids : [];
+    const next = new Set<string>();
+    for (const value of ids) {
+      const id = normalizeFaceShortId(String(value || ""));
+      if (id) next.add(id);
+    }
+    blockedIdsCache = next;
+  } catch {
+    blockedIdsCache = new Set();
+  }
+  blockedIdsCacheAt = now;
+  return blockedIdsCache;
 }
 
 async function saveSnapshot(shortId: string, buf: Buffer) {
@@ -144,9 +180,10 @@ async function getBestIdentitySnapshot(faceId: string, shortId: string) {
   return getLatestDiskSnapshot(shortId);
 }
 
-async function createUniqueShortId(length: number) {
+async function createUniqueShortId(length: number, blockedIds: Set<string>) {
   for (let i = 0; i < 20; i += 1) {
     const candidate = generateFaceShortId(length);
+    if (blockedIds.has(normalizeFaceShortId(candidate))) continue;
     const exists = await prisma.faceIdentity.findUnique({
       where: { shortId: candidate },
       select: { id: true },
@@ -176,8 +213,11 @@ export async function POST(request: Request) {
       process.env.FACE_IDENTITY_ID_LENGTH ? Number(process.env.FACE_IDENTITY_ID_LENGTH) : 6,
     );
     const snapshotBuffer = parseSnapshotBuffer(body?.snapshotBase64);
+    const blockedIds = await getBlockedFaceIds();
+    const blockedList = Array.from(blockedIds);
 
     const identities = await prisma.faceIdentity.findMany({
+      where: blockedList.length ? { shortId: { notIn: blockedList } } : undefined,
       select: { id: true, shortId: true, descriptor: true },
     });
 
@@ -210,7 +250,7 @@ export async function POST(request: Request) {
       });
     }
 
-    const shortId = await createUniqueShortId(idLength);
+    const shortId = await createUniqueShortId(idLength, blockedIds);
     const created = await prisma.faceIdentity.create({
       data: {
         shortId,
@@ -225,7 +265,10 @@ export async function POST(request: Request) {
     }
 
     const postCheckCandidates = await prisma.faceIdentity.findMany({
-      where: { id: { not: created.id } },
+      where: {
+        id: { not: created.id },
+        ...(blockedList.length ? { shortId: { notIn: blockedList } } : {}),
+      },
       select: { id: true, shortId: true, descriptor: true, createdAt: true },
     });
 
