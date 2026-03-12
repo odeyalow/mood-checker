@@ -1392,6 +1392,16 @@ async function main() {
     /\/+$/,
     "",
   );
+  const recordMinFaceScore = Math.max(
+    0,
+    Math.min(1, envFloat("WORKER_RECORD_MIN_FACE_SCORE", 0.18)),
+  );
+  const recordMinFaceSidePx = Math.max(8, envInt("WORKER_RECORD_MIN_FACE_SIDE_PX", 24));
+  const recordMinSharpness = Math.max(0, envFloat("WORKER_RECORD_MIN_SHARPNESS", 9));
+  const recordMaxDistance = Math.max(
+    0.01,
+    Math.min(2, envFloat("WORKER_RECORD_MAX_DISTANCE", matchThreshold + 0.03)),
+  );
   const phantomGuardEnabled = envBool("WORKER_PHANTOM_GUARD_ENABLED", true);
   const phantomBaselineDir =
     process.env.WORKER_PHANTOM_BASELINE_DIR || path.join(rootDir, "worker", "phantom-baselines");
@@ -1593,6 +1603,10 @@ async function main() {
       `min_samples=${autoBlockMinSamples} min_ratio=${autoBlockMinRatio.toFixed(2)} ` +
       `min_score=${autoBlockMinFaceScore.toFixed(3)} min_side=${autoBlockMinFaceSidePx} ` +
       `max_motion=${autoBlockMaxMotion.toFixed(2)}`,
+  );
+  log(
+    `record_gate min_score=${recordMinFaceScore.toFixed(3)} min_side=${recordMinFaceSidePx} ` +
+      `min_sharp=${recordMinSharpness.toFixed(2)} max_distance=${recordMaxDistance.toFixed(3)}`,
   );
 
   if (enableEmotions) {
@@ -2252,6 +2266,40 @@ async function main() {
         faceArchiveMaxPerFace,
       ),
     );
+    const camRecordMinFaceScore = Math.max(
+      0,
+      Math.min(
+        1,
+        parseFiniteFloat(
+          getCameraSetting(cameraSettings, cam.cameraId, "recordMinFaceScore", recordMinFaceScore),
+          recordMinFaceScore,
+        ),
+      ),
+    );
+    const camRecordMinFaceSidePx = Math.max(
+      8,
+      parseFiniteInt(
+        getCameraSetting(cameraSettings, cam.cameraId, "recordMinFaceSidePx", recordMinFaceSidePx),
+        recordMinFaceSidePx,
+      ),
+    );
+    const camRecordMinSharpness = Math.max(
+      0,
+      parseFiniteFloat(
+        getCameraSetting(cameraSettings, cam.cameraId, "recordMinSharpness", recordMinSharpness),
+        recordMinSharpness,
+      ),
+    );
+    const camRecordMaxDistance = Math.max(
+      0.01,
+      Math.min(
+        2,
+        parseFiniteFloat(
+          getCameraSetting(cameraSettings, cam.cameraId, "recordMaxDistance", recordMaxDistance),
+          recordMaxDistance,
+        ),
+      ),
+    );
     const camIgnoreZonesRaw = getCameraSetting(
       cameraSettings,
       cam.cameraId,
@@ -2447,6 +2495,19 @@ async function main() {
       cam.identityLockUntil = now + camIdentityLockMs;
       return { name: safeName, distance: safeDistance, overridden: false };
     };
+    const isRecordablePerson = (person) => {
+      if (!person || isUnknownIdentity(person.name)) return false;
+      if (person.lockOverridden) return false;
+      const faceScore = Number(person.faceScore ?? 0);
+      const faceSide = Number(person.faceSide ?? 0);
+      const faceSharpness = Number(person.faceSharpness ?? 0);
+      const distance = Number(person.distance ?? 0);
+      if (faceScore < camRecordMinFaceScore) return false;
+      if (faceSide < camRecordMinFaceSidePx) return false;
+      if (faceSharpness < camRecordMinSharpness) return false;
+      if (Number.isFinite(distance) && distance > 0 && distance > camRecordMaxDistance) return false;
+      return true;
+    };
 
     const frameUrl = buildFrameUrl(frameApiBase, cam.src, frameApiTimeoutMs);
     const zoomOverride = Number(workerZoomMap?.[cam.cameraId]);
@@ -2475,6 +2536,7 @@ async function main() {
           `db_reentry_ms=${camDbReentryGapMs} session_ms=${camSessionSnapshotIntervalMs} ` +
           `absence_ms=${camSessionAbsenceMs} resolve_ms=${camSessionResolveWaitMs} ` +
           `archive=${camFaceArchiveEnabled ? "on" : "off"} archive_cd=${camFaceArchiveCooldownMs} ` +
+          `record_gate=${camRecordMinFaceScore.toFixed(3)}/${camRecordMinFaceSidePx}/${camRecordMinSharpness.toFixed(1)}/${camRecordMaxDistance.toFixed(3)} ` +
           `phantom=${camPhantomGuardEnabled && camPhantomBaselines.length ? "on" : "off"} ` +
           `phantom_base=${camPhantomBaselines.length} phantom_hash=${camPhantomHashDistanceMax} ` +
           `phantom_bank=${camPhantomBankThreshold.toFixed(3)} ignore_zones=${camIgnoreZones.length} ` +
@@ -2754,6 +2816,7 @@ async function main() {
             let faceSide = 0;
             let faceScore = 0;
             let faceSharpness = 0;
+            let lockOverridden = false;
             const descriptor = descriptorToArray(det?.descriptor);
             if (enableMatching && descriptor) {
               faceSide = getFaceSide(det);
@@ -2894,6 +2957,7 @@ async function main() {
               const lock = applyIdentityLock(name, distance);
               if (lock.overridden) {
                 justRegistered = false;
+                lockOverridden = true;
               }
               name = lock.name;
               distance = Number(lock.distance) || 0;
@@ -2946,6 +3010,7 @@ async function main() {
                 faceScore: Number(faceScore.toFixed(4)),
                 faceSide: Number(faceSide.toFixed(1)),
                 faceSharpness: Number(faceSharpness.toFixed(2)),
+                lockOverridden,
                 justRegistered,
               });
             }
@@ -3037,6 +3102,7 @@ async function main() {
             for (const person of people) {
               const personName = String(person?.name ?? "").trim();
               if (!personName || isUnknownIdentity(personName) || seenNames.has(personName)) continue;
+              if (!isRecordablePerson(person)) continue;
               seenNames.add(personName);
               const lastArchivedAt = Number(cam.lastFaceArchiveAtByName.get(personName) ?? 0);
               if (now - lastArchivedAt < camFaceArchiveCooldownMs) continue;
@@ -3120,6 +3186,7 @@ async function main() {
             for (const person of people) {
               if (isUnknownIdentity(person.name)) continue;
               if (blockedFaceIds.has(normalizeFaceShortId(person.name))) continue;
+              if (!isRecordablePerson(person)) continue;
               const sessionKey = person.name;
               let session = cam.presenceSessions.get(sessionKey);
               if (!session) {
