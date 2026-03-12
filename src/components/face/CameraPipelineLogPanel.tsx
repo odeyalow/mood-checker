@@ -230,7 +230,8 @@ export default function CameraPipelineLogPanel({
             seenDedupIdsRef.current.add(item.id);
 
             const action = String(item.action || "").toLowerCase();
-            if (!action.startsWith("phantom_")) continue;
+            const isPhantomEvent = action.startsWith("phantom_") || action === "auto_quarantine_blocked";
+            if (!isPhantomEvent) continue;
 
             const cameraId = String(item.sourceShortId || "").trim();
             if (!cameraId || !cameraNameById[cameraId]) continue;

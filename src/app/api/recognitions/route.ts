@@ -15,11 +15,25 @@ const BLOCKED_IDS_RELOAD_MS = Math.max(
 );
 let blockedIdsCacheAt = 0;
 let blockedIdsCache = new Set<string>();
+const qualityWindowByKey = new Map<
+  string,
+  { startedAt: number; suspiciousCount: number; totalCount: number; lastSeenAt: number }
+>();
 
 function parseLimit(raw: string | null, fallback = 10) {
   const n = Number.parseInt(raw ?? "", 10);
   if (!Number.isFinite(n)) return fallback;
   return Math.max(1, Math.min(100, n));
+}
+
+function parseEnvInt(name: string, fallback: number) {
+  const n = Number.parseInt(process.env[name] || "", 10);
+  return Number.isFinite(n) ? n : fallback;
+}
+
+function parseEnvFloat(name: string, fallback: number) {
+  const n = Number.parseFloat(process.env[name] || "");
+  return Number.isFinite(n) ? n : fallback;
 }
 
 function isUnknownIdentity(name: string) {
@@ -173,6 +187,9 @@ export async function POST(request: Request) {
     const workerZoomRaw = Number(body?.workerZoom);
     const frameWidthRaw = Number(body?.frameWidth);
     const frameHeightRaw = Number(body?.frameHeight);
+    const faceScoreRaw = Number(body?.faceScore);
+    const faceSideRaw = Number(body?.faceSide);
+    const faceSharpnessRaw = Number(body?.faceSharpness);
     const snapshotBuffer = parseSnapshotBuffer(body?.snapshotBase64);
     const snapshotPublicUrl = parseSnapshotPublicUrl(body?.snapshotUrl);
     const descriptor = normalizeDescriptor(body?.descriptor);
@@ -188,6 +205,56 @@ export async function POST(request: Request) {
     const blockedIds = await getBlockedFaceIds();
     if (blockedIds.has(normalizeFaceShortId(name))) {
       return NextResponse.json({ ok: true, skipped: "blocked_identity" });
+    }
+
+    const qualityGuardEnabled = String(process.env.RECOGNITION_QUALITY_GUARD_ENABLED || "true")
+      .trim()
+      .toLowerCase() !== "false";
+    if (qualityGuardEnabled) {
+      const minFaceScore = Math.max(0, Math.min(1, parseEnvFloat("RECOGNITION_MIN_FACE_SCORE", 0.12)));
+      const minFaceSidePx = Math.max(8, parseEnvInt("RECOGNITION_MIN_FACE_SIDE_PX", 20));
+      const minFaceSharpness = Math.max(0, parseEnvFloat("RECOGNITION_MIN_FACE_SHARPNESS", 7));
+      const windowMs = Math.max(30_000, parseEnvInt("RECOGNITION_SUSPICIOUS_WINDOW_MS", 5 * 60 * 1000));
+      const maxSuspiciousPerWindow = Math.max(
+        10,
+        parseEnvInt("RECOGNITION_SUSPICIOUS_MAX_PER_WINDOW", 40),
+      );
+      const lowScore = Number.isFinite(faceScoreRaw) ? faceScoreRaw < minFaceScore : false;
+      const lowSide = Number.isFinite(faceSideRaw) ? faceSideRaw < minFaceSidePx : false;
+      const lowSharpness = Number.isFinite(faceSharpnessRaw) ? faceSharpnessRaw < minFaceSharpness : false;
+      const suspicious = (lowScore ? 1 : 0) + (lowSide ? 1 : 0) + (lowSharpness ? 1 : 0) >= 2;
+
+      const key = `${cameraId || "none"}:${name}`;
+      const nowTs = Date.now();
+      const prev = qualityWindowByKey.get(key);
+      const active = prev && nowTs - prev.startedAt <= windowMs;
+      const current = active
+        ? {
+            startedAt: prev.startedAt,
+            suspiciousCount: prev.suspiciousCount + (suspicious ? 1 : 0),
+            totalCount: prev.totalCount + 1,
+            lastSeenAt: nowTs,
+          }
+        : {
+            startedAt: nowTs,
+            suspiciousCount: suspicious ? 1 : 0,
+            totalCount: 1,
+            lastSeenAt: nowTs,
+          };
+      qualityWindowByKey.set(key, current);
+
+      if (suspicious && current.suspiciousCount > maxSuspiciousPerWindow) {
+        return NextResponse.json({ ok: true, skipped: "quality_guard" });
+      }
+
+      // Best-effort cleanup.
+      if (qualityWindowByKey.size > 1500) {
+        for (const [entryKey, entry] of qualityWindowByKey.entries()) {
+          if (nowTs - entry.lastSeenAt > windowMs * 2) {
+            qualityWindowByKey.delete(entryKey);
+          }
+        }
+      }
     }
 
     let snapshotUrl: string | null = null;

@@ -87,6 +87,87 @@ async function loadBlockedFaceIds(filePath) {
   return out;
 }
 
+async function saveBlockedFaceIds(filePath, ids) {
+  if (!filePath) return false;
+  const list = Array.from(ids || [])
+    .map((value) => normalizeFaceShortId(value))
+    .filter(Boolean)
+    .sort();
+  const payload = {
+    ids: list,
+    updatedAt: new Date().toISOString(),
+  };
+  const dir = path.dirname(filePath);
+  await fsp.mkdir(dir, { recursive: true }).catch(() => {});
+  const tmp = `${filePath}.tmp`;
+  await fsp.writeFile(tmp, `${JSON.stringify(payload, null, 2)}\n`, "utf-8");
+  await fsp.rename(tmp, filePath);
+  return true;
+}
+
+function normalizeIgnoreZone(zone) {
+  if (!zone) return null;
+  if (Array.isArray(zone) && zone.length >= 4) {
+    const x = Number(zone[0]);
+    const y = Number(zone[1]);
+    let w = Number(zone[2]);
+    let h = Number(zone[3]);
+    if (![x, y, w, h].every((n) => Number.isFinite(n))) return null;
+
+    // Support [x1,y1,x2,y2] by converting to [x,y,w,h] when right/bottom look absolute.
+    if (w > 0 && h > 0 && (w > 1 || h > 1 || w > x || h > y) && x + w > 1.2 && y + h > 1.2) {
+      w = w - x;
+      h = h - y;
+    }
+
+    if (w <= 0 || h <= 0) return null;
+    return {
+      x: Math.max(0, Math.min(1, x)),
+      y: Math.max(0, Math.min(1, y)),
+      w: Math.max(0, Math.min(1, w)),
+      h: Math.max(0, Math.min(1, h)),
+    };
+  }
+
+  if (typeof zone === "object") {
+    const x = Number(zone.x);
+    const y = Number(zone.y);
+    const w = Number(zone.w ?? zone.width);
+    const h = Number(zone.h ?? zone.height);
+    if (![x, y, w, h].every((n) => Number.isFinite(n))) return null;
+    if (w <= 0 || h <= 0) return null;
+    return {
+      x: Math.max(0, Math.min(1, x)),
+      y: Math.max(0, Math.min(1, y)),
+      w: Math.max(0, Math.min(1, w)),
+      h: Math.max(0, Math.min(1, h)),
+    };
+  }
+
+  return null;
+}
+
+function parseIgnoreZones() {
+  const raw = (process.env.WORKER_IGNORE_ZONES_JSON ?? "").trim();
+  if (!raw) return {};
+  try {
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return {};
+    const out = {};
+    for (const [cameraId, zonesRaw] of Object.entries(parsed)) {
+      if (!Array.isArray(zonesRaw)) continue;
+      const zones = zonesRaw
+        .map((zone) => normalizeIgnoreZone(zone))
+        .filter(Boolean);
+      if (zones.length) out[String(cameraId).trim()] = zones;
+    }
+    return out;
+  } catch (err) {
+    log(`ignore zones parse error: ${String(err)}`);
+    return {};
+  }
+}
+
 function normalizeDescriptor(value) {
   if (!Array.isArray(value) || value.length !== FACE_DESCRIPTOR_LENGTH) return null;
   const descriptor = value.map((item) => Number(item));
@@ -590,6 +671,114 @@ function iou(a, b) {
   return union > 0 ? inter / union : 0;
 }
 
+function rectOverlapRatio(subject, zone) {
+  const sx2 = subject.x + subject.width;
+  const sy2 = subject.y + subject.height;
+  const zx2 = zone.x + zone.width;
+  const zy2 = zone.y + zone.height;
+  const ix1 = Math.max(subject.x, zone.x);
+  const iy1 = Math.max(subject.y, zone.y);
+  const ix2 = Math.min(sx2, zx2);
+  const iy2 = Math.min(sy2, zy2);
+  const iw = Math.max(0, ix2 - ix1);
+  const ih = Math.max(0, iy2 - iy1);
+  const inter = iw * ih;
+  if (inter <= 0) return 0;
+  const area = Math.max(1, subject.width * subject.height);
+  return inter / area;
+}
+
+function isDetectionIgnoredByZones(det, zones, frameWidth, frameHeight, overlapThreshold = 0.35) {
+  if (!Array.isArray(zones) || !zones.length) return false;
+  const box = getBox(det);
+  if (!box) return false;
+  for (const zone of zones) {
+    const zx = Math.floor(Number(zone.x ?? 0) * frameWidth);
+    const zy = Math.floor(Number(zone.y ?? 0) * frameHeight);
+    const zw = Math.floor(Number(zone.w ?? 0) * frameWidth);
+    const zh = Math.floor(Number(zone.h ?? 0) * frameHeight);
+    if (!zw || !zh) continue;
+    const ratio = rectOverlapRatio(
+      {
+        x: box.x,
+        y: box.y,
+        width: box.width,
+        height: box.height,
+      },
+      {
+        x: zx,
+        y: zy,
+        width: zw,
+        height: zh,
+      },
+    );
+    if (ratio >= overlapThreshold) return true;
+  }
+  return false;
+}
+
+function estimateFaceSharpness(rgb, frameWidth, frameHeight, det) {
+  const box = getBox(det);
+  if (!box || !(rgb instanceof Uint8Array)) return 0;
+  const x0 = Math.max(0, Math.floor(box.x));
+  const y0 = Math.max(0, Math.floor(box.y));
+  const x1 = Math.min(frameWidth - 1, Math.ceil(box.x + box.width));
+  const y1 = Math.min(frameHeight - 1, Math.ceil(box.y + box.height));
+  const w = Math.max(0, x1 - x0);
+  const h = Math.max(0, y1 - y0);
+  if (w < 8 || h < 8) return 0;
+
+  let sum = 0;
+  let count = 0;
+  for (let y = y0 + 1; y < y1; y += 1) {
+    for (let x = x0 + 1; x < x1; x += 1) {
+      const idx = (y * frameWidth + x) * 3;
+      const left = idx - 3;
+      const up = idx - frameWidth * 3;
+      const lum = (77 * rgb[idx] + 150 * rgb[idx + 1] + 29 * rgb[idx + 2]) >> 8;
+      const lumLeft = (77 * rgb[left] + 150 * rgb[left + 1] + 29 * rgb[left + 2]) >> 8;
+      const lumUp = (77 * rgb[up] + 150 * rgb[up + 1] + 29 * rgb[up + 2]) >> 8;
+      sum += Math.abs(lum - lumLeft) + Math.abs(lum - lumUp);
+      count += 1;
+    }
+  }
+  if (!count) return 0;
+  return sum / count;
+}
+
+function buildDescriptorBankFromBlockedIds(labeledDescriptors, blockedIds) {
+  const bank = [];
+  if (!Array.isArray(labeledDescriptors) || !labeledDescriptors.length) return bank;
+  if (!(blockedIds instanceof Set) || !blockedIds.size) return bank;
+  for (const item of labeledDescriptors) {
+    const label = normalizeFaceShortId(item?.label);
+    if (!label || !blockedIds.has(label)) continue;
+    const descriptors = Array.isArray(item?.descriptors) ? item.descriptors : [];
+    for (const descriptor of descriptors) {
+      const safe = normalizeDescriptor(descriptor);
+      if (!safe) continue;
+      bank.push({ label, descriptor: safe });
+    }
+  }
+  return bank;
+}
+
+function findClosestDescriptorInBank(bank, descriptor) {
+  const safe = normalizeDescriptor(descriptor);
+  if (!safe || !Array.isArray(bank) || !bank.length) return null;
+  let best = null;
+  for (const entry of bank) {
+    const known = normalizeDescriptor(entry?.descriptor);
+    if (!known) continue;
+    const distance = Number(faceapi.euclideanDistance(safe, known));
+    if (!Number.isFinite(distance)) continue;
+    if (!best || distance < best.distance) {
+      best = { label: String(entry?.label || ""), distance };
+    }
+  }
+  return best;
+}
+
 function computeLumaBufferFromRgb(rgb) {
   const luma = new Uint8Array(Math.floor(rgb.length / 3));
   let j = 0;
@@ -1087,6 +1276,11 @@ async function main() {
   const workerZoomReloadMs = Math.max(250, envInt("WORKER_ZOOM_RELOAD_MS", 700));
   const workerZoomDefaults = parseWorkerZoomDefaults();
   const cameraSettings = parseCameraSettings();
+  const ignoreZonesByCamera = parseIgnoreZones();
+  const ignoreZoneOverlapThreshold = Math.max(
+    0.05,
+    Math.min(1, envFloat("WORKER_IGNORE_ZONE_OVERLAP_THRESHOLD", 0.35)),
+  );
   const parallelCameraLimit = Math.max(
     1,
     envInt("WORKER_PARALLEL_CAMERAS", Math.max(1, cameras.length)),
@@ -1156,7 +1350,40 @@ async function main() {
     0.01,
     Math.min(2, envFloat("WORKER_NEW_ID_STABILITY_MAX_DISTANCE", 0.48)),
   );
+  const newIdMinSharpness = Math.max(0, envFloat("WORKER_NEW_ID_MIN_SHARPNESS", 11));
+  const newIdEmptyMinSharpness = Math.max(
+    0,
+    envFloat("WORKER_NEW_ID_EMPTY_MIN_SHARPNESS", Math.max(newIdMinSharpness, 14)),
+  );
   const newIdMaxGapMs = Math.max(120, envInt("WORKER_NEW_ID_MAX_GAP_MS", 1500));
+  const phantomBankThreshold = Math.max(
+    0.01,
+    Math.min(2, envFloat("WORKER_PHANTOM_BANK_THRESHOLD", 0.5)),
+  );
+  const autoBlockEnabled = envBool("WORKER_AUTO_BLOCK_ENABLED", true);
+  const autoBlockWindowMs = Math.max(
+    60_000,
+    envInt("WORKER_AUTO_BLOCK_WINDOW_MS", 10 * 60 * 1000),
+  );
+  const autoBlockMinSamples = Math.max(30, envInt("WORKER_AUTO_BLOCK_MIN_SAMPLES", 80));
+  const autoBlockMinRatio = Math.max(
+    0.55,
+    Math.min(1, envFloat("WORKER_AUTO_BLOCK_MIN_RATIO", 0.88)),
+  );
+  const autoBlockMinFaceScore = Math.max(
+    0,
+    Math.min(1, envFloat("WORKER_AUTO_BLOCK_MIN_FACE_SCORE", 0.2)),
+  );
+  const autoBlockMinFaceSidePx = Math.max(8, envInt("WORKER_AUTO_BLOCK_MIN_FACE_SIDE_PX", 26));
+  const autoBlockMaxMotion = Math.max(0, envFloat("WORKER_AUTO_BLOCK_MAX_MOTION", 2.2));
+  const autoBlockMinEmotionConfidence = Math.max(
+    0,
+    Math.min(1, envFloat("WORKER_AUTO_BLOCK_MIN_EMOTION_CONFIDENCE", 0.1)),
+  );
+  const autoBlockCooldownMs = Math.max(
+    autoBlockWindowMs,
+    envInt("WORKER_AUTO_BLOCK_COOLDOWN_MS", 30 * 60 * 1000),
+  );
   const faceArchiveEnabled = envBool("WORKER_FACE_ARCHIVE_ENABLED", true);
   const faceArchiveCooldownMs = Math.max(500, envInt("WORKER_FACE_ARCHIVE_COOLDOWN_MS", 2500));
   const faceArchiveMaxPerFace = Math.max(5, envInt("WORKER_FACE_ARCHIVE_MAX_PER_FACE", 50));
@@ -1206,6 +1433,7 @@ async function main() {
   await faceapi.nets.tinyFaceDetector.loadFromDisk(modelDir);
   let knownLabeledDescriptors = [];
   let blockedFaceIds = await loadBlockedFaceIds(blockedFaceIdsFile);
+  let blockedDescriptorBank = [];
   let lastBlockedFaceIdsReloadAt = Date.now();
   let lastFaceRegistryReloadAt = 0;
   let ssdLoaded = false;
@@ -1245,9 +1473,16 @@ async function main() {
         nextDescriptors.push({ label, descriptors: [descriptor] });
       }
       knownLabeledDescriptors = nextDescriptors;
+      blockedDescriptorBank = buildDescriptorBankFromBlockedIds(
+        knownLabeledDescriptors,
+        blockedFaceIds,
+      );
       lastFaceRegistryReloadAt = loadedAt;
       if (reason) {
-        log(`[faces] registry reload reason=${reason} count=${knownLabeledDescriptors.length}`);
+        log(
+          `[faces] registry reload reason=${reason} count=${knownLabeledDescriptors.length} ` +
+            `blocked_bank=${blockedDescriptorBank.length}`,
+        );
       }
     } catch (err) {
       if (reason) {
@@ -1346,6 +1581,19 @@ async function main() {
   log(
     `blocked_ids file=${blockedFaceIdsFile} count=${blockedFaceIds.size} reload_ms=${blockedFaceIdsReloadMs}`,
   );
+  log(
+    `new_id_quality min_sharpness=${newIdMinSharpness.toFixed(2)} ` +
+      `empty_min_sharpness=${newIdEmptyMinSharpness.toFixed(2)} phantom_bank_th=${phantomBankThreshold.toFixed(3)}`,
+  );
+  log(
+    `ignore_zones cameras=${Object.keys(ignoreZonesByCamera).length} overlap=${ignoreZoneOverlapThreshold.toFixed(2)}`,
+  );
+  log(
+    `auto_block=${autoBlockEnabled ? "on" : "off"} window_ms=${autoBlockWindowMs} ` +
+      `min_samples=${autoBlockMinSamples} min_ratio=${autoBlockMinRatio.toFixed(2)} ` +
+      `min_score=${autoBlockMinFaceScore.toFixed(3)} min_side=${autoBlockMinFaceSidePx} ` +
+      `max_motion=${autoBlockMaxMotion.toFixed(2)}`,
+  );
 
   if (enableEmotions) {
     await faceapi.nets.faceExpressionNet.loadFromDisk(modelDir);
@@ -1364,6 +1612,118 @@ async function main() {
     state.workerZoom = clampWorkerZoom(workerZoomDefaults[c.cameraId] ?? 1, 1);
     return state;
   });
+  const autoBlockStatsByKey = new Map();
+  const autoBlockLastTriggeredAt = new Map();
+  let blockedIdsWriteLock = Promise.resolve();
+
+  const persistBlockedIds = async () => {
+    blockedIdsWriteLock = blockedIdsWriteLock
+      .then(() => saveBlockedFaceIds(blockedFaceIdsFile, blockedFaceIds))
+      .catch((err) => {
+        log(`[auto-block] save blocked ids failed err=${String(err)}`);
+      });
+    await blockedIdsWriteLock;
+  };
+
+  const clearIdentityFromStates = (shortId) => {
+    for (const state of states) {
+      state.presenceSessions.delete(shortId);
+      state.lastSeenMatchedAt.delete(shortId);
+      state.lastDbSentAt.delete(`${state.cameraId}:${shortId}`);
+      state.lastFaceArchiveAtByName.delete(shortId);
+      state.lastFaceArchiveUrlByName.delete(shortId);
+      state.emotionSeenAtByName.delete(shortId);
+      state.emotionEmaByName.delete(shortId);
+      if (Array.isArray(state.people) && state.people.length) {
+        state.people = state.people.filter((person) => String(person?.name || "") !== shortId);
+      }
+      if (Array.isArray(state.matchedNames) && state.matchedNames.length) {
+        state.matchedNames = state.matchedNames.filter((name) => String(name || "") !== shortId);
+      }
+    }
+  };
+
+  const maybeAutoBlockIdentity = async ({
+    cam,
+    person,
+    now,
+    quality,
+    sourceJpg,
+    windowMs,
+    minSamples,
+    minRatio,
+    cooldownMs,
+    enabled,
+  }) => {
+    if (!enabled) return false;
+    const shortId = normalizeFaceShortId(person?.name);
+    if (!shortId || isUnknownIdentity(shortId)) return false;
+    if (blockedFaceIds.has(shortId)) return true;
+
+    const key = `${cam.cameraId}:${shortId}`;
+    let stat = autoBlockStatsByKey.get(key);
+    if (!stat || now - stat.windowStartAt > windowMs) {
+      stat = {
+        windowStartAt: now,
+        samples: 0,
+        suspicious: 0,
+        lastSeenAt: now,
+      };
+    }
+    stat.samples += 1;
+    if (quality.suspicious) stat.suspicious += 1;
+    stat.lastSeenAt = now;
+    autoBlockStatsByKey.set(key, stat);
+
+    if (stat.samples < minSamples) return false;
+    const ratio = stat.suspicious / Math.max(1, stat.samples);
+    if (ratio < minRatio) return false;
+
+    const lastTriggeredAt = Number(autoBlockLastTriggeredAt.get(shortId) || 0);
+    if (now - lastTriggeredAt < cooldownMs) return true;
+
+    blockedFaceIds.add(shortId);
+    autoBlockLastTriggeredAt.set(shortId, now);
+    clearIdentityFromStates(shortId);
+    blockedDescriptorBank = buildDescriptorBankFromBlockedIds(
+      knownLabeledDescriptors,
+      blockedFaceIds,
+    );
+    await persistBlockedIds();
+
+    let sourceSnapshotUrl = "";
+    try {
+      sourceSnapshotUrl = await savePhantomSnapshot(
+        phantomSnapshotDir,
+        phantomSnapshotPublicBase,
+        cam.cameraId,
+        sourceJpg,
+        now,
+      );
+    } catch {
+      sourceSnapshotUrl = "";
+    }
+
+    await writePhantomRejectionLog({
+      cameraId: cam.cameraId,
+      action: "auto_quarantine_blocked",
+      reason:
+        `Автоблокировка ID: подозрение на фантом (ratio=${ratio.toFixed(2)}, ` +
+        `samples=${stat.samples}, score=${Number(person?.faceScore ?? 0).toFixed(3)}, ` +
+        `side=${Number(person?.faceSide ?? 0).toFixed(1)}, sharp=${Number(person?.faceSharpness ?? 0).toFixed(1)}).`,
+      sourceSnapshotUrl,
+      targetShortId: shortId,
+      distance: Number(person?.distance ?? Number.NaN),
+      threshold: minRatio,
+    });
+
+    log(
+      `[${cam.cameraId}] auto_blocked shortId=${shortId} ratio=${ratio.toFixed(2)} ` +
+        `samples=${stat.samples} suspicious=${stat.suspicious}`,
+    );
+    return true;
+  };
+
   if (phantomGuardEnabled) {
     const baselineSummary = states
       .map((cam) => `${cam.cameraId}:${(phantomBaselinesByCamera.get(cam.cameraId) || []).length}`)
@@ -1810,6 +2170,35 @@ async function main() {
         newIdMaxGapMs,
       ),
     );
+    const camNewIdMinSharpness = Math.max(
+      0,
+      parseFiniteFloat(
+        getCameraSetting(cameraSettings, cam.cameraId, "newIdMinSharpness", newIdMinSharpness),
+        newIdMinSharpness,
+      ),
+    );
+    const camNewIdEmptyMinSharpness = Math.max(
+      camNewIdMinSharpness,
+      parseFiniteFloat(
+        getCameraSetting(
+          cameraSettings,
+          cam.cameraId,
+          "newIdEmptyMinSharpness",
+          newIdEmptyMinSharpness,
+        ),
+        newIdEmptyMinSharpness,
+      ),
+    );
+    const camPhantomBankThreshold = Math.max(
+      0.01,
+      Math.min(
+        2,
+        parseFiniteFloat(
+          getCameraSetting(cameraSettings, cam.cameraId, "phantomBankThreshold", phantomBankThreshold),
+          phantomBankThreshold,
+        ),
+      ),
+    );
     const camIdentifyMinIntervalMs = Math.max(
       400,
       parseFiniteInt(
@@ -1863,6 +2252,118 @@ async function main() {
         faceArchiveMaxPerFace,
       ),
     );
+    const camIgnoreZonesRaw = getCameraSetting(
+      cameraSettings,
+      cam.cameraId,
+      "ignoreZones",
+      ignoreZonesByCamera[cam.cameraId] || [],
+    );
+    const camIgnoreZones = Array.isArray(camIgnoreZonesRaw)
+      ? camIgnoreZonesRaw.map((zone) => normalizeIgnoreZone(zone)).filter(Boolean)
+      : [];
+    const camIgnoreZoneOverlapThreshold = Math.max(
+      0.05,
+      Math.min(
+        1,
+        parseFiniteFloat(
+          getCameraSetting(
+            cameraSettings,
+            cam.cameraId,
+            "ignoreZoneOverlapThreshold",
+            ignoreZoneOverlapThreshold,
+          ),
+          ignoreZoneOverlapThreshold,
+        ),
+      ),
+    );
+    const camAutoBlockEnabledRaw = getCameraSetting(
+      cameraSettings,
+      cam.cameraId,
+      "autoBlockEnabled",
+      autoBlockEnabled,
+    );
+    const camAutoBlockEnabled =
+      typeof camAutoBlockEnabledRaw === "boolean" ? camAutoBlockEnabledRaw : autoBlockEnabled;
+    const camAutoBlockWindowMs = Math.max(
+      60_000,
+      parseFiniteInt(
+        getCameraSetting(cameraSettings, cam.cameraId, "autoBlockWindowMs", autoBlockWindowMs),
+        autoBlockWindowMs,
+      ),
+    );
+    const camAutoBlockMinSamples = Math.max(
+      20,
+      parseFiniteInt(
+        getCameraSetting(cameraSettings, cam.cameraId, "autoBlockMinSamples", autoBlockMinSamples),
+        autoBlockMinSamples,
+      ),
+    );
+    const camAutoBlockMinRatio = Math.max(
+      0.5,
+      Math.min(
+        1,
+        parseFiniteFloat(
+          getCameraSetting(cameraSettings, cam.cameraId, "autoBlockMinRatio", autoBlockMinRatio),
+          autoBlockMinRatio,
+        ),
+      ),
+    );
+    const camAutoBlockMinFaceScore = Math.max(
+      0,
+      Math.min(
+        1,
+        parseFiniteFloat(
+          getCameraSetting(
+            cameraSettings,
+            cam.cameraId,
+            "autoBlockMinFaceScore",
+            autoBlockMinFaceScore,
+          ),
+          autoBlockMinFaceScore,
+        ),
+      ),
+    );
+    const camAutoBlockMinFaceSidePx = Math.max(
+      8,
+      parseFiniteInt(
+        getCameraSetting(
+          cameraSettings,
+          cam.cameraId,
+          "autoBlockMinFaceSidePx",
+          autoBlockMinFaceSidePx,
+        ),
+        autoBlockMinFaceSidePx,
+      ),
+    );
+    const camAutoBlockMaxMotion = Math.max(
+      0,
+      parseFiniteFloat(
+        getCameraSetting(cameraSettings, cam.cameraId, "autoBlockMaxMotion", autoBlockMaxMotion),
+        autoBlockMaxMotion,
+      ),
+    );
+    const camAutoBlockMinEmotionConfidence = Math.max(
+      0,
+      Math.min(
+        1,
+        parseFiniteFloat(
+          getCameraSetting(
+            cameraSettings,
+            cam.cameraId,
+            "autoBlockMinEmotionConfidence",
+            autoBlockMinEmotionConfidence,
+          ),
+          autoBlockMinEmotionConfidence,
+        ),
+      ),
+    );
+    const camAutoBlockCooldownMs = Math.max(
+      camAutoBlockWindowMs,
+      parseFiniteInt(
+        getCameraSetting(cameraSettings, cam.cameraId, "autoBlockCooldownMs", autoBlockCooldownMs),
+        autoBlockCooldownMs,
+      ),
+    );
     const camPhantomBaselines = phantomBaselinesByCamera.get(cam.cameraId) || [];
     const evictPresenceSessions = (activeNames = null) => {
       for (const [savedName, session] of cam.presenceSessions.entries()) {
@@ -1878,7 +2379,7 @@ async function main() {
       cam.newIdGateStreak = 0;
       cam.newIdGateLastAt = 0;
     };
-    const confirmNewIdCandidate = (descriptor, faceSide, identityScore) => {
+    const confirmNewIdCandidate = (descriptor, faceSide, identityScore, faceSharpness = 0) => {
       if (!faceAutoCreate || !Array.isArray(descriptor) || descriptor.length !== FACE_DESCRIPTOR_LENGTH) {
         resetNewIdGate();
         return false;
@@ -1890,7 +2391,14 @@ async function main() {
       const effectiveMinFaceSide = noKnownIdentities
         ? Math.max(camNewIdMinFaceSidePx, camNewIdEmptyMinFaceSidePx)
         : camNewIdMinFaceSidePx;
-      if (faceSide < effectiveMinFaceSide || identityScore < effectiveMinScore) {
+      const effectiveMinSharpness = noKnownIdentities
+        ? Math.max(camNewIdMinSharpness, camNewIdEmptyMinSharpness)
+        : camNewIdMinSharpness;
+      if (
+        faceSide < effectiveMinFaceSide ||
+        identityScore < effectiveMinScore ||
+        faceSharpness < effectiveMinSharpness
+      ) {
         resetNewIdGate();
         return false;
       }
@@ -1959,7 +2467,8 @@ async function main() {
           `identity_min=${camIdentityMinScore.toFixed(3)} frontal=${camRequireFrontalFace ? "on" : "off"} ` +
           `new_id_frames=${camNewIdConfirmFrames} new_id_min=${camNewIdMinScore.toFixed(3)} ` +
           `new_id_side=${camNewIdMinFaceSidePx} new_id_empty_min=${camNewIdEmptyMinScore.toFixed(3)} ` +
-          `new_id_empty_side=${camNewIdEmptyMinFaceSidePx} new_id_stability=${camNewIdStabilityMaxDistance.toFixed(3)} ` +
+          `new_id_empty_side=${camNewIdEmptyMinFaceSidePx} new_id_sharp=${camNewIdMinSharpness.toFixed(2)} ` +
+          `new_id_empty_sharp=${camNewIdEmptyMinSharpness.toFixed(2)} new_id_stability=${camNewIdStabilityMaxDistance.toFixed(3)} ` +
           `identify_cd=${camIdentifyMinIntervalMs} auto_create_cd=${camAutoCreateCooldownMs} ` +
           `lock_ms=${camIdentityLockMs} lock_margin=${camIdentityLockSwitchMargin.toFixed(3)} ` +
           `emotion_min=${camEmotionMinConfidence.toFixed(3)} emotion_floor=${camEmotionLowConfidenceFloor.toFixed(3)} ` +
@@ -1967,7 +2476,9 @@ async function main() {
           `absence_ms=${camSessionAbsenceMs} resolve_ms=${camSessionResolveWaitMs} ` +
           `archive=${camFaceArchiveEnabled ? "on" : "off"} archive_cd=${camFaceArchiveCooldownMs} ` +
           `phantom=${camPhantomGuardEnabled && camPhantomBaselines.length ? "on" : "off"} ` +
-          `phantom_base=${camPhantomBaselines.length} phantom_hash=${camPhantomHashDistanceMax}`,
+          `phantom_base=${camPhantomBaselines.length} phantom_hash=${camPhantomHashDistanceMax} ` +
+          `phantom_bank=${camPhantomBankThreshold.toFixed(3)} ignore_zones=${camIgnoreZones.length} ` +
+          `auto_block=${camAutoBlockEnabled ? "on" : "off"} auto_block_samples=${camAutoBlockMinSamples}`,
       );
     }
 
@@ -2062,6 +2573,18 @@ async function main() {
         minAspect: camFilterMinAspect,
         maxAspect: camFilterMaxAspect,
       });
+      if (camIgnoreZones.length) {
+        detections = detections.filter(
+          (det) =>
+            !isDetectionIgnoredByZones(
+              det,
+              camIgnoreZones,
+              workerWidth,
+              workerHeight,
+              camIgnoreZoneOverlapThreshold,
+            ),
+        );
+      }
       if (sceneLooksEmpty && detections.length) {
         if (now - cam.lastPhantomLogAt >= camPhantomLogCooldownMs) {
           cam.lastPhantomLogAt = now;
@@ -2201,6 +2724,18 @@ async function main() {
             minAspect: camFilterMinAspect,
             maxAspect: camFilterMaxAspect,
           });
+          if (camIgnoreZones.length) {
+            results = results.filter(
+              (det) =>
+                !isDetectionIgnoredByZones(
+                  det,
+                  camIgnoreZones,
+                  workerWidth,
+                  workerHeight,
+                  camIgnoreZoneOverlapThreshold,
+                ),
+            );
+          }
 
           const snapshotBase64 = jpg.toString("base64");
           const people = [];
@@ -2216,10 +2751,15 @@ async function main() {
             let name = "unknown";
             let distance = 0;
             let justRegistered = false;
+            let faceSide = 0;
+            let faceScore = 0;
+            let faceSharpness = 0;
             const descriptor = descriptorToArray(det?.descriptor);
             if (enableMatching && descriptor) {
-              const faceSide = getFaceSide(det);
-              const identityScore = getScore(det);
+              faceSide = getFaceSide(det);
+              faceScore = getScore(det);
+              faceSharpness = estimateFaceSharpness(rgb, workerWidth, workerHeight, det);
+              const identityScore = faceScore;
               const isFrontalFace = isLikelyFrontalFace(det, {
                 enabled: camRequireFrontalFace,
                 minEyeDistanceRatio: camFrontalMinEyeDistanceRatio,
@@ -2241,7 +2781,19 @@ async function main() {
                   Boolean(bestCandidate) &&
                   bestCandidate.distance <= camMatchThreshold &&
                   margin >= camMatchMinMargin;
-                const readyForNewId = confirmNewIdCandidate(descriptor, faceSide, identityScore);
+                const readyForNewId = confirmNewIdCandidate(
+                  descriptor,
+                  faceSide,
+                  identityScore,
+                  faceSharpness,
+                );
+                const blockedBankMatch = readyForNewId
+                  ? findClosestDescriptorInBank(blockedDescriptorBank, descriptor)
+                  : null;
+                const blockedByPhantomBank = Boolean(
+                  blockedBankMatch &&
+                    Number(blockedBankMatch.distance) <= camPhantomBankThreshold,
+                );
 
                 if (sceneLooksEmpty) {
                   if (accepted && !phantomRejectAction) {
@@ -2266,6 +2818,15 @@ async function main() {
                     ).trim();
                   }
                 } else {
+                  if (blockedByPhantomBank && !phantomRejectAction) {
+                    phantomRejectAction = "phantom_bank_registration_rejected";
+                    phantomRejectReason =
+                      "Регистрация отклонена: дескриптор совпадает с заблокированным фантомным ID.";
+                    phantomRejectDistance = Number(blockedBankMatch?.distance ?? Number.NaN);
+                    phantomRejectThreshold = camPhantomBankThreshold;
+                    phantomRejectTargetShortId = String(blockedBankMatch?.label ?? "").trim();
+                    phantomRejectTargetSnapshotUrl = "";
+                  }
                   let acceptedBlocked = false;
                   if (accepted) {
                     const acceptedShortId = normalizeFaceShortId(bestCandidate.label);
@@ -2289,7 +2850,7 @@ async function main() {
                     if (lockActive) {
                       name = cam.identityLockName;
                       distance = Number(cam.identityLockDistance) || 0;
-                    } else if (readyForNewId) {
+                    } else if (readyForNewId && !blockedByPhantomBank) {
                       const identifyReady = now - (cam.lastIdentifyAt || 0) >= camIdentifyMinIntervalMs;
                       const autoCreateCoolingDown =
                         cam.lastAutoCreatedAt > 0 &&
@@ -2382,9 +2943,50 @@ async function main() {
                 emotionKey: emotionKey || "",
                 emotionConfidence: Number(emotionConfidence.toFixed(4)),
                 distance: Number(distance.toFixed(3)),
+                faceScore: Number(faceScore.toFixed(4)),
+                faceSide: Number(faceSide.toFixed(1)),
+                faceSharpness: Number(faceSharpness.toFixed(2)),
                 justRegistered,
               });
             }
+          }
+
+          if (people.length) {
+            const stablePeople = [];
+            for (const person of people) {
+              const shortId = normalizeFaceShortId(person?.name);
+              if (!shortId || blockedFaceIds.has(shortId)) {
+                continue;
+              }
+              const badScore = Number(person?.faceScore ?? 0) < camAutoBlockMinFaceScore;
+              const badSide = Number(person?.faceSide ?? 0) < camAutoBlockMinFaceSidePx;
+              const badEmotion =
+                Number(person?.emotionConfidence ?? 0) < camAutoBlockMinEmotionConfidence;
+              const badSharpness =
+                Number(person?.faceSharpness ?? 0) < Math.max(6, camNewIdMinSharpness * 0.8);
+              const badCount =
+                (badScore ? 1 : 0) + (badSide ? 1 : 0) + (badEmotion ? 1 : 0) + (badSharpness ? 1 : 0);
+              const suspicious = badCount >= 2 && cam.motion <= camAutoBlockMaxMotion;
+              const blockedNow = await maybeAutoBlockIdentity({
+                cam,
+                person,
+                now,
+                sourceJpg: jpg,
+                enabled: camAutoBlockEnabled,
+                windowMs: camAutoBlockWindowMs,
+                minSamples: camAutoBlockMinSamples,
+                minRatio: camAutoBlockMinRatio,
+                cooldownMs: camAutoBlockCooldownMs,
+                quality: {
+                  suspicious,
+                },
+              });
+              if (!blockedNow && !blockedFaceIds.has(shortId)) {
+                stablePeople.push(person);
+              }
+            }
+            people.length = 0;
+            people.push(...stablePeople);
           }
 
           if (
@@ -2517,6 +3119,7 @@ async function main() {
           if (enableMatching && people.length) {
             for (const person of people) {
               if (isUnknownIdentity(person.name)) continue;
+              if (blockedFaceIds.has(normalizeFaceShortId(person.name))) continue;
               const sessionKey = person.name;
               let session = cam.presenceSessions.get(sessionKey);
               if (!session) {
@@ -2629,6 +3232,9 @@ async function main() {
                     workerZoom: Number(cam.workerZoom.toFixed(2)),
                     frameWidth: cam.workerFrameWidth,
                     frameHeight: cam.workerFrameHeight,
+                    faceScore: Number(person.faceScore ?? 0),
+                    faceSide: Number(person.faceSide ?? 0),
+                    faceSharpness: Number(person.faceSharpness ?? 0),
                     descriptor: descriptorByName.get(person.name) || undefined,
                     snapshotUrl:
                       cam.lastFaceArchiveUrlByName.get(person.name) ||
@@ -2733,6 +3339,10 @@ async function main() {
       }
       if (now - lastBlockedFaceIdsReloadAt >= blockedFaceIdsReloadMs) {
         blockedFaceIds = await loadBlockedFaceIds(blockedFaceIdsFile);
+        blockedDescriptorBank = buildDescriptorBankFromBlockedIds(
+          knownLabeledDescriptors,
+          blockedFaceIds,
+        );
         lastBlockedFaceIdsReloadAt = now;
       }
 
