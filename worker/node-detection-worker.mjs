@@ -1,8 +1,9 @@
 #!/usr/bin/env node
-/* Detection-only worker using the same model family/logic as browser face-api. */
+/* Worker orchestrator with InsightFace backend for detection/embeddings and face-api fallback/emotions. */
 
 import fs from "node:fs";
 import fsp from "node:fs/promises";
+import { spawn } from "node:child_process";
 import path from "node:path";
 import process from "node:process";
 import { setTimeout as sleep } from "node:timers/promises";
@@ -12,7 +13,7 @@ import * as faceapi from "@vladmandic/face-api";
 import { createCanvas, loadImage } from "@napi-rs/canvas";
 
 const rootDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const FACE_DESCRIPTOR_LENGTH = 128;
+const SUPPORTED_DESCRIPTOR_LENGTHS = new Set([128, 512]);
 
 function log(message) {
   const ts = new Date().toISOString().replace(/\.\d{3}Z$/, "Z");
@@ -56,6 +57,105 @@ function envBool(name, fallback) {
   const v = (process.env[name] ?? "").trim().toLowerCase();
   if (!v) return fallback;
   return ["1", "true", "yes", "on"].includes(v);
+}
+
+function toBase64(buffer) {
+  if (!(buffer instanceof Buffer) || !buffer.length) return "";
+  return buffer.toString("base64");
+}
+
+function pickPythonCandidates() {
+  const candidates = [];
+  const explicit = String(process.env.WORKER_PYTHON_BIN ?? "").trim();
+  if (explicit) candidates.push(explicit);
+
+  const localVenv = [
+    path.join(rootDir, ".venv", "Scripts", "python.exe"),
+    path.join(rootDir, ".venv", "bin", "python"),
+  ];
+  for (const candidate of localVenv) {
+    if (fs.existsSync(candidate)) candidates.push(candidate);
+  }
+
+  candidates.push("python", "python3");
+  return Array.from(new Set(candidates));
+}
+
+async function isInsightFaceServiceHealthy(healthUrl, timeoutMs) {
+  if (!healthUrl) return false;
+  try {
+    await getJsonWithTimeout(healthUrl, timeoutMs);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function waitForInsightFaceService(healthUrl, timeoutMs, intervalMs = 500) {
+  const startedAt = Date.now();
+  while (Date.now() - startedAt < timeoutMs) {
+    if (await isInsightFaceServiceHealthy(healthUrl, Math.min(1200, timeoutMs))) return true;
+    await sleep(intervalMs);
+  }
+  return false;
+}
+
+async function startInsightFaceService({
+  endpointBase,
+  startupTimeoutMs,
+}) {
+  const healthUrl = `${endpointBase.replace(/\/+$/, "")}/health`;
+  if (await isInsightFaceServiceHealthy(healthUrl, 1200)) {
+    return { child: null, healthUrl, started: false };
+  }
+
+  const scriptPath = path.join(rootDir, "worker", "insightface-service.py");
+  const candidates = pickPythonCandidates();
+  let child = null;
+
+  for (const pythonBin of candidates) {
+    try {
+      const proc = spawn(pythonBin, ["-u", scriptPath], {
+        cwd: rootDir,
+        env: { ...process.env },
+        stdio: ["ignore", "pipe", "pipe"],
+      });
+      proc.on("error", (err) => {
+        log(`[insightface] process error python=${pythonBin} err=${String(err)}`);
+      });
+      proc.on("exit", (code, signal) => {
+        if (code === 0 || signal === "SIGTERM") return;
+        log(`[insightface] process exited code=${String(code)} signal=${String(signal)}`);
+      });
+
+      proc.stdout?.on("data", (chunk) => {
+        const text = String(chunk ?? "").trim();
+        if (text) log(`[insightface] ${text}`);
+      });
+      proc.stderr?.on("data", (chunk) => {
+        const text = String(chunk ?? "").trim();
+        if (text) log(`[insightface] ${text}`);
+      });
+
+      const ready = await waitForInsightFaceService(healthUrl, startupTimeoutMs, 400);
+      if (ready) {
+        child = proc;
+        log(`[insightface] service started python=${pythonBin}`);
+        break;
+      }
+
+      proc.kill("SIGTERM");
+      await sleep(250);
+    } catch (err) {
+      log(`[insightface] spawn failed python=${pythonBin} err=${String(err)}`);
+    }
+  }
+
+  if (!child) {
+    throw new Error("insightface_service_unavailable");
+  }
+
+  return { child, healthUrl, started: true };
 }
 
 function normalizeFaceShortId(value) {
@@ -169,10 +269,38 @@ function parseIgnoreZones() {
 }
 
 function normalizeDescriptor(value) {
-  if (!Array.isArray(value) || value.length !== FACE_DESCRIPTOR_LENGTH) return null;
+  if (!Array.isArray(value) || !SUPPORTED_DESCRIPTOR_LENGTHS.has(value.length)) return null;
   const descriptor = value.map((item) => Number(item));
   if (descriptor.some((item) => !Number.isFinite(item))) return null;
   return descriptor;
+}
+
+function euclideanDistance(left, right) {
+  if (!Array.isArray(left) || !Array.isArray(right)) return Number.POSITIVE_INFINITY;
+  if (!left.length || left.length !== right.length) return Number.POSITIVE_INFINITY;
+  if (left.length === 512) {
+    let dot = 0;
+    let normLeft = 0;
+    let normRight = 0;
+    for (let i = 0; i < left.length; i += 1) {
+      const lv = Number(left[i]);
+      const rv = Number(right[i]);
+      if (!Number.isFinite(lv) || !Number.isFinite(rv)) return Number.POSITIVE_INFINITY;
+      dot += lv * rv;
+      normLeft += lv * lv;
+      normRight += rv * rv;
+    }
+    if (normLeft <= 0 || normRight <= 0) return Number.POSITIVE_INFINITY;
+    const cosine = dot / Math.sqrt(normLeft * normRight);
+    return 1 - cosine;
+  }
+  let sum = 0;
+  for (let i = 0; i < left.length; i += 1) {
+    const diff = Number(left[i]) - Number(right[i]);
+    if (!Number.isFinite(diff)) return Number.POSITIVE_INFINITY;
+    sum += diff * diff;
+  }
+  return Math.sqrt(sum);
 }
 
 function descriptorToArray(value) {
@@ -611,6 +739,54 @@ function getLandmarkCenter(points) {
   return { x: sx / count, y: sy / count };
 }
 
+function createLandmarksAdapter(landmarks) {
+  const safe = landmarks && typeof landmarks === "object" ? landmarks : {};
+  const leftEye = Array.isArray(safe.leftEye) ? safe.leftEye : [];
+  const rightEye = Array.isArray(safe.rightEye) ? safe.rightEye : [];
+  const nose = Array.isArray(safe.nose) ? safe.nose : [];
+  return {
+    getLeftEye() {
+      return leftEye;
+    },
+    getRightEye() {
+      return rightEye;
+    },
+    getNose() {
+      return nose;
+    },
+  };
+}
+
+function createDetectionFromInsightFace(face) {
+  if (!face || typeof face !== "object") return null;
+  const box = face.box && typeof face.box === "object" ? face.box : null;
+  if (!box) return null;
+  const x = Number(box.x);
+  const y = Number(box.y);
+  const width = Number(box.width);
+  const height = Number(box.height);
+  const score = Number(face.score);
+  if (![x, y, width, height].every((item) => Number.isFinite(item))) return null;
+  if (width <= 0 || height <= 0) return null;
+  const det = {
+    box: { x, y, width, height },
+    detection: {
+      box: { x, y, width, height },
+      score: Number.isFinite(score) ? score : 0,
+    },
+    score: Number.isFinite(score) ? score : 0,
+    descriptor: normalizeDescriptor(face.descriptor),
+    expressions: face.expressions && typeof face.expressions === "object" ? face.expressions : undefined,
+    landmarks: createLandmarksAdapter(face.landmarks),
+  };
+  return det;
+}
+
+function normalizeInsightFaceResult(payload) {
+  const faces = Array.isArray(payload?.faces) ? payload.faces : [];
+  return faces.map((face) => createDetectionFromInsightFace(face)).filter(Boolean);
+}
+
 function isLikelyFrontalFace(
   det,
   {
@@ -770,7 +946,7 @@ function findClosestDescriptorInBank(bank, descriptor) {
   for (const entry of bank) {
     const known = normalizeDescriptor(entry?.descriptor);
     if (!known) continue;
-    const distance = Number(faceapi.euclideanDistance(safe, known));
+    const distance = Number(euclideanDistance(safe, known));
     if (!Number.isFinite(distance)) continue;
     if (!best || distance < best.distance) {
       best = { label: String(entry?.label || ""), distance };
@@ -878,7 +1054,7 @@ function computeMatchCandidates(labeledDescriptors, descriptor) {
 
     let minDistance = Number.POSITIVE_INFINITY;
     for (const known of descriptors) {
-      const dist = Number(faceapi.euclideanDistance(descriptor, known));
+      const dist = Number(euclideanDistance(descriptor, known));
       if (Number.isFinite(dist) && dist < minDistance) minDistance = dist;
     }
 
@@ -1421,6 +1597,40 @@ async function main() {
   const phantomSnapshotPublicBase = (
     process.env.WORKER_PHANTOM_SNAPSHOT_PUBLIC_BASE || "/_phantom-rejects"
   ).replace(/\/+$/, "");
+  const requestedInferenceBackend = (
+    process.env.WORKER_INFERENCE_BACKEND || "auto"
+  ).trim().toLowerCase();
+  const allowFaceApiFallback = envBool("WORKER_INFERENCE_FALLBACK_FACEAPI", true);
+  const insightFacePort = Math.max(1, envInt("WORKER_INSIGHTFACE_PORT", 8765));
+  const insightFaceEndpointBase = (
+    process.env.WORKER_INSIGHTFACE_ENDPOINT || `http://127.0.0.1:${insightFacePort}`
+  )
+    .trim()
+    .replace(/\/+$/, "");
+  const insightFaceAnalyzeEndpoint = `${insightFaceEndpointBase}/analyze`;
+  const insightFaceTimeoutMs = Math.max(500, envInt("WORKER_INSIGHTFACE_TIMEOUT_MS", 2500));
+  const insightFaceStartupTimeoutMs = Math.max(
+    2000,
+    envInt("WORKER_INSIGHTFACE_STARTUP_TIMEOUT_MS", 30000),
+  );
+  let insightFaceServiceChild = null;
+  let inferenceBackend = requestedInferenceBackend === "faceapi" ? "faceapi" : "insightface";
+
+  if (inferenceBackend === "insightface") {
+    try {
+      const started = await startInsightFaceService({
+        endpointBase: insightFaceEndpointBase,
+        startupTimeoutMs: insightFaceStartupTimeoutMs,
+      });
+      insightFaceServiceChild = started.child;
+    } catch (err) {
+      if (!allowFaceApiFallback && requestedInferenceBackend !== "auto") {
+        throw err;
+      }
+      inferenceBackend = "faceapi";
+      log(`[insightface] unavailable, fallback=faceapi err=${String(err)}`);
+    }
+  }
 
   if (saveSnapshots) {
     await fsp.mkdir(snapshotDir, { recursive: true }).catch(() => {});
@@ -1433,21 +1643,25 @@ async function main() {
     await fsp.mkdir(phantomBaselinePublicDir, { recursive: true }).catch(() => {});
   }
 
+  const faceApiFallbackEnabled = inferenceBackend === "faceapi" || allowFaceApiFallback;
   const modelDir = path.join(rootDir, "public", "models");
-  if (!fs.existsSync(modelDir)) {
+  if (!fs.existsSync(modelDir) && (faceApiFallbackEnabled || enableEmotions)) {
     log(`model dir not found: ${modelDir}`);
     process.exit(1);
   }
 
   faceapi.tf.enableProdMode();
-  await faceapi.nets.tinyFaceDetector.loadFromDisk(modelDir);
+  const needTinyFaceDetector = faceApiFallbackEnabled || enableEmotions;
+  if (needTinyFaceDetector) {
+    await faceapi.nets.tinyFaceDetector.loadFromDisk(modelDir);
+  }
   let knownLabeledDescriptors = [];
   let blockedFaceIds = await loadBlockedFaceIds(blockedFaceIdsFile);
   let blockedDescriptorBank = [];
   let lastBlockedFaceIdsReloadAt = Date.now();
   let lastFaceRegistryReloadAt = 0;
   let ssdLoaded = false;
-  if (useSsdFallback) {
+  if (faceApiFallbackEnabled && useSsdFallback) {
     try {
       await faceapi.nets.ssdMobilenetv1.loadFromDisk(modelDir);
       ssdLoaded = true;
@@ -1539,6 +1753,94 @@ async function main() {
       return null;
     }
   };
+  let lastInsightFaceErrLogAt = 0;
+  const analyzeWithInsightFace = async (
+    {
+      jpgBuffer,
+      rgb,
+      width,
+      height,
+    },
+    { includeDescriptor = false, maxFaces = 10, minScore = 0 } = {},
+  ) => {
+    if (inferenceBackend !== "insightface") return null;
+    if (!(rgb instanceof Uint8Array) || !rgb.length || !width || !height) return [];
+    try {
+      const payload = await postJsonExpectJsonWithTimeout(
+        insightFaceAnalyzeEndpoint,
+        {
+          imageBase64: jpgBuffer instanceof Buffer && jpgBuffer.length ? toBase64(jpgBuffer) : "",
+          rgbBase64: Buffer.from(rgb).toString("base64"),
+          width,
+          height,
+          includeDescriptor,
+          maxFaces,
+          minScore,
+        },
+        insightFaceTimeoutMs,
+      );
+      return normalizeInsightFaceResult(payload);
+    } catch (err) {
+      const current = Date.now();
+      if (current - lastInsightFaceErrLogAt >= 3000) {
+        log(`[insightface] analyze failed err=${String(err)}`);
+        lastInsightFaceErrLogAt = current;
+      }
+      return null;
+    }
+  };
+  let lastEmotionFallbackErrLogAt = 0;
+  const enrichDetectionsWithEmotionFallback = async (rgb, frameWidth, frameHeight, detections) => {
+    if (!enableEmotions || !Array.isArray(detections) || !detections.length) return detections;
+    try {
+      const snapTensor = faceapi.tf.tensor3d(rgb, [frameHeight, frameWidth, 3], "int32");
+      let emotionDetections = [];
+      try {
+        emotionDetections = await faceapi.detectAllFaces(snapTensor, tinyOptions).withFaceExpressions();
+        if ((!emotionDetections || !emotionDetections.length) && ssdLoaded) {
+          emotionDetections = await faceapi.detectAllFaces(snapTensor, ssdOptions).withFaceExpressions();
+        }
+      } finally {
+        snapTensor.dispose();
+      }
+
+      emotionDetections = filterAndDedupeDetections(emotionDetections || [], frameWidth, frameHeight, {
+        minSidePxBase: 6,
+        minSideRatio: 0,
+        minAreaRatio: 0,
+        maxAreaRatio: 1,
+        minScore: 0.05,
+        minAspect: 0.2,
+        maxAspect: 5,
+      });
+
+      for (const det of detections) {
+        const detBox = getBox(det);
+        if (!detBox) continue;
+        let bestMatch = null;
+        for (const emotionDet of emotionDetections) {
+          const emotionBox = getBox(emotionDet);
+          if (!emotionBox) continue;
+          const overlap = iou(detBox, emotionBox);
+          if (!bestMatch || overlap > bestMatch.overlap) {
+            bestMatch = { overlap, expressions: emotionDet?.expressions };
+          }
+        }
+        if (bestMatch && bestMatch.overlap >= 0.2 && bestMatch.expressions) {
+          det.expressions = bestMatch.expressions;
+        }
+      }
+
+      return detections;
+    } catch (err) {
+      const current = Date.now();
+      if (current - lastEmotionFallbackErrLogAt >= 3000) {
+        log(`[emotion] fallback failed err=${String(err)}`);
+        lastEmotionFallbackErrLogAt = current;
+      }
+      return detections;
+    }
+  };
   let lastPhantomErrLogAt = 0;
   const writePhantomRejectionLog = async ({
     cameraId,
@@ -1575,12 +1877,22 @@ async function main() {
     }
   };
 
-  if (enableMatching) {
+  if (enableMatching && faceApiFallbackEnabled) {
     await faceapi.nets.faceLandmark68TinyNet.loadFromDisk(modelDir);
     await faceapi.nets.faceRecognitionNet.loadFromDisk(modelDir);
+  }
+  if (enableMatching && inferenceBackend === "faceapi") {
     await reloadFaceRegistry("startup");
     log(
       `matching=on known=${knownLabeledDescriptors.length} threshold=${matchThreshold} ` +
+        `min_margin=${matchMinMargin} min_face_px=${matchMinFaceSidePx} auto_create=${faceAutoCreate ? "on" : "off"} ` +
+        `new_id_frames=${newIdConfirmFrames} new_id_min_score=${newIdMinScore.toFixed(3)} ` +
+        `new_id_min_side=${newIdMinFaceSidePx} archive=${faceArchiveEnabled ? "on" : "off"}`,
+    );
+  } else if (enableMatching) {
+    await reloadFaceRegistry("startup");
+    log(
+      `matching=on backend=insightface known=${knownLabeledDescriptors.length} threshold=${matchThreshold} ` +
         `min_margin=${matchMinMargin} min_face_px=${matchMinFaceSidePx} auto_create=${faceAutoCreate ? "on" : "off"} ` +
         `new_id_frames=${newIdConfirmFrames} new_id_min_score=${newIdMinScore.toFixed(3)} ` +
         `new_id_min_side=${newIdMinFaceSidePx} archive=${faceArchiveEnabled ? "on" : "off"}`,
@@ -1615,10 +1927,17 @@ async function main() {
     log("emotions=off reason=env_disabled");
   }
 
-  log(
-    `detector=face-api tiny(input=${tinyInputSize},score=${tinyScoreThreshold}) ` +
-      `ssd_fallback=${ssdLoaded ? "on" : "off"}`,
-  );
+  if (inferenceBackend === "insightface") {
+    log(
+      `detector=insightface endpoint=${insightFaceEndpointBase} timeout_ms=${insightFaceTimeoutMs} ` +
+        `emotion_fallback=${enableEmotions ? "face-api" : "off"}`,
+    );
+  } else {
+    log(
+      `detector=face-api tiny(input=${tinyInputSize},score=${tinyScoreThreshold}) ` +
+        `ssd_fallback=${ssdLoaded ? "on" : "off"}`,
+    );
+  }
 
   const states = cameras.map((c) => {
     const state = createState(c.cameraId, c.src);
@@ -1776,6 +2095,13 @@ async function main() {
   let stopping = false;
   const stop = () => {
     stopping = true;
+    if (insightFaceServiceChild && !insightFaceServiceChild.killed) {
+      try {
+        insightFaceServiceChild.kill("SIGTERM");
+      } catch {
+        // ignore shutdown errors
+      }
+    }
   };
   process.on("SIGINT", stop);
   process.on("SIGTERM", stop);
@@ -2428,7 +2754,7 @@ async function main() {
       cam.newIdGateLastAt = 0;
     };
     const confirmNewIdCandidate = (descriptor, faceSide, identityScore, faceSharpness = 0) => {
-      if (!faceAutoCreate || !Array.isArray(descriptor) || descriptor.length !== FACE_DESCRIPTOR_LENGTH) {
+      if (!faceAutoCreate || !Array.isArray(descriptor) || !normalizeDescriptor(descriptor)) {
         resetNewIdGate();
         return false;
       }
@@ -2455,7 +2781,7 @@ async function main() {
       const withinGap = now - (cam.newIdGateLastAt || 0) <= camNewIdMaxGapMs;
       const stableDistance =
         prevDescriptor && prevDescriptor.length === descriptor.length
-          ? Number(faceapi.euclideanDistance(descriptor, prevDescriptor))
+          ? Number(euclideanDistance(descriptor, prevDescriptor))
           : Number.POSITIVE_INFINITY;
       const isStable = withinGap && Number.isFinite(stableDistance) && stableDistance <= camNewIdStabilityMaxDistance;
 
@@ -2611,9 +2937,30 @@ async function main() {
 
       let detections = [];
       try {
-        detections = await faceapi.detectAllFaces(frameTensor, tinyOptions);
-        if (!detections.length && ssdLoaded) {
-          detections = await faceapi.detectAllFaces(frameTensor, ssdOptions);
+        if (inferenceBackend === "insightface") {
+          const insightResults = await analyzeWithInsightFace({
+            jpgBuffer: jpg,
+            rgb,
+            width: workerWidth,
+            height: workerHeight,
+          }, {
+            includeDescriptor: false,
+            maxFaces: 12,
+            minScore: 0.05,
+          });
+          if (insightResults === null && allowFaceApiFallback) {
+            detections = await faceapi.detectAllFaces(frameTensor, tinyOptions);
+            if (!detections.length && ssdLoaded) {
+              detections = await faceapi.detectAllFaces(frameTensor, ssdOptions);
+            }
+          } else {
+            detections = insightResults || [];
+          }
+        } else {
+          detections = await faceapi.detectAllFaces(frameTensor, tinyOptions);
+          if (!detections.length && ssdLoaded) {
+            detections = await faceapi.detectAllFaces(frameTensor, ssdOptions);
+          }
         }
       } finally {
         const resized = faceapi.tf.image.resizeBilinear(frameTensor, [54, 96], true);
@@ -2755,9 +3102,9 @@ async function main() {
       if (shouldSnapshot) {
         cam.lastSnapshotAt = now;
         try {
-          const snapTensor = faceapi.tf.tensor3d(rgb, [workerHeight, workerWidth, 3], "int32");
           let results = [];
-          const runDetect = async (options) => {
+          let snapTensor = null;
+          const runFaceApiDetect = async (options) => {
             let task = faceapi.detectAllFaces(snapTensor, options);
             if (enableMatching) {
               task = task.withFaceLandmarks(true).withFaceDescriptors();
@@ -2769,12 +3116,35 @@ async function main() {
           };
 
           try {
-            results = await runDetect(tinyOptions);
-            if ((!results || !results.length) && ssdLoaded) {
-              results = await runDetect(ssdOptions);
+            if (inferenceBackend === "insightface") {
+              const insightResults = await analyzeWithInsightFace({
+                jpgBuffer: jpg,
+                rgb,
+                width: workerWidth,
+                height: workerHeight,
+              }, {
+                includeDescriptor: enableMatching,
+                maxFaces: 12,
+                minScore: 0.05,
+              });
+              if (insightResults === null && allowFaceApiFallback) {
+                snapTensor = faceapi.tf.tensor3d(rgb, [workerHeight, workerWidth, 3], "int32");
+                results = await runFaceApiDetect(tinyOptions);
+                if ((!results || !results.length) && ssdLoaded) {
+                  results = await runFaceApiDetect(ssdOptions);
+                }
+              } else {
+                results = insightResults || [];
+              }
+            } else {
+              snapTensor = faceapi.tf.tensor3d(rgb, [workerHeight, workerWidth, 3], "int32");
+              results = await runFaceApiDetect(tinyOptions);
+              if ((!results || !results.length) && ssdLoaded) {
+                results = await runFaceApiDetect(ssdOptions);
+              }
             }
           } finally {
-            snapTensor.dispose();
+            snapTensor?.dispose?.();
           }
 
           results = filterAndDedupeDetections(results || [], workerWidth, workerHeight, {
@@ -2797,6 +3167,9 @@ async function main() {
                   camIgnoreZoneOverlapThreshold,
                 ),
             );
+          }
+          if (inferenceBackend === "insightface" && enableEmotions && needEmotion && results.length) {
+            results = await enrichDetectionsWithEmotionFallback(rgb, workerWidth, workerHeight, results);
           }
 
           const snapshotBase64 = jpg.toString("base64");

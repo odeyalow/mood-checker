@@ -68,17 +68,29 @@ Notes:
 - `NEXT_PUBLIC_CAMERA_1_DIGITAL_ZOOM` / `NEXT_PUBLIC_CAMERA_2_DIGITAL_ZOOM` enable per-camera digital zoom (`>1` enables zoom, max `4`).
 - `GO2RTC_FRAME_WIDTH/HEIGHT/QUALITY` control snapshot resolution/quality for worker recognition (`/api/camera/frame`).
 - `NEXT_PUBLIC_ENABLE_WEBCAM_TILE=true` enables the local webcam tile for debugging.
-- `NEXT_PUBLIC_DETECTION_MODE=worker` disables browser face-api detection and shows worker live status under camera tiles.
+- `NEXT_PUBLIC_DETECTION_MODE=worker` disables browser-side face detection and shows worker live status under camera tiles.
 - Phantom baseline files are loaded from `/opt/mood-checker/worker/phantom-baselines/<camera-id>/*.jpg`.
   Example: `/opt/mood-checker/worker/phantom-baselines/cam-01/empty-01.jpg`.
 
-## Node detection worker (browser-like)
+## Node detection worker
 
-The worker uses `@vladmandic/face-api` in Node and mirrors browser detection behavior.
+The worker keeps the existing Node orchestration/status pipeline, but uses a local `InsightFace`
+backend for face detection and embeddings by default.
 It performs face detection, identity matching against the face registry (`FaceIdentity` in DB),
 auto-creates short face IDs for new people,
-emotion extraction,
+emotion extraction via compatibility fallback,
 and async writes to `/api/recognitions` with retry queue.
+
+By default the worker auto-starts `worker/insightface-service.py` from the local Python environment.
+If that service is unavailable and `WORKER_INFERENCE_FALLBACK_FACEAPI=true`, the worker falls back to
+the legacy `face-api` path.
+
+Python backend prerequisites:
+
+```bash
+python -m venv .venv
+python -m pip install -r worker/requirements-cpu.txt
+```
 
 Optional identity env (app process):
 - `FACE_IDENTITY_ID_LENGTH=6` (`4..8`)
@@ -149,7 +161,7 @@ curl -s -X POST "http://127.0.0.1:3000/api/worker/zoom" \
 ```
 
 Look for:
-- `detector=face-api ...`
+- `detector=insightface ...`
 - `heartbeat: cameras_ready=... faces_detected=...`
 - `[cam-01] face_detected count=...`
 
