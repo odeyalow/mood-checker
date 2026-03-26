@@ -335,14 +335,41 @@ export async function POST(request: Request) {
         detectedAt: true,
         snapshotUrl: true,
         faceIdentityId: true,
+        emotionConfidence: true,
       },
     });
     if (recent) {
       const sameFace =
         (faceIdentityId && recent.faceIdentityId && faceIdentityId === recent.faceIdentityId) ||
         (!faceIdentityId && !recent.faceIdentityId);
-      const sameMood = String(recent.mood || "") === mood;
-      if (sameFace && sameMood) {
+      if (sameFace) {
+        const sameMood = String(recent.mood || "") === mood;
+        if (sameMood) {
+          return NextResponse.json({ item: recent, deduped: true });
+        }
+
+        const recentConfidence = Number(recent.emotionConfidence ?? 0);
+        const nextConfidence = Number.isFinite(emotionConfidenceRaw) ? emotionConfidenceRaw : 0;
+        const shouldPromoteEmotion =
+          nextConfidence >= recentConfidence ||
+          (mood === "neutral" && String(recent.mood || "") !== "neutral");
+
+        if (shouldPromoteEmotion) {
+          try {
+            const updated = await prisma.recognition.update({
+              where: { id: recent.id },
+              data: {
+                mood,
+                detectedAt,
+                emotionConfidence: Number.isFinite(emotionConfidenceRaw) ? emotionConfidenceRaw : null,
+              },
+            });
+            return NextResponse.json({ item: updated, deduped: true, updated: true });
+          } catch {
+            return NextResponse.json({ item: recent, deduped: true });
+          }
+        }
+
         return NextResponse.json({ item: recent, deduped: true });
       }
     }

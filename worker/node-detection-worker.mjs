@@ -410,21 +410,36 @@ function parseEmotionFromExpressions(expressions, keys) {
   }
 
   const vector = {};
+  const adjusted = {};
   let topKey = "";
   let topVal = -1;
   for (const k of keys) {
     const v = Number(expressions[k] ?? 0);
     const safe = Number.isFinite(v) ? Math.max(0, v) : 0;
     vector[k] = safe;
-    if (safe > topVal) {
-      topVal = safe;
+    let effective = safe;
+    if (k === "neutral") effective *= 1.18;
+    if (k === "sad") effective *= 0.94;
+    if (k === "angry") effective *= 0.9;
+    adjusted[k] = effective;
+    if (effective > topVal) {
+      topVal = effective;
       topKey = k;
+    }
+  }
+
+  const neutral = Number(vector.neutral ?? 0);
+  if (neutral > 0 && topKey && topKey !== "neutral") {
+    const topAdjusted = Number(adjusted[topKey] ?? 0);
+    const neutralAdjusted = Number(adjusted.neutral ?? neutral);
+    if (neutralAdjusted > 0 && topAdjusted - neutralAdjusted <= 0.05) {
+      topKey = "neutral";
     }
   }
 
   return {
     key: topKey,
-    confidence: topVal > 0 ? topVal : 0,
+    confidence: Number(vector[topKey] ?? 0) > 0 ? Number(vector[topKey] ?? 0) : 0,
     vector,
   };
 }
@@ -650,42 +665,39 @@ function addSessionEmotionSample(session, emotionKey, emotionConfidence) {
 
 function resolveSessionEmotionLabel({
   session,
+  emotionKeys,
   minConfidence,
   lowConfidenceFloor,
   allowLowConfidenceLabel,
   allowFallbackMood,
   fallbackMood,
 }) {
-  let bestKey = "";
-  let bestSum = 0;
-  let bestAvg = 0;
-  let bestPeak = 0;
+  const vector = {};
   for (const [key, stats] of session.emotionStats.entries()) {
-    const sum = Number(stats?.sum ?? 0);
     const count = Number(stats?.count ?? 0);
+    const sum = Number(stats?.sum ?? 0);
     const peak = Number(stats?.max ?? 0);
     if (!count || !Number.isFinite(sum)) continue;
-    if (sum > bestSum) {
-      bestSum = sum;
-      bestKey = key;
-      bestAvg = sum / count;
-      bestPeak = Number.isFinite(peak) ? peak : bestAvg;
-    }
+    const avg = sum / count;
+    const safePeak = Number.isFinite(peak) ? peak : avg;
+    const supportBoost = Math.min(1.08, 1 + Math.max(0, count - 1) * 0.02);
+    vector[key] = (avg * 0.75 + safePeak * 0.25) * supportBoost;
   }
 
-  if (bestKey) {
-    const aggregatedConfidence = Math.max(bestAvg, bestPeak);
+  const parsed = parseEmotionFromExpressions(vector, emotionKeys || Object.keys(vector));
+  if (parsed.key) {
+    const aggregatedConfidence = Number(parsed.confidence ?? 0);
     if (aggregatedConfidence >= minConfidence) {
       return {
-        moodLabel: bestKey,
-        emotionLabel: `${bestKey} ${(aggregatedConfidence * 100).toFixed(0)}%`,
+        moodLabel: parsed.key,
+        emotionLabel: `${parsed.key} ${(aggregatedConfidence * 100).toFixed(0)}%`,
         emotionConfidence: Number(aggregatedConfidence.toFixed(4)),
       };
     }
     if (allowLowConfidenceLabel && aggregatedConfidence >= lowConfidenceFloor) {
       return {
-        moodLabel: bestKey,
-        emotionLabel: `${bestKey} ${(aggregatedConfidence * 100).toFixed(0)}%`,
+        moodLabel: parsed.key,
+        emotionLabel: `${parsed.key} ${(aggregatedConfidence * 100).toFixed(0)}%`,
         emotionConfidence: Number(aggregatedConfidence.toFixed(4)),
       };
     }
@@ -2234,7 +2246,7 @@ async function main() {
   const dbQueue = [];
   let lastDbQueueWarnAt = 0;
   let lastLoopErrLogAt = 0;
-  const emotionKeys = ["happy", "sad", "angry", "fearful", "disgusted", "surprised"];
+  const emotionKeys = ["neutral", "happy", "sad", "angry", "fearful", "disgusted", "surprised"];
   const loggedCameraProfiles = new Set();
 
   const processCamera = async (cam, now) => {
@@ -2865,8 +2877,6 @@ async function main() {
         if (activeNames && activeNames.has(savedName)) continue;
         if (now - (session?.lastSeenAt ?? 0) <= camSessionAbsenceMs) continue;
         cam.presenceSessions.delete(savedName);
-        cam.lastSeenMatchedAt.delete(savedName);
-        cam.lastDbSentAt.delete(`${cam.cameraId}:${savedName}`);
       }
     };
     const resetNewIdGate = () => {
@@ -3728,16 +3738,17 @@ async function main() {
                 session.sampleCount >= camSessionMinSamples &&
                 sessionAgeMs >= camSessionResolveWaitMs &&
                 (session.emotionSampleCount >= camSessionMinEmotionSamples || dbAllowMoodFallback);
-              if (!moodLabel && canResolveFromSamples) {
+              if (canResolveFromSamples) {
                 const resolved = resolveSessionEmotionLabel({
                   session,
+                  emotionKeys,
                   minConfidence: camEmotionMinConfidence,
                   lowConfidenceFloor: camEmotionLowConfidenceFloor,
                   allowLowConfidenceLabel: camEmotionAllowLowConfidenceLabel,
                   allowFallbackMood: dbAllowMoodFallback,
                   fallbackMood: dbFallbackMood,
                 });
-                moodLabel = resolved.moodLabel;
+                moodLabel = resolved.moodLabel || moodLabel;
                 if (resolved.emotionLabel) {
                   resolvedEmotionLabel = resolved.emotionLabel;
                 }
@@ -3745,20 +3756,10 @@ async function main() {
                   resolvedEmotionConfidence = Number(resolved.emotionConfidence);
                 }
               }
-              if (!moodLabel && person.justRegistered && dbAllowMoodFallback) {
-                moodLabel = dbFallbackMood;
-              }
 
-              const readyByDirectEmotion = Boolean(directMoodLabel);
-              const readyBySession =
-                session.sampleCount >= camSessionMinSamples &&
-                sessionAgeMs >= camSessionResolveWaitMs &&
-                (session.emotionSampleCount >= camSessionMinEmotionSamples || dbAllowMoodFallback);
-              const readyByNewIdentity = Boolean(person.justRegistered);
+              const readyBySession = canResolveFromSamples && Boolean(moodLabel);
               const shouldEmitSessionRecord =
-                !session.emittedAt &&
-                (readyByDirectEmotion || readyBySession || readyByNewIdentity) &&
-                Boolean(moodLabel);
+                !session.emittedAt && readyBySession;
               if (!shouldEmitSessionRecord) continue;
 
               const prevSeenAt = cam.lastSeenMatchedAt.get(person.name) ?? 0;
