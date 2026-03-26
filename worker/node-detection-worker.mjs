@@ -1130,6 +1130,41 @@ async function fetchFrame(frameUrl, timeoutMs) {
   }
 }
 
+function validateFrameBuffer(buffer) {
+  if (!(buffer instanceof Buffer) || buffer.length === 0) {
+    throw new Error("empty_frame");
+  }
+  if (buffer.length < 4) {
+    throw new Error("invalid_frame_too_small");
+  }
+
+  const isJpeg = buffer[0] === 0xff && buffer[1] === 0xd8;
+  const isPng =
+    buffer[0] === 0x89 &&
+    buffer[1] === 0x50 &&
+    buffer[2] === 0x4e &&
+    buffer[3] === 0x47;
+  if (!isJpeg && !isPng) {
+    throw new Error("invalid_frame_format");
+  }
+}
+
+async function decodeFrameImage(buffer, timeoutMs) {
+  validateFrameBuffer(buffer);
+
+  let timeout = null;
+  try {
+    return await Promise.race([
+      loadImage(buffer),
+      new Promise((_, reject) => {
+        timeout = setTimeout(() => reject(new Error("image_decode_timeout")), timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timeout) clearTimeout(timeout);
+  }
+}
+
 async function postJsonWithTimeout(url, payload, timeoutMs) {
   const controller = new AbortController();
   const t = setTimeout(() => controller.abort(), timeoutMs);
@@ -1284,6 +1319,9 @@ function createState(cameraId, src) {
   return {
     cameraId,
     src,
+    processing: false,
+    processingStartedAt: 0,
+    processingTimedOutAt: 0,
     workerZoom: 1,
     candidate: 0,
     confirmed: 0,
@@ -1375,6 +1413,14 @@ async function main() {
   const frameAbortRetryQuality = Math.min(100, Math.max(1, envInt("WORKER_FRAME_ABORT_RETRY_QUALITY", 85)));
   const frameApiTimeoutMs = Math.max(300, frameTimeoutMs - 300);
   const frameAbortRetryApiTimeoutMs = Math.max(500, frameAbortRetryTimeoutMs - 300);
+  const imageDecodeTimeoutMs = Math.max(300, envInt("WORKER_IMAGE_DECODE_TIMEOUT_MS", 1500));
+  const cameraProcessTimeoutMs = Math.max(
+    1000,
+    envInt(
+      "WORKER_CAMERA_PROCESS_TIMEOUT_MS",
+      Math.max(frameAbortRetryTimeoutMs + imageDecodeTimeoutMs + insightFaceTimeoutMs + 1000, 7000),
+    ),
+  );
   const loopDelayMs = Math.max(15, envInt("WORKER_LOOP_DELAY_MS", 50));
   const heartbeatSeconds = Math.max(1, envFloat("WORKER_HEARTBEAT_SECONDS", 5));
   const statusLogSeconds = Math.max(0.4, envFloat("WORKER_STATUS_LOG_SECONDS", 1.5));
@@ -2885,7 +2931,7 @@ async function main() {
         );
         jpg = await fetchFrame(retryUrl, frameAbortRetryTimeoutMs);
       }
-      const image = await loadImage(jpg);
+      const image = await decodeFrameImage(jpg, imageDecodeTimeoutMs);
       const sourceWidth = Number(image.width ?? 0);
       const sourceHeight = Number(image.height ?? 0);
       if (!sourceWidth || !sourceHeight) {
@@ -3766,6 +3812,64 @@ async function main() {
     return cam.confirmed;
   };
 
+  const processCameraWithTimeout = async (cam, now) => {
+    if (cam.processing) {
+      const elapsedMs = Math.max(0, now - Number(cam.processingStartedAt || 0));
+      if (elapsedMs >= cameraProcessTimeoutMs && now - cam.lastErrLogAt >= 2000) {
+        log(`[${cam.cameraId}] processing busy elapsed_ms=${elapsedMs}`);
+        cam.lastErrLogAt = now;
+      }
+      return 0;
+    }
+
+    cam.processing = true;
+    cam.processingStartedAt = now;
+    const startedAt = now;
+
+    const workPromise = Promise.resolve()
+      .then(() => processCamera(cam, now))
+      .finally(() => {
+        if (cam.processingStartedAt === startedAt) {
+          cam.processing = false;
+          cam.processingStartedAt = 0;
+          cam.processingTimedOutAt = 0;
+        }
+      });
+
+    try {
+      return await Promise.race([
+        workPromise,
+        new Promise((_, reject) => {
+          setTimeout(() => reject(new Error(`camera_process_timeout_${cameraProcessTimeoutMs}`)), cameraProcessTimeoutMs);
+        }),
+      ]);
+    } catch (err) {
+      cam.processingTimedOutAt = Date.now();
+      cam.candidate = 0;
+      cam.confirmed = 0;
+      cam.score = 0;
+      cam.maxFaceSide = 0;
+      cam.streak = 0;
+      cam.matchedNames = [];
+      cam.matchDistance = 0;
+      cam.people = [];
+      cam.emotionSummary = "";
+      cam.topEmotion = "";
+      cam.lastRecognitionAt = 0;
+      cam.identityLockName = "";
+      cam.identityLockDistance = 0;
+      cam.identityLockUntil = 0;
+      evictPresenceSessions(new Set());
+      cam.frameOk = false;
+      cam.lastFrameError = String(err);
+      if (now - cam.lastErrLogAt >= 2000) {
+        log(`[${cam.cameraId}] camera timeout: ${String(err)}`);
+        cam.lastErrLogAt = now;
+      }
+      return 0;
+    }
+  };
+
   while (!stopping) {
     const now = Date.now();
     let confirmedTotal = 0;
@@ -3795,7 +3899,7 @@ async function main() {
             while (cursor < states.length) {
               const current = states[cursor];
               cursor += 1;
-              confirmedTotal += await processCamera(current, now);
+              confirmedTotal += await processCameraWithTimeout(current, now);
             }
           })(),
         );
