@@ -1463,13 +1463,6 @@ async function main() {
   const frameApiTimeoutMs = Math.max(300, frameTimeoutMs - 300);
   const frameAbortRetryApiTimeoutMs = Math.max(500, frameAbortRetryTimeoutMs - 300);
   const imageDecodeTimeoutMs = Math.max(300, envInt("WORKER_IMAGE_DECODE_TIMEOUT_MS", 1500));
-  const cameraProcessTimeoutMs = Math.max(
-    1000,
-    envInt(
-      "WORKER_CAMERA_PROCESS_TIMEOUT_MS",
-      Math.max(frameAbortRetryTimeoutMs + imageDecodeTimeoutMs + insightFaceTimeoutMs + 1000, 7000),
-    ),
-  );
   const loopDelayMs = Math.max(15, envInt("WORKER_LOOP_DELAY_MS", 50));
   const heartbeatSeconds = Math.max(1, envFloat("WORKER_HEARTBEAT_SECONDS", 5));
   const statusLogSeconds = Math.max(0.4, envFloat("WORKER_STATUS_LOG_SECONDS", 1.5));
@@ -1707,6 +1700,13 @@ async function main() {
   const insightFaceStartupTimeoutMs = Math.max(
     2000,
     envInt("WORKER_INSIGHTFACE_STARTUP_TIMEOUT_MS", 30000),
+  );
+  const cameraProcessTimeoutMs = Math.max(
+    1000,
+    envInt(
+      "WORKER_CAMERA_PROCESS_TIMEOUT_MS",
+      Math.max(frameAbortRetryTimeoutMs + imageDecodeTimeoutMs + insightFaceTimeoutMs + 1000, 7000),
+    ),
   );
   let insightFaceServiceChild = null;
   let inferenceBackend = requestedInferenceBackend === "faceapi" ? "faceapi" : "insightface";
