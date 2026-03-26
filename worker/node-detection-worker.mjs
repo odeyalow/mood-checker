@@ -1315,6 +1315,49 @@ async function writeStatusFile(filePath, payload) {
   await fsp.rename(tmp, filePath);
 }
 
+function createEmptyCameraStatus({ workerZoom = 1, frameError = "" } = {}) {
+  return {
+    candidate: 0,
+    confirmed: 0,
+    score: 0,
+    maxFaceSide: 0,
+    motion: 0,
+    streak: 0,
+    requiredFrames: 1,
+    matchedNames: [],
+    matchDistance: 0,
+    personInFrame: false,
+    faceInFrame: false,
+    workerZoom: Number.isFinite(workerZoom) ? Number(workerZoom.toFixed(2)) : 1,
+    people: [],
+    emotionSummary: "",
+    topEmotion: "",
+    snapshotUrl: "",
+    lastRecognitionAt: "",
+    frameOk: false,
+    lastFrameAt: "",
+    lastFrameBytes: 0,
+    frameWidth: 0,
+    frameHeight: 0,
+    workerFrameWidth: 0,
+    workerFrameHeight: 0,
+    frameError,
+  };
+}
+
+async function writeBootStatusFile(filePath, cameras, frameError = "worker_booting") {
+  const payload = {
+    ts: new Date().toISOString(),
+    cameras: Object.fromEntries(
+      (Array.isArray(cameras) ? cameras : []).map((camera) => [
+        String(camera?.cameraId ?? ""),
+        createEmptyCameraStatus({ workerZoom: 1, frameError }),
+      ]),
+    ),
+  };
+  await writeStatusFile(filePath, payload);
+}
+
 function createState(cameraId, src) {
   return {
     cameraId,
@@ -1399,6 +1442,12 @@ async function main() {
   const statusFile = process.env.WORKER_STATUS_FILE || "/tmp/mood-checker-worker-status.json";
   const statusDir = path.dirname(statusFile);
   await fsp.mkdir(statusDir, { recursive: true }).catch(() => {});
+  log(`[boot] cameras=${cameras.length} status_file=${statusFile}`);
+  try {
+    await writeBootStatusFile(statusFile, cameras, "worker_booting");
+  } catch (err) {
+    log(`[boot] initial status file write failed err=${String(err)}`);
+  }
   const workerZoomStateFile = process.env.WORKER_ZOOM_STATE_FILE || "/tmp/mood-checker-worker-zoom.json";
   const workerZoomStateDir = path.dirname(workerZoomStateFile);
   await fsp.mkdir(workerZoomStateDir, { recursive: true }).catch(() => {});
@@ -1663,6 +1712,7 @@ async function main() {
   let inferenceBackend = requestedInferenceBackend === "faceapi" ? "faceapi" : "insightface";
 
   if (inferenceBackend === "insightface") {
+    log(`[boot] starting insightface endpoint=${insightFaceEndpointBase}`);
     try {
       const started = await startInsightFaceService({
         endpointBase: insightFaceEndpointBase,
@@ -1696,10 +1746,15 @@ async function main() {
     process.exit(1);
   }
 
+  log(
+    `[boot] loading models backend=${inferenceBackend} fallback=${faceApiFallbackEnabled ? "on" : "off"} ` +
+      `emotions=${enableEmotions ? "on" : "off"}`,
+  );
   faceapi.tf.enableProdMode();
   const needTinyFaceDetector = faceApiFallbackEnabled || enableEmotions;
   if (needTinyFaceDetector) {
     await faceapi.nets.tinyFaceDetector.loadFromDisk(modelDir);
+    log("[boot] tiny-face-detector loaded");
   }
   let knownLabeledDescriptors = [];
   let blockedFaceIds = await loadBlockedFaceIds(blockedFaceIdsFile);
@@ -1711,6 +1766,7 @@ async function main() {
     try {
       await faceapi.nets.ssdMobilenetv1.loadFromDisk(modelDir);
       ssdLoaded = true;
+      log("[boot] ssd-mobilenet loaded");
     } catch (err) {
       log(`ssd fallback disabled (load failed): ${String(err)}`);
     }
@@ -1969,6 +2025,7 @@ async function main() {
 
   if (enableEmotions) {
     await faceapi.nets.faceExpressionNet.loadFromDisk(modelDir);
+    log("[boot] face-expression loaded");
   } else {
     log("emotions=off reason=env_disabled");
   }
