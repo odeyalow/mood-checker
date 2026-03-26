@@ -791,9 +791,14 @@ function isLikelyFrontalFace(
   det,
   {
     enabled = true,
-    minEyeDistanceRatio = 0.16,
-    maxEyeSlope = 0.2,
-    noseCenterTolerance = 0.3,
+    minEyeDistanceRatio = 0.22,
+    maxEyeSlope = 0.14,
+    noseCenterTolerance = 0.18,
+    minEyeMarginRatio = 0.12,
+    minEyeLineYRatio = 0.12,
+    maxEyeLineYRatio = 0.55,
+    minNoseDropRatio = 0.04,
+    maxNoseYRatio = 0.72,
   } = {},
 ) {
   if (!enabled) return true;
@@ -818,14 +823,27 @@ function isLikelyFrontalFace(
   const eyeSlope = Math.abs(eyeDy) / Math.max(1e-6, eyeDist);
   if (eyeSlope > maxEyeSlope) return false;
 
+  const leftEyeXRatio = (leftEye.x - box.x) / Math.max(1, box.width);
+  const rightEyeXRatio = (rightEye.x - box.x) / Math.max(1, box.width);
+  if (leftEyeXRatio < minEyeMarginRatio || rightEyeXRatio > 1 - minEyeMarginRatio) return false;
+
+  const eyeLineY = (leftEye.y + rightEye.y) / 2;
+  const eyeLineYRatio = (eyeLineY - box.y) / Math.max(1, box.height);
+  if (eyeLineYRatio < minEyeLineYRatio || eyeLineYRatio > maxEyeLineYRatio) return false;
+
   const eyeLeftX = Math.min(leftEye.x, rightEye.x);
   const eyeRightX = Math.max(leftEye.x, rightEye.x);
   const noseBetweenEyes = (nose.x - eyeLeftX) / Math.max(1e-6, eyeRightX - eyeLeftX);
-  if (noseBetweenEyes < 0.1 || noseBetweenEyes > 0.9) return false;
+  if (noseBetweenEyes < 0.2 || noseBetweenEyes > 0.8) return false;
 
   const centerX = box.x + box.width / 2;
   const noseCenterOffset = Math.abs((nose.x - centerX) / Math.max(1, box.width));
   if (noseCenterOffset > noseCenterTolerance) return false;
+
+  const noseYRatio = (nose.y - box.y) / Math.max(1, box.height);
+  const noseDropRatio = (nose.y - eyeLineY) / Math.max(1, box.height);
+  if (noseDropRatio < minNoseDropRatio) return false;
+  if (noseYRatio > maxNoseYRatio) return false;
 
   return true;
 }
@@ -1507,12 +1525,12 @@ async function main() {
   const requireFrontalFace = envBool("WORKER_REQUIRE_FRONTAL_FACE", true);
   const frontalMinEyeDistanceRatio = Math.max(
     0.05,
-    envFloat("WORKER_FRONTAL_MIN_EYE_DISTANCE_RATIO", 0.12),
+    envFloat("WORKER_FRONTAL_MIN_EYE_DISTANCE_RATIO", 0.22),
   );
-  const frontalMaxEyeSlope = Math.max(0.02, envFloat("WORKER_FRONTAL_MAX_EYE_SLOPE", 0.2));
+  const frontalMaxEyeSlope = Math.max(0.02, envFloat("WORKER_FRONTAL_MAX_EYE_SLOPE", 0.14));
   const frontalNoseCenterTolerance = Math.max(
     0.05,
-    envFloat("WORKER_FRONTAL_NOSE_CENTER_TOLERANCE", 0.42),
+    envFloat("WORKER_FRONTAL_NOSE_CENTER_TOLERANCE", 0.18),
   );
   const matchIntervalMs = Math.max(120, envInt("WORKER_MATCH_INTERVAL_MS", 140));
   const matchLogCooldownMs = Math.max(300, envInt("WORKER_MATCH_LOG_COOLDOWN_MS", 1000));
@@ -2973,6 +2991,14 @@ async function main() {
       );
     }
 
+    const isIdentityVisibleDetection = (det) =>
+      isLikelyFrontalFace(det, {
+        enabled: camRequireFrontalFace,
+        minEyeDistanceRatio: camFrontalMinEyeDistanceRatio,
+        maxEyeSlope: camFrontalMaxEyeSlope,
+        noseCenterTolerance: camFrontalNoseCenterTolerance,
+      });
+
     try {
       let jpg;
       try {
@@ -3127,6 +3153,9 @@ async function main() {
         }
         detections = [];
       }
+      if (camRequireFrontalFace && detections.length) {
+        detections = detections.filter((det) => isIdentityVisibleDetection(det));
+      }
       cam.candidate = detections.length;
 
       const { maxSide, maxScore } = largestFaceStats(detections);
@@ -3274,6 +3303,9 @@ async function main() {
           if (inferenceBackend === "insightface" && enableEmotions && needEmotion && results.length) {
             results = await enrichDetectionsWithEmotionFallback(rgb, workerWidth, workerHeight, results);
           }
+          if (camRequireFrontalFace && results.length) {
+            results = results.filter((det) => isIdentityVisibleDetection(det));
+          }
 
           const snapshotBase64 = jpg.toString("base64");
           const people = [];
@@ -3299,12 +3331,7 @@ async function main() {
               faceScore = getScore(det);
               faceSharpness = estimateFaceSharpness(rgb, workerWidth, workerHeight, det);
               const identityScore = faceScore;
-              const isFrontalFace = isLikelyFrontalFace(det, {
-                enabled: camRequireFrontalFace,
-                minEyeDistanceRatio: camFrontalMinEyeDistanceRatio,
-                maxEyeSlope: camFrontalMaxEyeSlope,
-                noseCenterTolerance: camFrontalNoseCenterTolerance,
-              });
+              const isFrontalFace = isIdentityVisibleDetection(det);
               if (
                 faceSide >= camMatchMinFaceSidePx &&
                 identityScore >= camIdentityMinScore &&
