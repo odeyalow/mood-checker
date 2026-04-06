@@ -8,6 +8,13 @@ if ! pm2 describe "${APP_NAME}" >/dev/null 2>&1; then
   APP_NAME="mood-checker-pyworker"
 fi
 
+CAMERA_IDS_RAW="$(grep -E '^WORKER_CAMERA_SOURCES=' .env.worker 2>/dev/null | tail -n 1 | cut -d= -f2- || true)"
+if [ -n "${CAMERA_IDS_RAW}" ]; then
+  mapfile -t CAMERA_IDS < <(printf '%s\n' "${CAMERA_IDS_RAW}" | tr ',' '\n' | cut -d= -f1 | sed '/^$/d')
+else
+  CAMERA_IDS=("cam-01")
+fi
+
 {
   echo "=== TIME ==="
   date -Is
@@ -26,7 +33,7 @@ fi
 
   echo
   echo "=== STATUS API ==="
-  for c in cam-01 cam-02; do
+  for c in "${CAMERA_IDS[@]}"; do
     echo "-- ${c}"
     curl -sS "http://127.0.0.1:3000/api/worker/status?cameraId=${c}" || true
     echo
@@ -34,7 +41,7 @@ fi
 
   echo
   echo "=== ZOOM API ==="
-  for c in cam-01 cam-02; do
+  for c in "${CAMERA_IDS[@]}"; do
     echo "-- ${c}"
     curl -sS "http://127.0.0.1:3000/api/worker/zoom?cameraId=${c}" || true
     echo
@@ -43,12 +50,12 @@ fi
   echo
   echo "=== PROFILE / START LINES ==="
   pm2 logs "${APP_NAME}" --lines 300 --nostream 2>/dev/null | \
-    egrep -i "camera settings parse error|matching=on|session snapshot_ms|db cooldown_ms|\\[cam-01\\] profile|\\[cam-02\\] profile" || true
+    egrep -i "camera settings parse error|matching=on|session snapshot_ms|db cooldown_ms|\\[cam-[0-9]{2}\\] profile" || true
 
   echo
   echo "=== EVENT COUNTS (last 500 lines) ==="
   LOG="$(pm2 logs "${APP_NAME}" --lines 500 --nostream 2>/dev/null || true)"
-  for c in cam-01 cam-02; do
+  for c in "${CAMERA_IDS[@]}"; do
     echo "-- ${c}"
     face_count="$(echo "${LOG}" | grep -c "\\[${c}\\] face_detected" || true)"
     cand_count="$(echo "${LOG}" | grep -c "\\[${c}\\] candidate_detected" || true)"

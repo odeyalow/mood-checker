@@ -15,16 +15,11 @@ npm run start
 Set these in `.env` for camera page:
 
 ```bash
-NEXT_PUBLIC_CAMERA_1_RTSP_URL=rtsp://127.0.0.1:8554/cam01_main
+NEXT_PUBLIC_CAMERA_1_RTSP_URL=rtsp://user:user123@10.16.12.39:554/stream
 NEXT_PUBLIC_CAMERA_1_GO2RTC_SRC=cam01_main
-NEXT_PUBLIC_CAMERA_1_NAME=Office Camera 1
-NEXT_PUBLIC_CAMERA_1_LOCATION=NVR LAN
-NEXT_PUBLIC_CAMERA_1_DIGITAL_ZOOM=1.4
-NEXT_PUBLIC_CAMERA_2_RTSP_URL=rtsp://127.0.0.1:8554/cam02_main
-NEXT_PUBLIC_CAMERA_2_GO2RTC_SRC=cam02_main
-NEXT_PUBLIC_CAMERA_2_NAME=Office Camera 2
-NEXT_PUBLIC_CAMERA_2_LOCATION=NVR LAN
-NEXT_PUBLIC_CAMERA_2_DIGITAL_ZOOM=1
+NEXT_PUBLIC_CAMERA_1_NAME=Camera 1
+NEXT_PUBLIC_CAMERA_1_LOCATION=10.16.12.39
+NEXT_PUBLIC_CAMERA_1_DIGITAL_ZOOM=1
 NEXT_PUBLIC_ENABLE_WEBCAM_TILE=false
 NEXT_PUBLIC_DETECTION_MODE=worker
 GO2RTC_BASE_URL=http://127.0.0.1:1984
@@ -40,9 +35,9 @@ WORKER_FRAME_ABORT_RETRY_WIDTH=1280
 WORKER_FRAME_ABORT_RETRY_HEIGHT=720
 WORKER_FRAME_ABORT_RETRY_QUALITY=85
 # Optional defaults for worker-only zoom (x1..x5)
-# WORKER_CAMERA_ZOOMS=cam-01=1,cam-02=2
+# WORKER_CAMERA_ZOOMS=cam-01=1
 # Optional per-camera quality profiles
-# WORKER_CAMERA_SETTINGS_JSON={"cam-01":{"matchThreshold":0.50},"cam-02":{"confirmFrames":2,"filterMinScore":0.16}}
+# WORKER_CAMERA_SETTINGS_JSON={"cam-01":{"matchThreshold":0.50}}
 # Phantom guard (reject empty-scene phantom recognition/registration)
 # WORKER_PHANTOM_GUARD_ENABLED=true
 # WORKER_PHANTOM_BASELINE_DIR=/opt/mood-checker/worker/phantom-baselines
@@ -65,7 +60,7 @@ WORKER_FRAME_ABORT_RETRY_QUALITY=85
 Notes:
 - `NEXT_PUBLIC_CAMERA_1_RTSP_URL` is consumed by the browser camera page through your `/api/stream` proxy.
 - `NEXT_PUBLIC_CAMERA_1_GO2RTC_SRC` is used by face detection snapshot proxy (`/api/camera/frame`) and should match go2rtc stream name.
-- `NEXT_PUBLIC_CAMERA_1_DIGITAL_ZOOM` / `NEXT_PUBLIC_CAMERA_2_DIGITAL_ZOOM` enable per-camera digital zoom (`>1` enables zoom, max `4`).
+- `NEXT_PUBLIC_CAMERA_1_DIGITAL_ZOOM` enables per-camera digital zoom (`>1` enables zoom, max `4`).
 - `GO2RTC_FRAME_WIDTH/HEIGHT/QUALITY` control snapshot resolution/quality for worker recognition (`/api/camera/frame`).
 - `NEXT_PUBLIC_ENABLE_WEBCAM_TILE=true` enables the local webcam tile for debugging.
 - `NEXT_PUBLIC_DETECTION_MODE=worker` disables browser-side face detection and shows worker live status under camera tiles.
@@ -126,7 +121,7 @@ Verify:
 pm2 logs mood-checker-worker --lines 80
 ```
 
-Apply balanced worker profile (recommended for cam-02 stability + anti-phantom matching):
+Apply balanced worker profile:
 
 ```bash
 npm run worker:profile:balanced
@@ -157,7 +152,7 @@ Worker zoom API (camera-specific, does not affect UI stream):
 ```bash
 curl -s -X POST "http://127.0.0.1:3000/api/worker/zoom" \
   -H "Content-Type: application/json" \
-  -d '{"cameraId":"cam-02","zoom":2}'
+  -d '{"cameraId":"cam-01","zoom":1}'
 ```
 
 Look for:

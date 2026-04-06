@@ -27,27 +27,6 @@ const cameraSettings = {
     sessionAbsenceMs: 2300,
     recognitionHoldMs: 2200,
   },
-  "cam-02": {
-    confirmFrames: 1,
-    minConfirmScore: 0.12,
-    filterMinScore: 0.09,
-    personMinScore: 0.16,
-    personMinSidePx: 18,
-    personMinStreak: 1,
-    matchThreshold: 0.61,
-    matchMinMargin: 0.02,
-    matchMinFaceSidePx: 13,
-    matchIntervalMs: 110,
-    emotionIntervalMs: 200,
-    emotionMinConfidence: 0.16,
-    emotionLowConfidenceFloor: 0.08,
-    sessionSnapshotIntervalMs: 900,
-    sessionResolveWaitMs: 1000,
-    sessionMinSamples: 1,
-    sessionMinEmotionSamples: 1,
-    sessionAbsenceMs: 2600,
-    recognitionHoldMs: 2600,
-  },
 };
 
 const updates = new Map([
@@ -57,12 +36,14 @@ const updates = new Map([
   ["WORKER_FRAME_ABORT_RETRY_WIDTH", "1280"],
   ["WORKER_FRAME_ABORT_RETRY_HEIGHT", "720"],
   ["WORKER_FRAME_ABORT_RETRY_QUALITY", "82"],
+  ["WORKER_CAMERA_SOURCES", "cam-01=cam01_main"],
+  ["WORKER_PARALLEL_CAMERAS", "1"],
   ["WORKER_DB_REENTRY_GAP_MS", "1400"],
   ["WORKER_DB_COOLDOWN_MS", "3200"],
   ["WORKER_EMOTION_ALLOW_LOW_CONFIDENCE_LABEL", "true"],
   ["WORKER_DB_ALLOW_MOOD_FALLBACK", "true"],
   ["WORKER_DB_FALLBACK_MOOD", "neutral"],
-  ["WORKER_CAMERA_ZOOMS", "cam-01=1,cam-02=2"],
+  ["WORKER_CAMERA_ZOOMS", "cam-01=1"],
   ["WORKER_CAMERA_SETTINGS_JSON", JSON.stringify(cameraSettings)],
 ]);
 
