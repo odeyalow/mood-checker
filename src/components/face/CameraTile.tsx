@@ -13,6 +13,7 @@ const WORKER_ZOOM_PRESETS = [1, 2, 3, 4, 5];
 const STREAM_START_TIMEOUT_MS = 12000;
 const STREAM_RETRY_DELAY_MS = 3000;
 const STREAM_DISCONNECT_THRESHOLD_MS = 5000;
+const STREAM_WASM_RECOVERY_DELAY_MS = 1000;
 
 type RtspPlayer = {
   destroy?: () => void;
@@ -281,6 +282,29 @@ export default function CameraTile({
       }, delayMs);
     }
 
+    function restartStreamAfterCrash() {
+      if (!mounted || streamTokenRef.current !== streamToken) return;
+      clearReconnectTimer();
+      safeDestroyPlayer(playerRef.current);
+      playerRef.current = null;
+      setStatus("error");
+      scheduleReconnect(STREAM_WASM_RECOVERY_DELAY_MS);
+    }
+
+    function handleGlobalPlayerError(event: ErrorEvent) {
+      const message = String(event?.message ?? "");
+      const filename = String(event?.filename ?? "");
+      const looksLikeJsmpegCrash =
+        message.includes("memory access out of bounds") ||
+        message.includes("MPEG1WASM") ||
+        filename.includes("rtsp-relay") ||
+        filename.includes("jsmpeg");
+
+      if (!looksLikeJsmpegCrash) return;
+      console.error("[camera] jsmpeg runtime crash, restarting stream:", event.error || message);
+      restartStreamAfterCrash();
+    }
+
     async function startStream() {
       const attemptId = ++attemptSeq;
       clearReconnectTimer();
@@ -332,9 +356,11 @@ export default function CameraTile({
       }
     }
 
+    window.addEventListener("error", handleGlobalPlayerError);
     void startStream();
     return () => {
       mounted = false;
+      window.removeEventListener("error", handleGlobalPlayerError);
       clearReconnectTimer();
       safeDestroyPlayer(playerRef.current);
       playerRef.current = null;

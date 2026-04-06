@@ -9,6 +9,18 @@ process.env.NODE_ENV = dev ? "development" : "production";
 const port = Number.parseInt(process.env.PORT || "3000", 10);
 const app = next({ dev, port });
 const handle = app.getRequestHandler();
+const previewMaxWidth = Math.max(
+  320,
+  Number.parseInt(process.env.STREAM_PREVIEW_MAX_WIDTH || "1280", 10) || 1280,
+);
+const previewFrameRate = Math.max(
+  5,
+  Number.parseInt(process.env.STREAM_PREVIEW_FPS || "15", 10) || 15,
+);
+const previewQuality = Math.min(
+  31,
+  Math.max(1, Number.parseInt(process.env.STREAM_PREVIEW_MPEG1_Q || "5", 10) || 5),
+);
 
 function isIgnorableWsError(error) {
   const code =
@@ -39,12 +51,21 @@ function parseZoomParam(rawZoom) {
 }
 
 function buildVideoFilter(zoom) {
-  if (zoom <= 1) return "";
-  const safeZoom = Number(zoom.toFixed(2));
-  return [
-    `crop=iw/${safeZoom}:ih/${safeZoom}:(iw-iw/${safeZoom})/2:(ih-ih/${safeZoom})/2`,
-    "scale=iw:ih",
-  ].join(",");
+  const filters = [];
+
+  if (zoom > 1) {
+    const safeZoom = Number(zoom.toFixed(2));
+    filters.push(
+      `crop=iw/${safeZoom}:ih/${safeZoom}:(iw-iw/${safeZoom})/2:(ih-ih/${safeZoom})/2`,
+      "scale=iw:ih",
+    );
+  }
+
+  if (previewMaxWidth > 0) {
+    filters.push(`scale='min(${previewMaxWidth},iw)':-2`);
+  }
+
+  return filters.join(",");
 }
 
 const handleFatalError = (error) => {
@@ -93,7 +114,7 @@ app
 
       try {
         const filter = buildVideoFilter(zoom);
-        const additionalFlags = ["-q", "1", "-r", "20"];
+        const additionalFlags = ["-q", String(previewQuality), "-r", String(previewFrameRate)];
         if (filter) {
           additionalFlags.push("-vf", filter);
         }
