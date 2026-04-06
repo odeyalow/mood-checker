@@ -74,7 +74,7 @@ type RtspPlayer = {
   destroy?: () => void;
 };
 
-type PreviewMode = "stream" | "snapshot";
+type PreviewMode = "stream" | "snapshot" | "mjpeg";
 
 type PlayerLoader = (options: {
   url: string;
@@ -283,6 +283,12 @@ function buildFrameApiPath(
   return `/api/camera/frame?${params.toString()}`;
 }
 
+function buildMjpegApiPath(src: string) {
+  const params = new URLSearchParams();
+  params.set("src", src);
+  return `/api/camera/mjpeg?${params.toString()}`;
+}
+
 export default function CameraTile({
   camera,
   labels,
@@ -303,7 +309,12 @@ export default function CameraTile({
     downloadingFrame: string;
   };
 }) {
-  const initialPreviewMode: PreviewMode = camera.previewMode === "snapshot" ? "snapshot" : "stream";
+  const initialPreviewMode: PreviewMode =
+    camera.previewMode === "snapshot"
+      ? "snapshot"
+      : camera.previewMode === "mjpeg"
+        ? "mjpeg"
+        : "stream";
   const streamRef = useRef<HTMLCanvasElement | null>(null);
   const playerRef = useRef<RtspPlayer | null>(null);
   const streamTokenRef = useRef(0);
@@ -348,6 +359,11 @@ export default function CameraTile({
     const initialZoom = clampZoom(camera.digitalZoom);
     setZoomValue(initialZoom);
   }, [camera.id, camera.digitalZoom]);
+
+  useEffect(() => {
+    if (previewMode !== "mjpeg") return;
+    setStatus("loading");
+  }, [camera.id, previewMode]);
 
   useEffect(() => {
     if (previewMode !== "stream") {
@@ -725,7 +741,26 @@ export default function CameraTile({
   return (
     <Card className="camera-card" size="small">
       <div className="camera-media">
-        {previewMode === "snapshot" ? (
+        {previewMode === "mjpeg" ? (
+          camera.go2rtcSrc ? (
+            <img
+              className="camera-video"
+              src={buildMjpegApiPath(camera.go2rtcSrc)}
+              alt={`${camera.name} preview`}
+              onLoad={() => {
+                setStatus("ready");
+              }}
+              onError={() => {
+                setStatus("error");
+              }}
+              style={{
+                transform: zoomValue > MIN_ZOOM ? `scale(${zoomValue})` : "scale(1)",
+                transformOrigin: "center center",
+                transition: "transform 0.16s ease-out",
+              }}
+            />
+          ) : null
+        ) : previewMode === "snapshot" ? (
           previewSnapshotUrl ? (
             <img
               className="camera-video"
@@ -869,7 +904,13 @@ export default function CameraTile({
         </div>
 
         <Tag color={people.length ? "green" : "geekblue"}>
-          {people.length ? labels.recognized : previewMode === "snapshot" ? "SNAPSHOT" : "RTSP"}
+          {people.length
+            ? labels.recognized
+            : previewMode === "snapshot"
+              ? "SNAPSHOT"
+              : previewMode === "mjpeg"
+                ? "MJPEG"
+                : "RTSP"}
         </Tag>
       </div>
     </Card>

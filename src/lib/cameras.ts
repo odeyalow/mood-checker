@@ -5,7 +5,7 @@ export type CameraConfig = {
   rtspUrl: string;
   go2rtcSrc?: string;
   digitalZoom?: number;
-  previewMode?: "stream" | "snapshot";
+  previewMode?: "stream" | "snapshot" | "mjpeg";
 };
 
 function parseDigitalZoom(rawValue: string | undefined): number | undefined {
@@ -15,9 +15,14 @@ function parseDigitalZoom(rawValue: string | undefined): number | undefined {
   return Math.min(parsed, 4);
 }
 
-function parsePreviewMode(rawValue: string | undefined): "stream" | "snapshot" | undefined {
+function parsePreviewMode(
+  rawValue: string | undefined,
+): "stream" | "snapshot" | "mjpeg" | undefined {
   if (!rawValue) return undefined;
-  return rawValue === "snapshot" ? "snapshot" : rawValue === "stream" ? "stream" : undefined;
+  if (rawValue === "snapshot") return "snapshot";
+  if (rawValue === "mjpeg") return "mjpeg";
+  if (rawValue === "stream") return "stream";
+  return undefined;
 }
 
 const camera1Rtsp =
