@@ -57,6 +57,18 @@ const SNAPSHOT_PREVIEW_TIMEOUT_MS = parseClientEnvInt(
   300,
   15000,
 );
+const SNAPSHOT_PREVIEW_ERROR_RETRY_MS = parseClientEnvInt(
+  process.env.NEXT_PUBLIC_SNAPSHOT_PREVIEW_ERROR_RETRY_MS,
+  1200,
+  300,
+  10000,
+);
+const SNAPSHOT_PREVIEW_MAX_RETRY_MS = parseClientEnvInt(
+  process.env.NEXT_PUBLIC_SNAPSHOT_PREVIEW_MAX_RETRY_MS,
+  4000,
+  500,
+  20000,
+);
 
 type RtspPlayer = {
   destroy?: () => void;
@@ -468,6 +480,7 @@ export default function CameraTile({
 
     let mounted = true;
     let timer = 0;
+    let failureCount = 0;
 
     const releasePreviewSnapshot = () => {
       if (!previewSnapshotUrlRef.current) return;
@@ -477,6 +490,8 @@ export default function CameraTile({
 
     const pollSnapshot = async () => {
       if (!mounted) return;
+
+      let nextDelay = SNAPSHOT_PREVIEW_REFRESH_MS;
 
       try {
         const res = await fetch(
@@ -508,17 +523,24 @@ export default function CameraTile({
         previewSnapshotUrlRef.current = nextUrl;
         setPreviewSnapshotUrl(nextUrl);
         setStatus("ready");
+        failureCount = 0;
         if (prevUrl) URL.revokeObjectURL(prevUrl);
       } catch (error) {
         console.error("[camera] snapshot preview error:", error);
+        failureCount += 1;
+        nextDelay = Math.min(
+          SNAPSHOT_PREVIEW_MAX_RETRY_MS,
+          SNAPSHOT_PREVIEW_ERROR_RETRY_MS * failureCount,
+        );
         if (mounted) {
-          setStatus("error");
+          // Keep the last good frame visible; only show hard error before the first successful frame.
+          setStatus(previewSnapshotUrlRef.current ? "ready" : "error");
         }
       }
 
       timer = window.setTimeout(() => {
         void pollSnapshot();
-      }, SNAPSHOT_PREVIEW_REFRESH_MS);
+      }, nextDelay);
     };
 
     setStatus("loading");
