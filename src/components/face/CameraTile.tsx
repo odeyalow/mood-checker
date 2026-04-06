@@ -15,11 +15,48 @@ const STREAM_RETRY_DELAY_MS = 3000;
 const STREAM_DISCONNECT_THRESHOLD_MS = 5000;
 const STREAM_WASM_RECOVERY_DELAY_MS = 1000;
 const STREAM_MAX_FAILURES_BEFORE_SNAPSHOT = 2;
-const SNAPSHOT_PREVIEW_REFRESH_MS = 1000;
-const SNAPSHOT_PREVIEW_WIDTH = 640;
-const SNAPSHOT_PREVIEW_HEIGHT = 360;
-const SNAPSHOT_PREVIEW_QUALITY = 85;
-const SNAPSHOT_PREVIEW_TIMEOUT_MS = 4500;
+
+function parseClientEnvInt(
+  rawValue: string | undefined,
+  fallback: number,
+  min: number,
+  max: number,
+) {
+  const parsed = Number.parseInt(rawValue || "", 10);
+  if (!Number.isFinite(parsed)) return fallback;
+  return Math.min(max, Math.max(min, parsed));
+}
+
+const SNAPSHOT_PREVIEW_REFRESH_MS = parseClientEnvInt(
+  process.env.NEXT_PUBLIC_SNAPSHOT_PREVIEW_REFRESH_MS,
+  400,
+  150,
+  5000,
+);
+const SNAPSHOT_PREVIEW_WIDTH = parseClientEnvInt(
+  process.env.NEXT_PUBLIC_SNAPSHOT_PREVIEW_WIDTH,
+  480,
+  160,
+  1920,
+);
+const SNAPSHOT_PREVIEW_HEIGHT = parseClientEnvInt(
+  process.env.NEXT_PUBLIC_SNAPSHOT_PREVIEW_HEIGHT,
+  270,
+  120,
+  1080,
+);
+const SNAPSHOT_PREVIEW_QUALITY = parseClientEnvInt(
+  process.env.NEXT_PUBLIC_SNAPSHOT_PREVIEW_QUALITY,
+  75,
+  1,
+  100,
+);
+const SNAPSHOT_PREVIEW_TIMEOUT_MS = parseClientEnvInt(
+  process.env.NEXT_PUBLIC_SNAPSHOT_PREVIEW_TIMEOUT_MS,
+  2500,
+  300,
+  15000,
+);
 
 type RtspPlayer = {
   destroy?: () => void;
