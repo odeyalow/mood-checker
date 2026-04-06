@@ -454,66 +454,6 @@ function sanitizeFileName(fileName) {
     .slice(0, 120);
 }
 
-function computeDHash64FromRgb(rgb, width, height, hashSize = 8) {
-  if (!(rgb instanceof Uint8Array) || width < 2 || height < 2) return null;
-  const size = Math.max(4, Math.min(16, Math.trunc(hashSize)));
-  const cols = size + 1;
-  const rows = size;
-  const gray = new Array(rows * cols);
-
-  for (let y = 0; y < rows; y += 1) {
-    const sy = Math.floor((y * (height - 1)) / Math.max(1, rows - 1));
-    for (let x = 0; x < cols; x += 1) {
-      const sx = Math.floor((x * (width - 1)) / Math.max(1, cols - 1));
-      const idx = (sy * width + sx) * 3;
-      const r = rgb[idx] ?? 0;
-      const g = rgb[idx + 1] ?? 0;
-      const b = rgb[idx + 2] ?? 0;
-      gray[y * cols + x] = Math.floor((r * 30 + g * 59 + b * 11) / 100);
-    }
-  }
-
-  let hash = 0n;
-  for (let y = 0; y < rows; y += 1) {
-    for (let x = 0; x < size; x += 1) {
-      const left = gray[y * cols + x];
-      const right = gray[y * cols + x + 1];
-      hash = (hash << 1n) | (left > right ? 1n : 0n);
-    }
-  }
-  return hash;
-}
-
-function hammingDistance64(left, right) {
-  if (typeof left !== "bigint" || typeof right !== "bigint") return Number.POSITIVE_INFINITY;
-  let value = left ^ right;
-  let bits = 0;
-  while (value > 0n) {
-    bits += Number(value & 1n);
-    value >>= 1n;
-  }
-  return bits;
-}
-
-function findClosestPhantomBaseline(baselines, rgb, width, height) {
-  if (!Array.isArray(baselines) || !baselines.length) return null;
-  const frameHash = computeDHash64FromRgb(rgb, width, height);
-  if (frameHash == null) return null;
-
-  let best = null;
-  for (const baseline of baselines) {
-    const distance = hammingDistance64(frameHash, baseline?.hash);
-    if (!Number.isFinite(distance)) continue;
-    if (!best || distance < best.distance) {
-      best = {
-        distance,
-        baseline,
-      };
-    }
-  }
-  return best;
-}
-
 async function savePhantomSnapshot(snapshotDir, publicBase, cameraId, jpgBuffer, now) {
   if (!snapshotDir || !publicBase || !(jpgBuffer instanceof Buffer) || !jpgBuffer.length) return "";
   const safeCameraId = sanitizeFileName(cameraId || "cam");
@@ -570,71 +510,6 @@ async function archiveFaceSnapshot({
   }
 
   return `${archivePublicBase.replace(/\/+$/, "")}/${safeFaceId}/${fileName}`;
-}
-
-async function loadPhantomBaselines({
-  baselineDir,
-  baselinePublicDir,
-  baselinePublicBase,
-  cameras,
-}) {
-  const out = new Map();
-  for (const camera of cameras) {
-    const cameraId = String(camera?.cameraId ?? "").trim();
-    if (!cameraId) continue;
-    const cameraDir = path.join(baselineDir, cameraId);
-    let entries = [];
-    try {
-      entries = await fsp.readdir(cameraDir, { withFileTypes: true });
-    } catch {
-      continue;
-    }
-
-    const rows = [];
-    for (const entry of entries) {
-      if (!entry?.isFile?.()) continue;
-      if (!isImageFileName(entry.name)) continue;
-      const safeName = sanitizeFileName(entry.name);
-      const sourceFile = path.join(cameraDir, entry.name);
-      try {
-        const fileBuffer = await fsp.readFile(sourceFile);
-        const image = await loadImage(fileBuffer);
-        const width = Number(image.width ?? 0);
-        const height = Number(image.height ?? 0);
-        if (!width || !height) continue;
-
-        const canvas = createCanvas(width, height);
-        const ctx = canvas.getContext("2d");
-        ctx.drawImage(image, 0, 0, width, height);
-        const rgba = ctx.getImageData(0, 0, width, height).data;
-        const rgb = rgbaToRgbTensorData(rgba);
-        const hash = computeDHash64FromRgb(rgb, width, height);
-        if (hash == null) continue;
-
-        let publicUrl = "";
-        if (baselinePublicDir && baselinePublicBase) {
-          const publicCameraDir = path.join(baselinePublicDir, cameraId);
-          await fsp.mkdir(publicCameraDir, { recursive: true });
-          const publicAbs = path.join(publicCameraDir, safeName);
-          await fsp.writeFile(publicAbs, fileBuffer);
-          publicUrl = `${baselinePublicBase.replace(/\/+$/, "")}/${cameraId}/${safeName}`;
-        }
-
-        rows.push({
-          name: safeName,
-          hash,
-          publicUrl,
-        });
-      } catch (err) {
-        log(`[phantom] baseline load failed camera=${cameraId} file=${entry.name} err=${String(err)}`);
-      }
-    }
-
-    if (rows.length) {
-      out.set(cameraId, rows);
-    }
-  }
-  return out;
 }
 
 function createPresenceSession(now) {
@@ -1431,7 +1306,6 @@ function createState(cameraId, src) {
     lastMatchLogAt: 0,
     lastEmotionLogAt: 0,
     lastErrLogAt: 0,
-    lastPhantomLogAt: 0,
     lastBlockedMatchLogAt: 0,
     lastIdentifyAt: 0,
     lastAutoCreatedAt: 0,
@@ -1696,20 +1570,9 @@ async function main() {
     0.01,
     Math.min(2, envFloat("WORKER_RECORD_MAX_DISTANCE", matchThreshold + 0.03)),
   );
-  const phantomGuardEnabled = envBool("WORKER_PHANTOM_GUARD_ENABLED", true);
-  const phantomBaselineDir =
-    process.env.WORKER_PHANTOM_BASELINE_DIR || path.join(rootDir, "worker", "phantom-baselines");
-  const phantomBaselinePublicDir =
-    process.env.WORKER_PHANTOM_BASELINE_PUBLIC_DIR ||
-    path.join(rootDir, "public", "_phantom-baselines");
-  const phantomBaselinePublicBase = (
-    process.env.WORKER_PHANTOM_BASELINE_PUBLIC_BASE || "/_phantom-baselines"
-  ).replace(/\/+$/, "");
-  const phantomHashDistanceMax = Math.max(0, envInt("WORKER_PHANTOM_HASH_DISTANCE_MAX", 10));
   const phantomLogEndpoint =
     (process.env.WORKER_PHANTOM_LOG_ENDPOINT || "http://127.0.0.1:3000/api/faces/dedup-logs").trim();
   const phantomLogTimeoutMs = Math.max(400, envInt("WORKER_PHANTOM_LOG_TIMEOUT_MS", 1200));
-  const phantomLogCooldownMs = Math.max(1000, envInt("WORKER_PHANTOM_LOG_COOLDOWN_MS", 9000));
   const phantomSnapshotDir =
     process.env.WORKER_PHANTOM_SNAPSHOT_DIR || path.join(rootDir, "public", "_phantom-rejects");
   const phantomSnapshotPublicBase = (
@@ -1764,10 +1627,7 @@ async function main() {
   if (faceArchiveEnabled) {
     await fsp.mkdir(faceArchiveDir, { recursive: true }).catch(() => {});
   }
-  if (phantomGuardEnabled) {
-    await fsp.mkdir(phantomSnapshotDir, { recursive: true }).catch(() => {});
-    await fsp.mkdir(phantomBaselinePublicDir, { recursive: true }).catch(() => {});
-  }
+  await fsp.mkdir(phantomSnapshotDir, { recursive: true }).catch(() => {});
 
   const faceApiFallbackEnabled = inferenceBackend === "faceapi" || allowFaceApiFallback;
   const modelDir = path.join(rootDir, "public", "models");
@@ -1806,15 +1666,6 @@ async function main() {
     scoreThreshold: tinyScoreThreshold,
   });
   const ssdOptions = new faceapi.SsdMobilenetv1Options({ minConfidence: ssdMinConfidence });
-  const phantomBaselinesByCamera = phantomGuardEnabled
-    ? await loadPhantomBaselines({
-        baselineDir: phantomBaselineDir,
-        baselinePublicDir: phantomBaselinePublicDir,
-        baselinePublicBase: phantomBaselinePublicBase,
-        cameras,
-      })
-    : new Map();
-
   const reloadFaceRegistry = async (reason) => {
     const loadedAt = Date.now();
     if (!faceRegistryEndpoint) return;
@@ -2037,7 +1888,7 @@ async function main() {
   );
   log(
     `new_id_quality min_sharpness=${newIdMinSharpness.toFixed(2)} ` +
-      `empty_min_sharpness=${newIdEmptyMinSharpness.toFixed(2)} phantom_bank_th=${phantomBankThreshold.toFixed(3)}`,
+      `empty_min_sharpness=${newIdEmptyMinSharpness.toFixed(2)} blocked_bank_th=${phantomBankThreshold.toFixed(3)}`,
   );
   log(
     `ignore_zones cameras=${Object.keys(ignoreZonesByCamera).length} overlap=${ignoreZoneOverlapThreshold.toFixed(2)}`,
@@ -2174,7 +2025,7 @@ async function main() {
       cameraId: cam.cameraId,
       action: "auto_quarantine_blocked",
       reason:
-        `Автоблокировка ID: подозрение на фантом (ratio=${ratio.toFixed(2)}, ` +
+        `РђРІС‚РѕР±Р»РѕРєРёСЂРѕРІРєР° ID: РїРѕРґРѕР·СЂРµРЅРёРµ РЅР° С„Р°РЅС‚РѕРј (ratio=${ratio.toFixed(2)}, ` +
         `samples=${stat.samples}, score=${Number(person?.faceScore ?? 0).toFixed(3)}, ` +
         `side=${Number(person?.faceSide ?? 0).toFixed(1)}, sharp=${Number(person?.faceSharpness ?? 0).toFixed(1)}).`,
       sourceSnapshotUrl,
@@ -2190,17 +2041,6 @@ async function main() {
     return true;
   };
 
-  if (phantomGuardEnabled) {
-    const baselineSummary = states
-      .map((cam) => `${cam.cameraId}:${(phantomBaselinesByCamera.get(cam.cameraId) || []).length}`)
-      .join(", ");
-    log(
-      `phantom_guard=on hash_max=${phantomHashDistanceMax} cooldown_ms=${phantomLogCooldownMs} ` +
-        `baselines=[${baselineSummary || "none"}]`,
-    );
-  } else {
-    log("phantom_guard=off");
-  }
   log(`started cameras=${states.length} frame_api=${frameApiBase}`);
   log(
     `pipeline parallel_cameras=${parallelCameraLimit} db_queue_max=${dbQueueMaxSize} ` +
@@ -2546,35 +2386,6 @@ async function main() {
         sessionMinEmotionSamples,
       ),
     );
-    const camPhantomGuardEnabledRaw = getCameraSetting(
-      cameraSettings,
-      cam.cameraId,
-      "phantomGuardEnabled",
-      phantomGuardEnabled,
-    );
-    const camPhantomGuardEnabled =
-      typeof camPhantomGuardEnabledRaw === "boolean"
-        ? camPhantomGuardEnabledRaw
-        : phantomGuardEnabled;
-    const camPhantomHashDistanceMax = Math.max(
-      0,
-      parseFiniteInt(
-        getCameraSetting(
-          cameraSettings,
-          cam.cameraId,
-          "phantomHashDistanceMax",
-          phantomHashDistanceMax,
-        ),
-        phantomHashDistanceMax,
-      ),
-    );
-    const camPhantomLogCooldownMs = Math.max(
-      1000,
-      parseFiniteInt(
-        getCameraSetting(cameraSettings, cam.cameraId, "phantomLogCooldownMs", phantomLogCooldownMs),
-        phantomLogCooldownMs,
-      ),
-    );
     const camNewIdConfirmFrames = Math.max(
       1,
       parseFiniteInt(
@@ -2871,7 +2682,6 @@ async function main() {
         autoBlockCooldownMs,
       ),
     );
-    const camPhantomBaselines = phantomBaselinesByCamera.get(cam.cameraId) || [];
     const evictPresenceSessions = (activeNames = null) => {
       for (const [savedName, session] of cam.presenceSessions.entries()) {
         if (activeNames && activeNames.has(savedName)) continue;
@@ -2994,9 +2804,7 @@ async function main() {
           `absence_ms=${camSessionAbsenceMs} resolve_ms=${camSessionResolveWaitMs} ` +
           `archive=${camFaceArchiveEnabled ? "on" : "off"} archive_cd=${camFaceArchiveCooldownMs} ` +
           `record_gate=${camRecordMinFaceScore.toFixed(3)}/${camRecordMinFaceSidePx}/${camRecordMinSharpness.toFixed(1)}/${camRecordMaxDistance.toFixed(3)} ` +
-          `phantom=${camPhantomGuardEnabled && camPhantomBaselines.length ? "on" : "off"} ` +
-          `phantom_base=${camPhantomBaselines.length} phantom_hash=${camPhantomHashDistanceMax} ` +
-          `phantom_bank=${camPhantomBankThreshold.toFixed(3)} ignore_zones=${camIgnoreZones.length} ` +
+          `blocked_bank=${camPhantomBankThreshold.toFixed(3)} ignore_zones=${camIgnoreZones.length} ` +
           `auto_block=${camAutoBlockEnabled ? "on" : "off"} auto_block_samples=${camAutoBlockMinSamples}`,
       );
     }
@@ -3065,13 +2873,6 @@ async function main() {
       );
       const rgba = ctx.getImageData(0, 0, workerWidth, workerHeight).data;
       const rgb = rgbaToRgbTensorData(rgba);
-      const phantomSceneMatch =
-        camPhantomGuardEnabled && camPhantomBaselines.length
-          ? findClosestPhantomBaseline(camPhantomBaselines, rgb, workerWidth, workerHeight)
-          : null;
-      const sceneLooksEmpty =
-        Boolean(phantomSceneMatch) &&
-        Number(phantomSceneMatch.distance) <= camPhantomHashDistanceMax;
       const frameTensor = faceapi.tf.tensor3d(rgb, [workerHeight, workerWidth, 3], "int32");
 
       let detections = [];
@@ -3132,36 +2933,6 @@ async function main() {
               camIgnoreZoneOverlapThreshold,
             ),
         );
-      }
-      if (sceneLooksEmpty && detections.length) {
-        if (now - cam.lastPhantomLogAt >= camPhantomLogCooldownMs) {
-          cam.lastPhantomLogAt = now;
-          try {
-            const sourceSnapshotUrl = await savePhantomSnapshot(
-              phantomSnapshotDir,
-              phantomSnapshotPublicBase,
-              cam.cameraId,
-              jpg,
-              now,
-            );
-            await writePhantomRejectionLog({
-              cameraId: cam.cameraId,
-              action: "phantom_detection_blocked",
-              reason: "Фантомная детекция заблокирована: кадр совпадает с пустой сценой.",
-              sourceSnapshotUrl,
-              targetSnapshotUrl: String(phantomSceneMatch?.baseline?.publicUrl ?? "").trim(),
-              targetShortId: `baseline:${cam.cameraId}`,
-              distance: Number(phantomSceneMatch?.distance ?? Number.NaN),
-              threshold: camPhantomHashDistanceMax,
-            });
-          } catch (err) {
-            if (now - cam.lastErrLogAt >= 2000) {
-              log(`[${cam.cameraId}] phantom block log error: ${String(err)}`);
-              cam.lastErrLogAt = now;
-            }
-          }
-        }
-        detections = [];
       }
       if (camRequireFrontalFace && detections.length) {
         detections = detections.filter((det) => isIdentityVisibleDetection(det));
@@ -3321,12 +3092,6 @@ async function main() {
           const people = [];
           const descriptorByName = new Map();
           let bestDistance = 0;
-          let phantomRejectAction = "";
-          let phantomRejectReason = "";
-          let phantomRejectDistance = Number.NaN;
-          let phantomRejectThreshold = Number.NaN;
-          let phantomRejectTargetShortId = "";
-          let phantomRejectTargetSnapshotUrl = "";
           for (const det of results) {
             let name = "unknown";
             let distance = 0;
@@ -3371,93 +3136,60 @@ async function main() {
                     Number(blockedBankMatch.distance) <= camPhantomBankThreshold,
                 );
 
-                if (sceneLooksEmpty) {
-                  if (accepted && !phantomRejectAction) {
-                    phantomRejectAction = "phantom_recognition_rejected";
-                    phantomRejectReason =
-                      "Фантомное распознавание отклонено: кадр совпадает с пустой сценой.";
-                    phantomRejectDistance = Number(bestCandidate?.distance ?? Number.NaN);
-                    phantomRejectThreshold = camMatchThreshold;
-                    phantomRejectTargetShortId = String(bestCandidate?.label ?? "").trim();
-                    phantomRejectTargetSnapshotUrl = String(
-                      phantomSceneMatch?.baseline?.publicUrl ?? "",
-                    ).trim();
-                  } else if (readyForNewId && !phantomRejectAction) {
-                    phantomRejectAction = "phantom_registration_rejected";
-                    phantomRejectReason =
-                      "Фантомная регистрация отклонена: кадр совпадает с пустой сценой.";
-                    phantomRejectDistance = Number(bestCandidate?.distance ?? Number.NaN);
-                    phantomRejectThreshold = camMatchThreshold;
-                    phantomRejectTargetShortId = `baseline:${cam.cameraId}`;
-                    phantomRejectTargetSnapshotUrl = String(
-                      phantomSceneMatch?.baseline?.publicUrl ?? "",
-                    ).trim();
-                  }
-                } else {
-                  if (blockedByPhantomBank && !phantomRejectAction) {
-                    phantomRejectAction = "phantom_bank_registration_rejected";
-                    phantomRejectReason =
-                      "Регистрация отклонена: дескриптор совпадает с заблокированным фантомным ID.";
-                    phantomRejectDistance = Number(blockedBankMatch?.distance ?? Number.NaN);
-                    phantomRejectThreshold = camPhantomBankThreshold;
-                    phantomRejectTargetShortId = String(blockedBankMatch?.label ?? "").trim();
-                    phantomRejectTargetSnapshotUrl = "";
-                  }
-                  let acceptedBlocked = false;
-                  if (accepted) {
-                    const acceptedShortId = normalizeFaceShortId(bestCandidate.label);
-                    if (acceptedShortId && blockedFaceIds.has(acceptedShortId)) {
-                      acceptedBlocked = true;
-                      resetNewIdGate();
-                      if (now - cam.lastBlockedMatchLogAt >= 5000) {
-                        log(`[${cam.cameraId}] blocked_id ignored shortId=${acceptedShortId}`);
-                        cam.lastBlockedMatchLogAt = now;
-                      }
-                    } else {
-                      resetNewIdGate();
-                      name = bestCandidate.label;
-                      distance = Number(bestCandidate.distance) || 0;
-                      if (!bestDistance || distance < bestDistance) bestDistance = distance;
+                let acceptedBlocked = false;
+                if (accepted) {
+                  const acceptedShortId = normalizeFaceShortId(bestCandidate.label);
+                  if (acceptedShortId && blockedFaceIds.has(acceptedShortId)) {
+                    acceptedBlocked = true;
+                    resetNewIdGate();
+                    if (now - cam.lastBlockedMatchLogAt >= 5000) {
+                      log(`[${cam.cameraId}] blocked_id ignored shortId=${acceptedShortId}`);
+                      cam.lastBlockedMatchLogAt = now;
                     }
+                  } else {
+                    resetNewIdGate();
+                    name = bestCandidate.label;
+                    distance = Number(bestCandidate.distance) || 0;
+                    if (!bestDistance || distance < bestDistance) bestDistance = distance;
                   }
+                }
 
-                  if ((!accepted || acceptedBlocked) && faceAutoCreate) {
-                    const lockActive = cam.identityLockName && now < cam.identityLockUntil;
-                    if (lockActive) {
-                      name = cam.identityLockName;
-                      distance = Number(cam.identityLockDistance) || 0;
-                    } else if (readyForNewId && !blockedByPhantomBank) {
-                      const identifyReady = now - (cam.lastIdentifyAt || 0) >= camIdentifyMinIntervalMs;
-                      const autoCreateCoolingDown =
-                        cam.lastAutoCreatedAt > 0 &&
-                        now - cam.lastAutoCreatedAt < camAutoCreateCooldownMs;
-                      if (identifyReady && !autoCreateCoolingDown) {
-                        cam.lastIdentifyAt = now;
-                        const identified = await identifyFaceDescriptor(
-                          descriptor,
-                          camMatchThreshold,
-                          snapshotBase64,
-                        );
-                        if (identified?.shortId) {
-                          const identifiedShortId = normalizeFaceShortId(identified.shortId);
-                          if (identifiedShortId && blockedFaceIds.has(identifiedShortId)) {
-                            resetNewIdGate();
-                            if (now - cam.lastBlockedMatchLogAt >= 5000) {
-                              log(`[${cam.cameraId}] blocked_id ignored shortId=${identifiedShortId}`);
-                              cam.lastBlockedMatchLogAt = now;
-                            }
-                          } else {
-                            resetNewIdGate();
-                            name = identified.shortId;
-                            justRegistered = Boolean(identified.created);
-                            if (Number.isFinite(identified.distance) && identified.distance > 0) {
-                              distance = Number(identified.distance) || 0;
-                              if (!bestDistance || distance < bestDistance) bestDistance = distance;
-                            }
-                            if (justRegistered) {
-                              cam.lastAutoCreatedAt = now;
-                              log(`[${cam.cameraId}] new_id created shortId=${name}`);
-                            }
+                if ((!accepted || acceptedBlocked) && faceAutoCreate) {
+                  const lockActive = cam.identityLockName && now < cam.identityLockUntil;
+                  if (lockActive) {
+                    name = cam.identityLockName;
+                    distance = Number(cam.identityLockDistance) || 0;
+                  } else if (readyForNewId && !blockedByPhantomBank) {
+                    const identifyReady = now - (cam.lastIdentifyAt || 0) >= camIdentifyMinIntervalMs;
+                    const autoCreateCoolingDown =
+                      cam.lastAutoCreatedAt > 0 &&
+                      now - cam.lastAutoCreatedAt < camAutoCreateCooldownMs;
+                    if (identifyReady && !autoCreateCoolingDown) {
+                      cam.lastIdentifyAt = now;
+                      const identified = await identifyFaceDescriptor(
+                        descriptor,
+                        camMatchThreshold,
+                        snapshotBase64,
+                      );
+                      if (identified?.shortId) {
+                        const identifiedShortId = normalizeFaceShortId(identified.shortId);
+                        if (identifiedShortId && blockedFaceIds.has(identifiedShortId)) {
+                          resetNewIdGate();
+                          if (now - cam.lastBlockedMatchLogAt >= 5000) {
+                            log(`[${cam.cameraId}] blocked_id ignored shortId=${identifiedShortId}`);
+                            cam.lastBlockedMatchLogAt = now;
+                          }
+                        } else {
+                          resetNewIdGate();
+                          name = identified.shortId;
+                          justRegistered = Boolean(identified.created);
+                          if (Number.isFinite(identified.distance) && identified.distance > 0) {
+                            distance = Number(identified.distance) || 0;
+                            if (!bestDistance || distance < bestDistance) bestDistance = distance;
+                          }
+                          if (justRegistered) {
+                            cam.lastAutoCreatedAt = now;
+                            log(`[${cam.cameraId}] new_id created shortId=${name}`);
                           }
                         }
                       }
@@ -3567,81 +3299,9 @@ async function main() {
             people.push(...stablePeople);
           }
 
-          if (
-            sceneLooksEmpty &&
-            phantomRejectAction &&
-            now - cam.lastPhantomLogAt >= camPhantomLogCooldownMs
-          ) {
-            cam.lastPhantomLogAt = now;
-            try {
-              const sourceSnapshotUrl = await savePhantomSnapshot(
-                phantomSnapshotDir,
-                phantomSnapshotPublicBase,
-                cam.cameraId,
-                jpg,
-                now,
-              );
-              await writePhantomRejectionLog({
-                cameraId: cam.cameraId,
-                action: phantomRejectAction,
-                reason: phantomRejectReason,
-                sourceSnapshotUrl,
-                targetSnapshotUrl: phantomRejectTargetSnapshotUrl,
-                targetShortId: phantomRejectTargetShortId,
-                distance: phantomRejectDistance,
-                threshold: phantomRejectThreshold,
-              });
-              log(
-                `[${cam.cameraId}] phantom_rejected action=${phantomRejectAction} ` +
-                  `hash_distance=${Number(phantomSceneMatch?.distance ?? 0)} ` +
-                  `hash_threshold=${camPhantomHashDistanceMax}`,
-              );
-            } catch (err) {
-              if (now - cam.lastErrLogAt >= 2000) {
-                log(`[${cam.cameraId}] phantom log error: ${String(err)}`);
-                cam.lastErrLogAt = now;
-              }
-            }
-          }
 
           for (const [savedName, seenAt] of cam.emotionSeenAtByName.entries()) {
             if (now - seenAt > emotionEmaTtlMs) {
-              cam.emotionSeenAtByName.delete(savedName);
-              cam.emotionEmaByName.delete(savedName);
-            }
-          }
-          if (camFaceArchiveEnabled && people.length) {
-            const seenNames = new Set();
-            for (const person of people) {
-              const personName = String(person?.name ?? "").trim();
-              if (!personName || isUnknownIdentity(personName) || seenNames.has(personName)) continue;
-              if (!isRecordablePerson(person)) continue;
-              seenNames.add(personName);
-              const lastArchivedAt = Number(cam.lastFaceArchiveAtByName.get(personName) ?? 0);
-              if (now - lastArchivedAt < camFaceArchiveCooldownMs) continue;
-              try {
-                const archived = await archiveFaceSnapshot({
-                  archiveDir: faceArchiveDir,
-                  archivePublicBase: faceArchivePublicBase,
-                  faceShortId: personName,
-                  cameraId: cam.cameraId,
-                  jpgBuffer: jpg,
-                  now,
-                  maxPerFace: camFaceArchiveMaxPerFace,
-                });
-                if (archived) {
-                  cam.lastFaceArchiveAtByName.set(personName, now);
-                  cam.lastFaceArchiveUrlByName.set(personName, archived);
-                }
-              } catch (err) {
-                if (now - cam.lastErrLogAt >= 2000) {
-                  log(`[${cam.cameraId}] face archive error: ${String(err)}`);
-                  cam.lastErrLogAt = now;
-                }
-              }
-            }
-            const archiveTtl = Math.max(camFaceArchiveCooldownMs * 10, 60_000);
-            for (const [savedName, savedAt] of cam.lastFaceArchiveAtByName.entries()) {
               if (seenNames.has(savedName)) continue;
               if (now - Number(savedAt || 0) > archiveTtl) {
                 cam.lastFaceArchiveAtByName.delete(savedName);

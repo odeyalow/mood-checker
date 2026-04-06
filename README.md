@@ -38,10 +38,6 @@ WORKER_FRAME_ABORT_RETRY_QUALITY=85
 # WORKER_CAMERA_ZOOMS=cam-01=1
 # Optional per-camera quality profiles
 # WORKER_CAMERA_SETTINGS_JSON={"cam-01":{"matchThreshold":0.50}}
-# Phantom guard (reject empty-scene phantom recognition/registration)
-# WORKER_PHANTOM_GUARD_ENABLED=true
-# WORKER_PHANTOM_BASELINE_DIR=/opt/mood-checker/worker/phantom-baselines
-# WORKER_PHANTOM_HASH_DISTANCE_MAX=10
 # Re-entry writes a new recognition event when person reappears after short absence
 # WORKER_DB_REENTRY_GAP_MS=1800
 # Emotion fallback for weak confidence (prevents missing events in distance/zoom scenes)
