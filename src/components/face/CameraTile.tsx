@@ -303,6 +303,7 @@ export default function CameraTile({
     downloadingFrame: string;
   };
 }) {
+  const initialPreviewMode: PreviewMode = camera.previewMode === "snapshot" ? "snapshot" : "stream";
   const streamRef = useRef<HTMLCanvasElement | null>(null);
   const playerRef = useRef<RtspPlayer | null>(null);
   const streamTokenRef = useRef(0);
@@ -312,7 +313,7 @@ export default function CameraTile({
   const previewSnapshotUrlRef = useRef<string | null>(null);
 
   const [status, setStatus] = useState<"loading" | "ready" | "error">("loading");
-  const [previewMode, setPreviewMode] = useState<PreviewMode>("stream");
+  const [previewMode, setPreviewMode] = useState<PreviewMode>(initialPreviewMode);
   const [previewSnapshotUrl, setPreviewSnapshotUrl] = useState("");
   const [people, setPeople] = useState<WorkerPerson[]>([]);
   const [snapshotUrl, setSnapshotUrl] = useState("");
@@ -335,13 +336,13 @@ export default function CameraTile({
     setWorkerZoom(1);
     frameSizeRef.current = { width: 0, height: 0 };
     lastSnapshotKeyRef.current = "";
-    setPreviewMode("stream");
+    setPreviewMode(initialPreviewMode);
     setPreviewSnapshotUrl("");
     if (previewSnapshotUrlRef.current) {
       URL.revokeObjectURL(previewSnapshotUrlRef.current);
       previewSnapshotUrlRef.current = null;
     }
-  }, [camera.id]);
+  }, [camera.id, initialPreviewMode]);
 
   useEffect(() => {
     const initialZoom = clampZoom(camera.digitalZoom);
