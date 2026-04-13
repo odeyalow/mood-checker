@@ -90,6 +90,7 @@ export default function CameraPipelineLogPanel({
   locale: AppLocale;
   labels: Labels;
 }) {
+  const singleCamera = CAMERA_CONFIGS.length === 1;
   const [itemsByCamera, setItemsByCamera] = useState<Record<string, LogItem[]>>(() =>
     Object.fromEntries(CAMERA_CONFIGS.map((camera) => [camera.id, []])),
   );
@@ -262,7 +263,7 @@ export default function CameraPipelineLogPanel({
           {CAMERA_CONFIGS.map((camera) => {
             const rows = itemsByCamera[camera.id] || [];
             return (
-              <Col key={camera.id} xs={24} md={12}>
+              <Col key={camera.id} xs={24} md={singleCamera ? 24 : 12}>
                 <Card size="small" title={camera.name || camera.id}>
                   <div style={{ maxHeight: 220, overflowY: "auto", paddingRight: 4 }}>
                     {!rows.length ? (

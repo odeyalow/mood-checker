@@ -5,7 +5,6 @@ import { use } from "react";
 import { Button, Card, Space } from "antd";
 import MainLayout from "@/components/layouts/MainLayout";
 import CameraGrid from "@/components/face/CameraGrid";
-import FaceScripts from "@/components/face/FaceScripts";
 import CameraPipelineLogPanel from "@/components/face/CameraPipelineLogPanel";
 
 const TEXT = {
@@ -103,7 +102,6 @@ export default function CamerasPage({
 
   return (
     <MainLayout title={t.title} locale={safeLocale}>
-      <FaceScripts includeFaceApi={false} />
       <Card className="soft-card">
         <Space direction="vertical" size={12} style={{ width: "100%" }}>
           <CameraPipelineLogPanel

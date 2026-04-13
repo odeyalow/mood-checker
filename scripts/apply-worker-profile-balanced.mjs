@@ -27,7 +27,7 @@ const cameraSettings = {
 };
 
 const updates = new Map([
-  ["WORKER_FRAME_API_BASE", "http://127.0.0.1:3000/api/camera/frame"],
+  ["WORKER_FRAME_API_BASE", "http://127.0.0.1:1984/api/frame.jpeg?width=960&height=540&quality=82"],
   ["WORKER_FRAME_TIMEOUT_MS", "3000"],
   ["WORKER_FRAME_ABORT_RETRY_TIMEOUT_MS", "5200"],
   ["WORKER_FRAME_ABORT_RETRY_WIDTH", "1280"],

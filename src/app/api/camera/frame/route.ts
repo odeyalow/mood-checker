@@ -1,5 +1,8 @@
 import { NextRequest } from "next/server";
 
+export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
+
 const DEFAULT_GO2RTC_BASE_URL = "http://127.0.0.1:1984";
 
 function isValidSrc(value: string) {

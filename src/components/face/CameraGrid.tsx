@@ -20,10 +20,12 @@ type CameraLabels = {
 };
 
 export default function CameraGrid({ labels }: { labels: CameraLabels }) {
+  const singleCamera = CAMERA_CONFIGS.length === 1;
+
   return (
     <Row gutter={[16, 16]}>
       {CAMERA_CONFIGS.map((camera) => (
-        <Col key={camera.id} xs={24} md={12} lg={12}>
+        <Col key={camera.id} xs={24} md={singleCamera ? 24 : 12} lg={singleCamera ? 24 : 12}>
           <CameraTile camera={camera} labels={labels} />
         </Col>
       ))}

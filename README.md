@@ -12,10 +12,9 @@ npm run start
 
 ### Camera source via go2rtc (recommended)
 
-Set these in `.env` for camera page:
+Set these in `.env` for the single camera setup:
 
 ```bash
-NEXT_PUBLIC_CAMERA_1_RTSP_URL=rtsp://user:user123@10.16.12.39:554/stream
 NEXT_PUBLIC_CAMERA_1_GO2RTC_SRC=cam01_main
 NEXT_PUBLIC_CAMERA_1_NAME=Camera 1
 NEXT_PUBLIC_CAMERA_1_LOCATION=10.16.12.39
@@ -54,14 +53,13 @@ WORKER_FRAME_ABORT_RETRY_QUALITY=85
 ```
 
 Notes:
-- `NEXT_PUBLIC_CAMERA_1_RTSP_URL` is consumed by the browser camera page through your `/api/stream` proxy.
-- `NEXT_PUBLIC_CAMERA_1_GO2RTC_SRC` is used by face detection snapshot proxy (`/api/camera/frame`) and should match go2rtc stream name.
+- `NEXT_PUBLIC_CAMERA_1_GO2RTC_SRC` is the single source used by both UI preview and worker snapshots. Keep UI and worker on the same go2rtc stream name.
 - `NEXT_PUBLIC_CAMERA_1_DIGITAL_ZOOM` enables per-camera digital zoom (`>1` enables zoom, max `4`).
 - `GO2RTC_FRAME_WIDTH/HEIGHT/QUALITY` control snapshot resolution/quality for worker recognition (`/api/camera/frame`).
 - `NEXT_PUBLIC_ENABLE_WEBCAM_TILE=true` enables the local webcam tile for debugging.
 - `NEXT_PUBLIC_DETECTION_MODE=worker` disables browser-side face detection and shows worker live status under camera tiles.
-- Phantom baseline files are loaded from `/opt/mood-checker/worker/phantom-baselines/<camera-id>/*.jpg`.
-  Example: `/opt/mood-checker/worker/phantom-baselines/cam-01/empty-01.jpg`.
+- Recommended worker source:
+  `WORKER_FRAME_API_BASE=http://127.0.0.1:1984/api/frame.jpeg?width=960&height=540&quality=82`
 
 ## Node detection worker
 

@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Card, Tag, Typography } from "antd";
 import { VideoCameraOutlined } from "@ant-design/icons";
 import type { CameraConfig } from "@/lib/cameras";
@@ -10,80 +10,7 @@ const MIN_ZOOM = 1;
 const MAX_ZOOM = 4;
 const ZOOM_STEP = 0.1;
 const WORKER_ZOOM_PRESETS = [1, 2, 3, 4, 5];
-const STREAM_START_TIMEOUT_MS = 12000;
-const STREAM_RETRY_DELAY_MS = 3000;
-const STREAM_DISCONNECT_THRESHOLD_MS = 5000;
-const STREAM_WASM_RECOVERY_DELAY_MS = 1000;
-const STREAM_MAX_FAILURES_BEFORE_SNAPSHOT = 2;
-
-function parseClientEnvInt(
-  rawValue: string | undefined,
-  fallback: number,
-  min: number,
-  max: number,
-) {
-  const parsed = Number.parseInt(rawValue || "", 10);
-  if (!Number.isFinite(parsed)) return fallback;
-  return Math.min(max, Math.max(min, parsed));
-}
-
-const SNAPSHOT_PREVIEW_REFRESH_MS = parseClientEnvInt(
-  process.env.NEXT_PUBLIC_SNAPSHOT_PREVIEW_REFRESH_MS,
-  400,
-  150,
-  5000,
-);
-const SNAPSHOT_PREVIEW_WIDTH = parseClientEnvInt(
-  process.env.NEXT_PUBLIC_SNAPSHOT_PREVIEW_WIDTH,
-  480,
-  160,
-  1920,
-);
-const SNAPSHOT_PREVIEW_HEIGHT = parseClientEnvInt(
-  process.env.NEXT_PUBLIC_SNAPSHOT_PREVIEW_HEIGHT,
-  270,
-  120,
-  1080,
-);
-const SNAPSHOT_PREVIEW_QUALITY = parseClientEnvInt(
-  process.env.NEXT_PUBLIC_SNAPSHOT_PREVIEW_QUALITY,
-  75,
-  1,
-  100,
-);
-const SNAPSHOT_PREVIEW_TIMEOUT_MS = parseClientEnvInt(
-  process.env.NEXT_PUBLIC_SNAPSHOT_PREVIEW_TIMEOUT_MS,
-  2500,
-  300,
-  15000,
-);
-const SNAPSHOT_PREVIEW_ERROR_RETRY_MS = parseClientEnvInt(
-  process.env.NEXT_PUBLIC_SNAPSHOT_PREVIEW_ERROR_RETRY_MS,
-  1200,
-  300,
-  10000,
-);
-const SNAPSHOT_PREVIEW_MAX_RETRY_MS = parseClientEnvInt(
-  process.env.NEXT_PUBLIC_SNAPSHOT_PREVIEW_MAX_RETRY_MS,
-  4000,
-  500,
-  20000,
-);
-
-type RtspPlayer = {
-  destroy?: () => void;
-};
-
-type PreviewMode = "stream" | "snapshot" | "mjpeg";
-
-type PlayerLoader = (options: {
-  url: string;
-  canvas: HTMLCanvasElement;
-  audio?: boolean;
-  disableGl?: boolean;
-  disconnectThreshold?: number;
-  onDisconnect?: (player: RtspPlayer) => void;
-}) => Promise<RtspPlayer>;
+const MJPEG_RETRY_DELAY_MS = 1500;
 
 type WorkerPerson = {
   name: string;
@@ -115,15 +42,6 @@ type SnapshotHistoryItem = {
   emotion: string;
   capturedAt: string;
 };
-
-function safeDestroyPlayer(player: RtspPlayer | null) {
-  if (!player?.destroy) return;
-  try {
-    player.destroy();
-  } catch (error) {
-    console.error("[camera] player destroy error:", error);
-  }
-}
 
 function clampZoom(value: number | undefined): number {
   if (typeof value !== "number" || !Number.isFinite(value)) return MIN_ZOOM;
@@ -168,38 +86,6 @@ function emotionSummaryFromPeople(people: WorkerPerson[]): string {
     })
     .filter(Boolean)
     .join(", ");
-}
-
-async function waitForPlayer(timeoutMs = 15000) {
-  const started = Date.now();
-  while (Date.now() - started < timeoutMs) {
-    const loadPlayer = window.loadPlayer;
-    if (typeof loadPlayer === "function") return loadPlayer as PlayerLoader;
-    await new Promise((resolve) => setTimeout(resolve, 200));
-  }
-  return null;
-}
-
-function loadPlayerWithTimeout(
-  loadPlayer: PlayerLoader,
-  options: Parameters<PlayerLoader>[0],
-  timeoutMs = STREAM_START_TIMEOUT_MS,
-): Promise<RtspPlayer> {
-  return new Promise((resolve, reject) => {
-    const timeoutId = window.setTimeout(() => {
-      reject(new Error("rtsp_stream_start_timeout"));
-    }, timeoutMs);
-
-    loadPlayer(options)
-      .then((player) => {
-        window.clearTimeout(timeoutId);
-        resolve(player);
-      })
-      .catch((error) => {
-        window.clearTimeout(timeoutId);
-        reject(error);
-      });
-  });
 }
 
 function renderZoomedCanvas(
@@ -283,9 +169,10 @@ function buildFrameApiPath(
   return `/api/camera/frame?${params.toString()}`;
 }
 
-function buildMjpegApiPath(src: string) {
+function buildMjpegApiPath(src: string, token = 0) {
   const params = new URLSearchParams();
   params.set("src", src);
+  params.set("v", String(token));
   return `/api/camera/mjpeg?${params.toString()}`;
 }
 
@@ -309,23 +196,13 @@ export default function CameraTile({
     downloadingFrame: string;
   };
 }) {
-  const initialPreviewMode: PreviewMode =
-    camera.previewMode === "snapshot"
-      ? "snapshot"
-      : camera.previewMode === "mjpeg"
-        ? "mjpeg"
-        : "stream";
-  const streamRef = useRef<HTMLCanvasElement | null>(null);
-  const playerRef = useRef<RtspPlayer | null>(null);
-  const streamTokenRef = useRef(0);
-  const reconnectTimerRef = useRef<number | null>(null);
+  const previewImageRef = useRef<HTMLImageElement | null>(null);
   const lastSnapshotKeyRef = useRef("");
   const frameSizeRef = useRef({ width: 0, height: 0 });
-  const previewSnapshotUrlRef = useRef<string | null>(null);
+  const mjpegRetryTimerRef = useRef<number | null>(null);
 
   const [status, setStatus] = useState<"loading" | "ready" | "error">("loading");
-  const [previewMode, setPreviewMode] = useState<PreviewMode>(initialPreviewMode);
-  const [previewSnapshotUrl, setPreviewSnapshotUrl] = useState("");
+  const [mjpegToken, setMjpegToken] = useState(0);
   const [people, setPeople] = useState<WorkerPerson[]>([]);
   const [snapshotUrl, setSnapshotUrl] = useState("");
   const [snapshotWho, setSnapshotWho] = useState("");
@@ -337,6 +214,11 @@ export default function CameraTile({
   const [workerZoomSaving, setWorkerZoomSaving] = useState(false);
   const [frameDownloading, setFrameDownloading] = useState(false);
 
+  const mjpegUrl = useMemo(() => {
+    if (!camera.go2rtcSrc) return "";
+    return buildMjpegApiPath(camera.go2rtcSrc, mjpegToken);
+  }, [camera.go2rtcSrc, mjpegToken]);
+
   useEffect(() => {
     setPeople([]);
     setSnapshotUrl("");
@@ -345,15 +227,16 @@ export default function CameraTile({
     setLastRecognitionAt("");
     setHistory([]);
     setWorkerZoom(1);
+    setMjpegToken(0);
+    setStatus("loading");
     frameSizeRef.current = { width: 0, height: 0 };
     lastSnapshotKeyRef.current = "";
-    setPreviewMode(initialPreviewMode);
-    setPreviewSnapshotUrl("");
-    if (previewSnapshotUrlRef.current) {
-      URL.revokeObjectURL(previewSnapshotUrlRef.current);
-      previewSnapshotUrlRef.current = null;
+
+    if (mjpegRetryTimerRef.current !== null) {
+      window.clearTimeout(mjpegRetryTimerRef.current);
+      mjpegRetryTimerRef.current = null;
     }
-  }, [camera.id, initialPreviewMode]);
+  }, [camera.id]);
 
   useEffect(() => {
     const initialZoom = clampZoom(camera.digitalZoom);
@@ -361,215 +244,13 @@ export default function CameraTile({
   }, [camera.id, camera.digitalZoom]);
 
   useEffect(() => {
-    if (previewMode !== "mjpeg") return;
-    setStatus("loading");
-  }, [camera.id, previewMode]);
-
-  useEffect(() => {
-    if (previewMode !== "stream") {
-      safeDestroyPlayer(playerRef.current);
-      playerRef.current = null;
-      return;
-    }
-
-    let mounted = true;
-    let attemptSeq = 0;
-    let failureCount = 0;
-    const streamToken = ++streamTokenRef.current;
-
-    function clearReconnectTimer() {
-      if (reconnectTimerRef.current === null) return;
-      window.clearTimeout(reconnectTimerRef.current);
-      reconnectTimerRef.current = null;
-    }
-
-    function scheduleReconnect(delayMs = STREAM_RETRY_DELAY_MS) {
-      if (!mounted || streamTokenRef.current !== streamToken) return;
-      clearReconnectTimer();
-      reconnectTimerRef.current = window.setTimeout(() => {
-        if (!mounted || streamTokenRef.current !== streamToken) return;
-        void startStream();
-      }, delayMs);
-    }
-
-    function fallbackToSnapshot(reason: unknown) {
-      if (!mounted || streamTokenRef.current !== streamToken) return;
-      clearReconnectTimer();
-      safeDestroyPlayer(playerRef.current);
-      playerRef.current = null;
-      console.error("[camera] switching preview to snapshot mode:", reason);
-      setStatus("loading");
-      setPreviewMode("snapshot");
-    }
-
-    function restartStreamAfterCrash() {
-      fallbackToSnapshot("jsmpeg_runtime_crash");
-    }
-
-    function handleGlobalPlayerError(event: ErrorEvent) {
-      const message = String(event?.message ?? "");
-      const filename = String(event?.filename ?? "");
-      const looksLikeJsmpegCrash =
-        message.includes("memory access out of bounds") ||
-        message.includes("MPEG1WASM") ||
-        filename.includes("rtsp-relay") ||
-        filename.includes("jsmpeg");
-
-      if (!looksLikeJsmpegCrash) return;
-      console.error("[camera] jsmpeg runtime crash, restarting stream:", event.error || message);
-      restartStreamAfterCrash();
-    }
-
-    async function startStream() {
-      const attemptId = ++attemptSeq;
-      clearReconnectTimer();
-
-      const canvas = streamRef.current;
-      if (!canvas) return;
-
-      setStatus("loading");
-      safeDestroyPlayer(playerRef.current);
-      playerRef.current = null;
-
-      try {
-        const loadPlayer = await waitForPlayer();
-        if (!loadPlayer) throw new Error("rtsp_player_missing");
-        if (!mounted || streamTokenRef.current !== streamToken) return;
-
-        const wsProto = location.protocol === "https:" ? "wss://" : "ws://";
-        const url =
-          `${wsProto}${location.host}/api/stream?url=${encodeURIComponent(camera.rtspUrl)}` +
-          `&client=${encodeURIComponent(`${camera.id}-${Date.now()}`)}`;
-
-        const player = await loadPlayerWithTimeout(loadPlayer, {
-          url,
-          canvas,
-          audio: false,
-          disableGl: true,
-          disconnectThreshold: STREAM_DISCONNECT_THRESHOLD_MS,
-          onDisconnect: () => {
-            if (!mounted || streamTokenRef.current !== streamToken) return;
-            safeDestroyPlayer(playerRef.current);
-            playerRef.current = null;
-            failureCount += 1;
-            if (failureCount >= STREAM_MAX_FAILURES_BEFORE_SNAPSHOT) {
-              fallbackToSnapshot("stream_disconnect");
-              return;
-            }
-            setStatus("error");
-            scheduleReconnect();
-          },
-        });
-
-        if (!mounted || streamTokenRef.current !== streamToken || attemptSeq !== attemptId) {
-          safeDestroyPlayer(player);
-          return;
-        }
-        playerRef.current = player;
-        setStatus("ready");
-      } catch (error) {
-        console.error("[camera] stream error:", error);
-        failureCount += 1;
-        if (mounted && streamTokenRef.current === streamToken && attemptSeq === attemptId) {
-          if (failureCount >= STREAM_MAX_FAILURES_BEFORE_SNAPSHOT) {
-            fallbackToSnapshot(error);
-            return;
-          }
-          setStatus("error");
-          scheduleReconnect();
-        }
-      }
-    }
-
-    window.addEventListener("error", handleGlobalPlayerError);
-    void startStream();
     return () => {
-      mounted = false;
-      window.removeEventListener("error", handleGlobalPlayerError);
-      clearReconnectTimer();
-      safeDestroyPlayer(playerRef.current);
-      playerRef.current = null;
-    };
-  }, [camera.id, camera.rtspUrl, previewMode]);
-
-  useEffect(() => {
-    if (previewMode !== "snapshot" || !camera.go2rtcSrc) return;
-
-    let mounted = true;
-    let timer = 0;
-    let failureCount = 0;
-
-    const releasePreviewSnapshot = () => {
-      if (!previewSnapshotUrlRef.current) return;
-      URL.revokeObjectURL(previewSnapshotUrlRef.current);
-      previewSnapshotUrlRef.current = null;
-    };
-
-    const pollSnapshot = async () => {
-      if (!mounted) return;
-
-      let nextDelay = SNAPSHOT_PREVIEW_REFRESH_MS;
-
-      try {
-        const res = await fetch(
-          buildFrameApiPath(camera.go2rtcSrc as string, {
-            width: SNAPSHOT_PREVIEW_WIDTH,
-            height: SNAPSHOT_PREVIEW_HEIGHT,
-            quality: SNAPSHOT_PREVIEW_QUALITY,
-            timeoutMs: SNAPSHOT_PREVIEW_TIMEOUT_MS,
-          }),
-          { cache: "no-store" },
-        );
-
-        if (!res.ok) {
-          throw new Error(`frame_http_${res.status}`);
-        }
-
-        const blob = await res.blob();
-        if (!blob.size) {
-          throw new Error("snapshot_blob_empty");
-        }
-
-        const nextUrl = URL.createObjectURL(blob);
-        if (!mounted) {
-          URL.revokeObjectURL(nextUrl);
-          return;
-        }
-
-        const prevUrl = previewSnapshotUrlRef.current;
-        previewSnapshotUrlRef.current = nextUrl;
-        setPreviewSnapshotUrl(nextUrl);
-        setStatus("ready");
-        failureCount = 0;
-        if (prevUrl) URL.revokeObjectURL(prevUrl);
-      } catch (error) {
-        console.error("[camera] snapshot preview error:", error);
-        failureCount += 1;
-        nextDelay = Math.min(
-          SNAPSHOT_PREVIEW_MAX_RETRY_MS,
-          SNAPSHOT_PREVIEW_ERROR_RETRY_MS * failureCount,
-        );
-        if (mounted) {
-          // Keep the last good frame visible; only show hard error before the first successful frame.
-          setStatus(previewSnapshotUrlRef.current ? "ready" : "error");
-        }
+      if (mjpegRetryTimerRef.current !== null) {
+        window.clearTimeout(mjpegRetryTimerRef.current);
+        mjpegRetryTimerRef.current = null;
       }
-
-      timer = window.setTimeout(() => {
-        void pollSnapshot();
-      }, nextDelay);
     };
-
-    setStatus("loading");
-    void pollSnapshot();
-
-    return () => {
-      mounted = false;
-      if (timer) window.clearTimeout(timer);
-      releasePreviewSnapshot();
-      setPreviewSnapshotUrl("");
-    };
-  }, [camera.go2rtcSrc, camera.id, previewMode]);
+  }, []);
 
   useEffect(() => {
     let mounted = true;
@@ -719,13 +400,13 @@ export default function CameraTile({
       }
 
       if (!exportCanvas) {
-        const liveCanvas = streamRef.current;
-        const sourceWidth = Number(liveCanvas?.width ?? 0);
-        const sourceHeight = Number(liveCanvas?.height ?? 0);
-        if (!liveCanvas || !sourceWidth || !sourceHeight) {
-          throw new Error("live_canvas_unavailable");
+        const previewImage = previewImageRef.current;
+        const sourceWidth = Number(previewImage?.naturalWidth ?? 0);
+        const sourceHeight = Number(previewImage?.naturalHeight ?? 0);
+        if (!previewImage || !sourceWidth || !sourceHeight) {
+          throw new Error("preview_image_unavailable");
         }
-        exportCanvas = renderZoomedCanvas(liveCanvas, sourceWidth, sourceHeight, zoom);
+        exportCanvas = renderZoomedCanvas(previewImage, sourceWidth, sourceHeight, zoom);
       }
 
       const blob = await canvasToJpegBlob(exportCanvas, 0.92);
@@ -738,52 +419,42 @@ export default function CameraTile({
     }
   }
 
+  function scheduleMjpegReconnect() {
+    if (mjpegRetryTimerRef.current !== null) return;
+    mjpegRetryTimerRef.current = window.setTimeout(() => {
+      mjpegRetryTimerRef.current = null;
+      setStatus("loading");
+      setMjpegToken((value) => value + 1);
+    }, MJPEG_RETRY_DELAY_MS);
+  }
+
   return (
     <Card className="camera-card" size="small">
       <div className="camera-media">
-        {previewMode === "mjpeg" ? (
-          camera.go2rtcSrc ? (
-            <img
-              className="camera-video"
-              src={buildMjpegApiPath(camera.go2rtcSrc)}
-              alt={`${camera.name} preview`}
-              onLoad={() => {
-                setStatus("ready");
-              }}
-              onError={() => {
-                setStatus("error");
-              }}
-              style={{
-                transform: zoomValue > MIN_ZOOM ? `scale(${zoomValue})` : "scale(1)",
-                transformOrigin: "center center",
-                transition: "transform 0.16s ease-out",
-              }}
-            />
-          ) : null
-        ) : previewMode === "snapshot" ? (
-          previewSnapshotUrl ? (
-            <img
-              className="camera-video"
-              src={previewSnapshotUrl}
-              alt={`${camera.name} preview`}
-              style={{
-                transform: zoomValue > MIN_ZOOM ? `scale(${zoomValue})` : "scale(1)",
-                transformOrigin: "center center",
-                transition: "transform 0.16s ease-out",
-              }}
-            />
-          ) : null
-        ) : (
-          <canvas
-            ref={streamRef}
+        {camera.go2rtcSrc ? (
+          <img
+            ref={previewImageRef}
             className="camera-video"
+            src={mjpegUrl}
+            alt={`${camera.name} preview`}
+            onLoad={() => {
+              if (mjpegRetryTimerRef.current !== null) {
+                window.clearTimeout(mjpegRetryTimerRef.current);
+                mjpegRetryTimerRef.current = null;
+              }
+              setStatus("ready");
+            }}
+            onError={() => {
+              setStatus("error");
+              scheduleMjpegReconnect();
+            }}
             style={{
               transform: zoomValue > MIN_ZOOM ? `scale(${zoomValue})` : "scale(1)",
               transformOrigin: "center center",
               transition: "transform 0.16s ease-out",
             }}
           />
-        )}
+        ) : null}
         {status !== "ready" ? (
           <div className="camera-status">
             <VideoCameraOutlined /> {status === "error" ? labels.error : labels.loading}
@@ -904,13 +575,7 @@ export default function CameraTile({
         </div>
 
         <Tag color={people.length ? "green" : "geekblue"}>
-          {people.length
-            ? labels.recognized
-            : previewMode === "snapshot"
-              ? "SNAPSHOT"
-              : previewMode === "mjpeg"
-                ? "MJPEG"
-                : "RTSP"}
+          {people.length ? labels.recognized : "LIVE"}
         </Tag>
       </div>
     </Card>
