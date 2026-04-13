@@ -11,6 +11,7 @@ const MAX_ZOOM = 4;
 const ZOOM_STEP = 0.1;
 const WORKER_ZOOM_PRESETS = [1, 2, 3, 4, 5];
 const MJPEG_RETRY_DELAY_MS = 1500;
+const MJPEG_LOAD_TIMEOUT_MS = 5000;
 
 type WorkerPerson = {
   name: string;
@@ -169,11 +170,12 @@ function buildFrameApiPath(
   return `/api/camera/frame?${params.toString()}`;
 }
 
-function buildMjpegApiPath(src: string, token = 0) {
-  const params = new URLSearchParams();
-  params.set("src", src);
-  params.set("v", String(token));
-  return `/api/camera/mjpeg?${params.toString()}`;
+function buildDirectMjpegUrl(baseUrl: string, src: string, token = 0) {
+  const url = new URL(baseUrl);
+  url.pathname = `${url.pathname.replace(/\/$/, "")}/api/stream.mjpeg`;
+  url.searchParams.set("src", src);
+  url.searchParams.set("v", String(token));
+  return url.toString();
 }
 
 export default function CameraTile({
@@ -200,9 +202,11 @@ export default function CameraTile({
   const lastSnapshotKeyRef = useRef("");
   const frameSizeRef = useRef({ width: 0, height: 0 });
   const mjpegRetryTimerRef = useRef<number | null>(null);
+  const mjpegLoadTimeoutRef = useRef<number | null>(null);
 
   const [status, setStatus] = useState<"loading" | "ready" | "error">("loading");
   const [mjpegToken, setMjpegToken] = useState(0);
+  const [go2rtcBaseUrl, setGo2rtcBaseUrl] = useState("");
   const [people, setPeople] = useState<WorkerPerson[]>([]);
   const [snapshotUrl, setSnapshotUrl] = useState("");
   const [snapshotWho, setSnapshotWho] = useState("");
@@ -215,9 +219,9 @@ export default function CameraTile({
   const [frameDownloading, setFrameDownloading] = useState(false);
 
   const mjpegUrl = useMemo(() => {
-    if (!camera.go2rtcSrc) return "";
-    return buildMjpegApiPath(camera.go2rtcSrc, mjpegToken);
-  }, [camera.go2rtcSrc, mjpegToken]);
+    if (!camera.go2rtcSrc || !go2rtcBaseUrl) return "";
+    return buildDirectMjpegUrl(go2rtcBaseUrl, camera.go2rtcSrc, mjpegToken);
+  }, [camera.go2rtcSrc, go2rtcBaseUrl, mjpegToken]);
 
   useEffect(() => {
     setPeople([]);
@@ -236,6 +240,10 @@ export default function CameraTile({
       window.clearTimeout(mjpegRetryTimerRef.current);
       mjpegRetryTimerRef.current = null;
     }
+    if (mjpegLoadTimeoutRef.current !== null) {
+      window.clearTimeout(mjpegLoadTimeoutRef.current);
+      mjpegLoadTimeoutRef.current = null;
+    }
   }, [camera.id]);
 
   useEffect(() => {
@@ -244,13 +252,41 @@ export default function CameraTile({
   }, [camera.id, camera.digitalZoom]);
 
   useEffect(() => {
+    const explicitBase = String(process.env.NEXT_PUBLIC_GO2RTC_BASE_URL || "").trim();
+    if (explicitBase) {
+      setGo2rtcBaseUrl(explicitBase);
+      return;
+    }
+    if (typeof window !== "undefined") {
+      setGo2rtcBaseUrl(`${window.location.protocol}//${window.location.hostname}:1984`);
+    }
+  }, []);
+
+  useEffect(() => {
     return () => {
       if (mjpegRetryTimerRef.current !== null) {
         window.clearTimeout(mjpegRetryTimerRef.current);
         mjpegRetryTimerRef.current = null;
       }
+      if (mjpegLoadTimeoutRef.current !== null) {
+        window.clearTimeout(mjpegLoadTimeoutRef.current);
+        mjpegLoadTimeoutRef.current = null;
+      }
     };
   }, []);
+
+  useEffect(() => {
+    if (!mjpegUrl) return;
+    setStatus("loading");
+    if (mjpegLoadTimeoutRef.current !== null) {
+      window.clearTimeout(mjpegLoadTimeoutRef.current);
+    }
+    mjpegLoadTimeoutRef.current = window.setTimeout(() => {
+      mjpegLoadTimeoutRef.current = null;
+      setStatus("error");
+      scheduleMjpegReconnect();
+    }, MJPEG_LOAD_TIMEOUT_MS);
+  }, [mjpegUrl]);
 
   useEffect(() => {
     let mounted = true;
@@ -438,6 +474,10 @@ export default function CameraTile({
             src={mjpegUrl}
             alt={`${camera.name} preview`}
             onLoad={() => {
+              if (mjpegLoadTimeoutRef.current !== null) {
+                window.clearTimeout(mjpegLoadTimeoutRef.current);
+                mjpegLoadTimeoutRef.current = null;
+              }
               if (mjpegRetryTimerRef.current !== null) {
                 window.clearTimeout(mjpegRetryTimerRef.current);
                 mjpegRetryTimerRef.current = null;
@@ -445,6 +485,10 @@ export default function CameraTile({
               setStatus("ready");
             }}
             onError={() => {
+              if (mjpegLoadTimeoutRef.current !== null) {
+                window.clearTimeout(mjpegLoadTimeoutRef.current);
+                mjpegLoadTimeoutRef.current = null;
+              }
               setStatus("error");
               scheduleMjpegReconnect();
             }}
