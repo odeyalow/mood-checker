@@ -410,6 +410,17 @@ function getCameraSetting(cameraSettings, cameraId, key, fallback) {
   return source[key];
 }
 
+function normalizeEmotionExpressions(expressions) {
+  if (!expressions || typeof expressions !== "object" || Array.isArray(expressions)) return undefined;
+  const normalized = {};
+  for (const [key, value] of Object.entries(expressions)) {
+    const numeric = Number(value ?? 0);
+    if (!Number.isFinite(numeric)) continue;
+    normalized[key] = Math.max(0, numeric);
+  }
+  return Object.keys(normalized).length ? normalized : undefined;
+}
+
 function parseEmotionFromExpressions(expressions, keys) {
   if (!expressions) {
     return {
@@ -732,7 +743,7 @@ function createDetectionFromInsightFace(face) {
     },
     score: Number.isFinite(score) ? score : 0,
     descriptor: normalizeDescriptor(face.descriptor),
-    expressions: face.expressions && typeof face.expressions === "object" ? face.expressions : undefined,
+    expressions: normalizeEmotionExpressions(face.expressions),
     landmarks: createLandmarksAdapter(face.landmarks),
   };
   return det;
@@ -1906,8 +1917,8 @@ async function main() {
             bestMatch = { overlap, expressions: emotionDet?.expressions };
           }
         }
-        if (bestMatch && bestMatch.overlap >= 0.2 && bestMatch.expressions) {
-          det.expressions = bestMatch.expressions;
+        if (bestMatch && bestMatch.overlap >= 0.1 && bestMatch.expressions) {
+          det.expressions = normalizeEmotionExpressions(bestMatch.expressions);
         }
       }
 
@@ -1915,7 +1926,7 @@ async function main() {
     } catch (err) {
       const current = Date.now();
       if (current - lastEmotionFallbackErrLogAt >= 3000) {
-        log(`[emotion] fallback failed err=${String(err)}`);
+        log(`[emotion-fallback] failed err=${String(err)}`);
         lastEmotionFallbackErrLogAt = current;
       }
       return detections;
@@ -3354,11 +3365,16 @@ async function main() {
               strongEmotion || lowConfidenceEmotion
                 ? `${emotionKey} ${(emotionConfidence * 100).toFixed(0)}%`
                 : "";
+            const fallbackEmotionLabel =
+              emotionKey && Number.isFinite(emotionConfidence) && emotionConfidence > 0
+                ? `${emotionKey} ${(emotionConfidence * 100).toFixed(0)}%`
+                : "";
+            const displayEmotionLabel = emotionLabel || fallbackEmotionLabel;
 
             if (!isUnknownIdentity(name)) {
               people.push({
                 name,
-                emotion: emotionLabel,
+                emotion: displayEmotionLabel,
                 emotionKey: emotionKey || "",
                 emotionConfidence: Number(emotionConfidence.toFixed(4)),
                 distance: Number(distance.toFixed(3)),
@@ -3627,11 +3643,13 @@ async function main() {
             cam.lastEmotionAt = now;
             cam.emotionSummary = cam.people
               .map((p) =>
-                `${p.name}:${p.emotion || "-"}(${Number(p.emotionConfidence ?? 0).toFixed(2)})`,
+                `${p.name}:${p.emotion || p.emotionKey || "-"}(${Number(p.emotionConfidence ?? 0).toFixed(2)})`,
               )
               .join(", ");
             cam.topEmotion =
-              cam.people.find((person) => String(person?.emotion ?? "").trim())?.emotion || "";
+              cam.people.find((person) => String(person?.emotion ?? person?.emotionKey ?? "").trim())?.emotion ||
+              cam.people.find((person) => String(person?.emotionKey ?? "").trim())?.emotionKey ||
+              "";
             if (cam.topEmotion && now - cam.lastEmotionLogAt >= 1500) {
               log(`[${cam.cameraId}] emotion top=${cam.topEmotion}`);
               cam.lastEmotionLogAt = now;
