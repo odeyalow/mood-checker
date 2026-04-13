@@ -7,7 +7,7 @@ const envFile = path.join(process.cwd(), ".env.worker");
 
 const cameraSettings = {
   "cam-01": {
-    frameOffsetY: 0.18,
+    frameOffsetY: 0,
     confirmFrames: 1,
     minConfirmScore: 0.12,
     filterMinScore: 0.09,
@@ -43,7 +43,7 @@ const updates = new Map([
   ["WORKER_FRAME_ABORT_RETRY_QUALITY", "82"],
   ["WORKER_CAMERA_SOURCES", "cam-01=cam01_main"],
   ["WORKER_PARALLEL_CAMERAS", "1"],
-  ["WORKER_CAMERA_ZOOMS", "cam-01=2"],
+  ["WORKER_CAMERA_ZOOMS", "cam-01=1"],
   ["WORKER_DB_COOLDOWN_MS", "3000"],
   ["WORKER_DB_REENTRY_GAP_MS", "1200"],
   ["WORKER_EMOTION_ALLOW_LOW_CONFIDENCE_LABEL", "true"],

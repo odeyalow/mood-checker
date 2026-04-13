@@ -25,9 +25,9 @@ const camera1Go2rtcSrc = process.env.NEXT_PUBLIC_CAMERA_1_GO2RTC_SRC || "cam01_m
 
 const camera1Name = process.env.NEXT_PUBLIC_CAMERA_1_NAME || "Camera 1";
 const camera1Location = process.env.NEXT_PUBLIC_CAMERA_1_LOCATION || "10.16.12.39";
-const camera1DigitalZoom = parseDigitalZoom(process.env.NEXT_PUBLIC_CAMERA_1_DIGITAL_ZOOM) ?? 2;
+const camera1DigitalZoom = parseDigitalZoom(process.env.NEXT_PUBLIC_CAMERA_1_DIGITAL_ZOOM) ?? 1;
 const camera1FrameOffsetY =
-  parseFrameOffsetY(process.env.NEXT_PUBLIC_CAMERA_1_FRAME_OFFSET_Y) ?? 0.18;
+  parseFrameOffsetY(process.env.NEXT_PUBLIC_CAMERA_1_FRAME_OFFSET_Y) ?? 0;
 
 export const CAMERA_CONFIGS: CameraConfig[] = [
   {

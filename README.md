@@ -18,8 +18,8 @@ Set these in `.env` for the single camera setup:
 NEXT_PUBLIC_CAMERA_1_GO2RTC_SRC=cam01_main
 NEXT_PUBLIC_CAMERA_1_NAME=Camera 1
 NEXT_PUBLIC_CAMERA_1_LOCATION=10.16.12.39
-NEXT_PUBLIC_CAMERA_1_DIGITAL_ZOOM=2
-NEXT_PUBLIC_CAMERA_1_FRAME_OFFSET_Y=0.18
+NEXT_PUBLIC_CAMERA_1_DIGITAL_ZOOM=1
+NEXT_PUBLIC_CAMERA_1_FRAME_OFFSET_Y=0
 NEXT_PUBLIC_ENABLE_WEBCAM_TILE=false
 NEXT_PUBLIC_DETECTION_MODE=worker
 GO2RTC_BASE_URL=http://127.0.0.1:1984
@@ -35,9 +35,9 @@ WORKER_FRAME_ABORT_RETRY_WIDTH=1280
 WORKER_FRAME_ABORT_RETRY_HEIGHT=720
 WORKER_FRAME_ABORT_RETRY_QUALITY=85
 # Optional explicit worker override (otherwise worker inherits camera zoom from .env)
-# WORKER_CAMERA_ZOOMS=cam-01=2
+# WORKER_CAMERA_ZOOMS=cam-01=1
 # Optional per-camera quality profiles
-# WORKER_CAMERA_SETTINGS_JSON={"cam-01":{"matchThreshold":0.50,"frameOffsetY":0.18}}
+# WORKER_CAMERA_SETTINGS_JSON={"cam-01":{"matchThreshold":0.50,"frameOffsetY":0}}
 # Re-entry writes a new recognition event when person reappears after short absence
 # WORKER_DB_REENTRY_GAP_MS=1800
 # Emotion fallback for weak confidence (prevents missing events in distance/zoom scenes)

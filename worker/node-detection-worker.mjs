@@ -354,7 +354,7 @@ function parseWorkerZoomDefaults() {
 
   for (let i = 1; i <= 4; i += 1) {
     const cameraId = `cam-${String(i).padStart(2, "0")}`;
-    const fallbackZoom = i === 1 ? 2 : Number.NaN;
+    const fallbackZoom = i === 1 ? 1 : Number.NaN;
     const zoom = clampWorkerZoom(process.env[`NEXT_PUBLIC_CAMERA_${i}_DIGITAL_ZOOM`], fallbackZoom);
     if (Number.isFinite(zoom)) {
       map[cameraId] = zoom;
@@ -464,14 +464,73 @@ function sanitizeFileName(fileName) {
     .slice(0, 120);
 }
 
-async function savePhantomSnapshot(snapshotDir, publicBase, cameraId, jpgBuffer, now) {
+function normalizeCropRect(rect, maxWidth, maxHeight) {
+  if (!rect || typeof rect !== "object") return null;
+  let x = Number(rect.x ?? 0);
+  let y = Number(rect.y ?? 0);
+  let width = Number(rect.width ?? 0);
+  let height = Number(rect.height ?? 0);
+  if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(width) || !Number.isFinite(height)) {
+    return null;
+  }
+  x = Math.max(0, Math.floor(x));
+  y = Math.max(0, Math.floor(y));
+  width = Math.max(1, Math.floor(width));
+  height = Math.max(1, Math.floor(height));
+  if (x >= maxWidth || y >= maxHeight) return null;
+  const right = Math.min(maxWidth, x + width);
+  const bottom = Math.min(maxHeight, y + height);
+  const w = right - x;
+  const h = bottom - y;
+  if (w <= 0 || h <= 0) return null;
+  return { x, y, width: w, height: h };
+}
+
+function expandCropRect(rect, maxWidth, maxHeight, padding = 0.18) {
+  if (!rect || typeof rect !== "object") return null;
+  const padX = Math.round((rect.width ?? 0) * padding);
+  const padY = Math.round((rect.height ?? 0) * padding);
+  return normalizeCropRect(
+    {
+      x: Number(rect.x ?? 0) - padX,
+      y: Number(rect.y ?? 0) - padY,
+      width: Number(rect.width ?? 0) + padX * 2,
+      height: Number(rect.height ?? 0) + padY * 2,
+    },
+    maxWidth,
+    maxHeight,
+  );
+}
+
+async function cropJpegBuffer(buffer, rect) {
+  if (!(buffer instanceof Buffer) || !buffer.length || !rect) return null;
+  const image = await loadImage(buffer);
+  const canvas = createCanvas(rect.width, rect.height);
+  const ctx = canvas.getContext("2d");
+  ctx.drawImage(image, rect.x, rect.y, rect.width, rect.height, 0, 0, rect.width, rect.height);
+  return Buffer.from(canvas.toBuffer("image/jpeg", { quality: 0.92 }));
+}
+
+async function savePhantomSnapshot(snapshotDir, publicBase, cameraId, jpgBuffer, now, faceRect = null) {
   if (!snapshotDir || !publicBase || !(jpgBuffer instanceof Buffer) || !jpgBuffer.length) return "";
   const safeCameraId = sanitizeFileName(cameraId || "cam");
   if (!safeCameraId) return "";
   const dirAbs = path.join(snapshotDir, safeCameraId);
   await fsp.mkdir(dirAbs, { recursive: true });
   const fileName = `${now}-${Math.random().toString(36).slice(2, 8)}.jpg`;
-  await fsp.writeFile(path.join(dirAbs, fileName), jpgBuffer);
+  const fileAbs = path.join(dirAbs, fileName);
+  let fileBuffer = jpgBuffer;
+  if (faceRect) {
+    try {
+      const cropped = await cropJpegBuffer(jpgBuffer, faceRect);
+      if (cropped && cropped.length) {
+        fileBuffer = cropped;
+      }
+    } catch (_) {
+      // fallback to original frame
+    }
+  }
+  await fsp.writeFile(fileAbs, fileBuffer);
   return `${publicBase.replace(/\/+$/, "")}/${safeCameraId}/${fileName}`;
 }
 
@@ -1026,7 +1085,7 @@ function parseWorkerFrameOffsetDefaults() {
   const map = {};
   for (let i = 1; i <= 4; i += 1) {
     const cameraId = `cam-${String(i).padStart(2, "0")}`;
-    const fallbackOffset = i === 1 ? 0.18 : Number.NaN;
+    const fallbackOffset = i === 1 ? 0 : Number.NaN;
     const offset = clampFrameOffsetY(
       process.env[`NEXT_PUBLIC_CAMERA_${i}_FRAME_OFFSET_Y`],
       fallbackOffset,
@@ -3385,8 +3444,29 @@ async function main() {
             now - cam.lastSnapshotSavedAt >= Math.max(snapshotSaveCooldownMs, camSessionSnapshotIntervalMs)
           ) {
             try {
+              let faceRect = null;
+              if (bestBox) {
+                const expanded = expandCropRect(bestBox, workerWidth, workerHeight, 0.18);
+                if (expanded) {
+                  faceRect = {
+                    x: cropX + expanded.x,
+                    y: cropY + expanded.y,
+                    width: expanded.width,
+                    height: expanded.height,
+                  };
+                }
+              }
               const snapshotFile = path.join(snapshotDir, `${cam.cameraId}.jpg`);
-              await fsp.writeFile(snapshotFile, jpg);
+              if (faceRect) {
+                const croppedBuffer = await cropJpegBuffer(jpg, faceRect);
+                if (croppedBuffer && croppedBuffer.length) {
+                  await fsp.writeFile(snapshotFile, croppedBuffer);
+                } else {
+                  await fsp.writeFile(snapshotFile, jpg);
+                }
+              } else {
+                await fsp.writeFile(snapshotFile, jpg);
+              }
               cam.snapshotUrl = `${snapshotPublicBase}/${cam.cameraId}.jpg?v=${now}`;
               cam.lastSnapshotSavedAt = now;
               const snapshotFaces = people
