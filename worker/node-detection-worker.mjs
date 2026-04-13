@@ -1339,6 +1339,7 @@ function createEmptyCameraStatus({ workerZoom = 1, workerOffsetY = 0, frameError
     frameHeight: 0,
     workerFrameWidth: 0,
     workerFrameHeight: 0,
+    snapshotSavedCount: 0,
     frameError,
   };
 }
@@ -1390,6 +1391,7 @@ function createState(cameraId, src) {
     lastMatchAt: 0,
     lastSnapshotAt: 0,
     lastSnapshotSavedAt: 0,
+    snapshotSavedCount: 0,
     lastEmotionAt: 0,
     lastBestBox: null,
     prevLuma: null,
@@ -3228,7 +3230,8 @@ async function main() {
                 const accepted =
                   Boolean(bestCandidate) &&
                   bestCandidate.distance <= camMatchThreshold &&
-                  margin >= camMatchMinMargin;
+                  margin >= camMatchMinMargin &&
+                  (!second || bestCandidate.distance <= Math.max(0, camMatchThreshold - 0.02));
                 const readyForNewId = confirmNewIdCandidate(
                   descriptor,
                   faceSide,
@@ -3467,6 +3470,9 @@ async function main() {
               } else {
                 await fsp.writeFile(snapshotFile, jpg);
               }
+              cam.snapshotSavedCount = Number.isFinite(cam.snapshotSavedCount)
+                ? cam.snapshotSavedCount + 1
+                : 1;
               cam.snapshotUrl = `${snapshotPublicBase}/${cam.cameraId}.jpg?v=${now}`;
               cam.lastSnapshotSavedAt = now;
               const snapshotFaces = people
@@ -3874,6 +3880,7 @@ async function main() {
             emotionSummary: cam.emotionSummary,
             topEmotion: cam.topEmotion,
             snapshotUrl: cam.snapshotUrl,
+            snapshotSavedCount: Number.isFinite(cam.snapshotSavedCount) ? cam.snapshotSavedCount : 0,
             lastRecognitionAt: cam.lastRecognitionAt ? new Date(cam.lastRecognitionAt).toISOString() : "",
             frameOk: cam.frameOk,
             lastFrameAt: cam.lastFrameAt ? new Date(cam.lastFrameAt).toISOString() : "",
