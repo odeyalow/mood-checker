@@ -14,6 +14,7 @@ type WorkerStatusCamera = {
   personInFrame?: boolean;
   faceInFrame?: boolean;
   workerZoom?: number;
+  workerOffsetY?: number;
   emotionSummary?: string;
   topEmotion?: string;
   people?: { name: string; emotion?: string; emotionConfidence?: number; distance?: number }[];

@@ -18,7 +18,8 @@ Set these in `.env` for the single camera setup:
 NEXT_PUBLIC_CAMERA_1_GO2RTC_SRC=cam01_main
 NEXT_PUBLIC_CAMERA_1_NAME=Camera 1
 NEXT_PUBLIC_CAMERA_1_LOCATION=10.16.12.39
-NEXT_PUBLIC_CAMERA_1_DIGITAL_ZOOM=1
+NEXT_PUBLIC_CAMERA_1_DIGITAL_ZOOM=2
+NEXT_PUBLIC_CAMERA_1_FRAME_OFFSET_Y=0.18
 NEXT_PUBLIC_ENABLE_WEBCAM_TILE=false
 NEXT_PUBLIC_DETECTION_MODE=worker
 GO2RTC_BASE_URL=http://127.0.0.1:1984
@@ -33,10 +34,10 @@ WORKER_FRAME_ABORT_RETRY_TIMEOUT_MS=2500
 WORKER_FRAME_ABORT_RETRY_WIDTH=1280
 WORKER_FRAME_ABORT_RETRY_HEIGHT=720
 WORKER_FRAME_ABORT_RETRY_QUALITY=85
-# Optional defaults for worker-only zoom (x1..x5)
-# WORKER_CAMERA_ZOOMS=cam-01=1
+# Optional explicit worker override (otherwise worker inherits camera zoom from .env)
+# WORKER_CAMERA_ZOOMS=cam-01=2
 # Optional per-camera quality profiles
-# WORKER_CAMERA_SETTINGS_JSON={"cam-01":{"matchThreshold":0.50}}
+# WORKER_CAMERA_SETTINGS_JSON={"cam-01":{"matchThreshold":0.50,"frameOffsetY":0.18}}
 # Re-entry writes a new recognition event when person reappears after short absence
 # WORKER_DB_REENTRY_GAP_MS=1800
 # Emotion fallback for weak confidence (prevents missing events in distance/zoom scenes)
@@ -45,16 +46,16 @@ WORKER_FRAME_ABORT_RETRY_QUALITY=85
 # WORKER_DB_ALLOW_MOOD_FALLBACK=true
 # WORKER_DB_FALLBACK_MOOD=neutral
 # Presence-session pipeline (no duplicate DB writes while person still in frame)
-# WORKER_SESSION_SNAPSHOT_INTERVAL_MS=1500
-# WORKER_SESSION_ABSENCE_MS=2200
-# WORKER_SESSION_RESOLVE_WAIT_MS=2800
-# WORKER_SESSION_MIN_SAMPLES=2
-# WORKER_SESSION_MIN_EMOTION_SAMPLES=2
+# WORKER_SESSION_SNAPSHOT_INTERVAL_MS=500
+# WORKER_SESSION_ABSENCE_MS=3300
+# WORKER_SESSION_RESOLVE_WAIT_MS=500
+# WORKER_SESSION_MIN_SAMPLES=1
+# WORKER_SESSION_MIN_EMOTION_SAMPLES=1
 ```
 
 Notes:
 - `NEXT_PUBLIC_CAMERA_1_GO2RTC_SRC` is the single source used by both UI preview and worker snapshots. Keep UI and worker on the same go2rtc stream name.
-- `NEXT_PUBLIC_CAMERA_1_DIGITAL_ZOOM` enables per-camera digital zoom (`>1` enables zoom, max `4`).
+- `NEXT_PUBLIC_CAMERA_1_DIGITAL_ZOOM` and `NEXT_PUBLIC_CAMERA_1_FRAME_OFFSET_Y` define the shared framing used by both UI and worker. Positive `FRAME_OFFSET_Y` shifts the visible frame down and reveals more of the upper area.
 - `GO2RTC_FRAME_WIDTH/HEIGHT/QUALITY` control snapshot resolution/quality for worker recognition (`/api/camera/frame`).
 - `NEXT_PUBLIC_ENABLE_WEBCAM_TILE=true` enables the local webcam tile for debugging.
 - `NEXT_PUBLIC_DETECTION_MODE=worker` disables browser-side face detection and shows worker live status under camera tiles.

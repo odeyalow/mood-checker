@@ -4,6 +4,7 @@ export type CameraConfig = {
   location?: string;
   go2rtcSrc?: string;
   digitalZoom?: number;
+  frameOffsetY?: number;
 };
 
 function parseDigitalZoom(rawValue: string | undefined): number | undefined {
@@ -13,11 +14,20 @@ function parseDigitalZoom(rawValue: string | undefined): number | undefined {
   return Math.min(parsed, 4);
 }
 
+function parseFrameOffsetY(rawValue: string | undefined): number | undefined {
+  if (!rawValue) return undefined;
+  const parsed = Number.parseFloat(rawValue);
+  if (!Number.isFinite(parsed)) return undefined;
+  return Math.min(0.35, Math.max(-0.35, parsed));
+}
+
 const camera1Go2rtcSrc = process.env.NEXT_PUBLIC_CAMERA_1_GO2RTC_SRC || "cam01_main";
 
 const camera1Name = process.env.NEXT_PUBLIC_CAMERA_1_NAME || "Camera 1";
 const camera1Location = process.env.NEXT_PUBLIC_CAMERA_1_LOCATION || "10.16.12.39";
-const camera1DigitalZoom = parseDigitalZoom(process.env.NEXT_PUBLIC_CAMERA_1_DIGITAL_ZOOM);
+const camera1DigitalZoom = parseDigitalZoom(process.env.NEXT_PUBLIC_CAMERA_1_DIGITAL_ZOOM) ?? 2;
+const camera1FrameOffsetY =
+  parseFrameOffsetY(process.env.NEXT_PUBLIC_CAMERA_1_FRAME_OFFSET_Y) ?? 0.18;
 
 export const CAMERA_CONFIGS: CameraConfig[] = [
   {
@@ -26,5 +36,6 @@ export const CAMERA_CONFIGS: CameraConfig[] = [
     location: camera1Location,
     go2rtcSrc: camera1Go2rtcSrc,
     digitalZoom: camera1DigitalZoom,
+    frameOffsetY: camera1FrameOffsetY,
   },
 ];

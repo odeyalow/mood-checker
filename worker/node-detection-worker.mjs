@@ -350,8 +350,18 @@ function parseCameraSources() {
 }
 
 function parseWorkerZoomDefaults() {
-  const raw = (process.env.WORKER_CAMERA_ZOOMS ?? "").trim();
   const map = {};
+
+  for (let i = 1; i <= 4; i += 1) {
+    const cameraId = `cam-${String(i).padStart(2, "0")}`;
+    const fallbackZoom = i === 1 ? 2 : Number.NaN;
+    const zoom = clampWorkerZoom(process.env[`NEXT_PUBLIC_CAMERA_${i}_DIGITAL_ZOOM`], fallbackZoom);
+    if (Number.isFinite(zoom)) {
+      map[cameraId] = zoom;
+    }
+  }
+
+  const raw = (process.env.WORKER_CAMERA_ZOOMS ?? "").trim();
   if (!raw) return map;
 
   for (const part of raw.split(",")) {
@@ -1005,6 +1015,29 @@ function clampWorkerZoom(value, fallback = 1) {
   return Math.min(5, Math.max(1, Number(parsed.toFixed(2))));
 }
 
+function clampFrameOffsetY(value, fallback = 0) {
+  const parsed =
+    typeof value === "number" ? value : Number.parseFloat(String(value ?? "").trim());
+  if (!Number.isFinite(parsed)) return fallback;
+  return Math.min(0.35, Math.max(-0.35, Number(parsed.toFixed(3))));
+}
+
+function parseWorkerFrameOffsetDefaults() {
+  const map = {};
+  for (let i = 1; i <= 4; i += 1) {
+    const cameraId = `cam-${String(i).padStart(2, "0")}`;
+    const fallbackOffset = i === 1 ? 0.18 : Number.NaN;
+    const offset = clampFrameOffsetY(
+      process.env[`NEXT_PUBLIC_CAMERA_${i}_FRAME_OFFSET_Y`],
+      fallbackOffset,
+    );
+    if (Number.isFinite(offset)) {
+      map[cameraId] = offset;
+    }
+  }
+  return map;
+}
+
 async function readWorkerZoomState(filePath) {
   try {
     const raw = await fsp.readFile(filePath, "utf-8");
@@ -1220,7 +1253,7 @@ async function writeStatusFile(filePath, payload) {
   await fsp.rename(tmp, filePath);
 }
 
-function createEmptyCameraStatus({ workerZoom = 1, frameError = "" } = {}) {
+function createEmptyCameraStatus({ workerZoom = 1, workerOffsetY = 0, frameError = "" } = {}) {
   return {
     candidate: 0,
     confirmed: 0,
@@ -1234,6 +1267,7 @@ function createEmptyCameraStatus({ workerZoom = 1, frameError = "" } = {}) {
     personInFrame: false,
     faceInFrame: false,
     workerZoom: Number.isFinite(workerZoom) ? Number(workerZoom.toFixed(2)) : 1,
+    workerOffsetY: Number.isFinite(workerOffsetY) ? Number(workerOffsetY.toFixed(3)) : 0,
     people: [],
     emotionSummary: "",
     topEmotion: "",
@@ -1256,7 +1290,7 @@ async function writeBootStatusFile(filePath, cameras, frameError = "worker_booti
     cameras: Object.fromEntries(
       (Array.isArray(cameras) ? cameras : []).map((camera) => [
         String(camera?.cameraId ?? ""),
-        createEmptyCameraStatus({ workerZoom: 1, frameError }),
+        createEmptyCameraStatus({ workerZoom: 1, workerOffsetY: 0, frameError }),
       ]),
     ),
   };
@@ -1271,6 +1305,7 @@ function createState(cameraId, src) {
     processingStartedAt: 0,
     processingTimedOutAt: 0,
     workerZoom: 1,
+    workerOffsetY: 0,
     candidate: 0,
     confirmed: 0,
     score: 0,
@@ -1423,10 +1458,10 @@ async function main() {
   const enableEmotions = envBool("WORKER_ENABLE_EMOTIONS", true);
   const emotionIntervalMs = Math.max(150, envInt("WORKER_EMOTION_INTERVAL_MS", 300));
   const snapshotCooldownMs = Math.max(150, envInt("WORKER_SNAPSHOT_COOLDOWN_MS", 300));
-  const recognitionHoldMs = Math.max(0, envInt("WORKER_RECOGNITION_HOLD_MS", 1200));
+  const recognitionHoldMs = Math.max(0, envInt("WORKER_RECOGNITION_HOLD_MS", 2500));
   const sessionSnapshotIntervalMs = Math.max(
     500,
-    envInt("WORKER_SESSION_SNAPSHOT_INTERVAL_MS", 900),
+    envInt("WORKER_SESSION_SNAPSHOT_INTERVAL_MS", 500),
   );
   const sessionAbsenceMs = Math.max(
     700,
@@ -1434,15 +1469,16 @@ async function main() {
   );
   const sessionResolveWaitMs = Math.max(
     300,
-    envInt("WORKER_SESSION_RESOLVE_WAIT_MS", 1800),
+    envInt("WORKER_SESSION_RESOLVE_WAIT_MS", 500),
   );
-  const sessionMinSamples = Math.max(1, envInt("WORKER_SESSION_MIN_SAMPLES", 2));
+  const sessionMinSamples = Math.max(1, envInt("WORKER_SESSION_MIN_SAMPLES", 1));
   const sessionMinEmotionSamples = Math.max(
     1,
-    envInt("WORKER_SESSION_MIN_EMOTION_SAMPLES", 2),
+    envInt("WORKER_SESSION_MIN_EMOTION_SAMPLES", 1),
   );
   const workerZoomReloadMs = Math.max(250, envInt("WORKER_ZOOM_RELOAD_MS", 700));
   const workerZoomDefaults = parseWorkerZoomDefaults();
+  const workerFrameOffsetDefaults = parseWorkerFrameOffsetDefaults();
   const cameraSettings = parseCameraSettings();
   const ignoreZonesByCamera = parseIgnoreZones();
   const ignoreZoneOverlapThreshold = Math.max(
@@ -1508,20 +1544,20 @@ async function main() {
   const newIdMinFaceSidePx = Math.max(8, envInt("WORKER_NEW_ID_MIN_FACE_SIDE_PX", 20));
   const newIdEmptyMinScore = Math.max(
     0,
-    Math.min(1, envFloat("WORKER_NEW_ID_EMPTY_MIN_SCORE", 0.2)),
+    Math.min(1, envFloat("WORKER_NEW_ID_EMPTY_MIN_SCORE", Math.max(newIdMinScore, 0.16))),
   );
   const newIdEmptyMinFaceSidePx = Math.max(
     8,
-    envInt("WORKER_NEW_ID_EMPTY_MIN_FACE_SIDE_PX", 30),
+    envInt("WORKER_NEW_ID_EMPTY_MIN_FACE_SIDE_PX", Math.max(newIdMinFaceSidePx, 20)),
   );
   const newIdStabilityMaxDistance = Math.max(
     0.01,
     Math.min(2, envFloat("WORKER_NEW_ID_STABILITY_MAX_DISTANCE", 0.48)),
   );
-  const newIdMinSharpness = Math.max(0, envFloat("WORKER_NEW_ID_MIN_SHARPNESS", 11));
+  const newIdMinSharpness = Math.max(0, envFloat("WORKER_NEW_ID_MIN_SHARPNESS", 9));
   const newIdEmptyMinSharpness = Math.max(
     0,
-    envFloat("WORKER_NEW_ID_EMPTY_MIN_SHARPNESS", Math.max(newIdMinSharpness, 14)),
+    envFloat("WORKER_NEW_ID_EMPTY_MIN_SHARPNESS", Math.max(newIdMinSharpness, 11)),
   );
   const newIdMaxGapMs = Math.max(120, envInt("WORKER_NEW_ID_MAX_GAP_MS", 1500));
   const phantomBankThreshold = Math.max(
@@ -1927,6 +1963,7 @@ async function main() {
     const state = createState(c.cameraId, c.src);
     // Apply defaults once on startup; after that keep current zoom unless explicit override exists.
     state.workerZoom = clampWorkerZoom(workerZoomDefaults[c.cameraId] ?? 1, 1);
+    state.workerOffsetY = clampFrameOffsetY(workerFrameOffsetDefaults[c.cameraId] ?? 0, 0);
     return state;
   });
   const autoBlockStatsByKey = new Map();
@@ -2783,11 +2820,15 @@ async function main() {
     } else {
       cam.workerZoom = clampWorkerZoom(cam.workerZoom, 1);
     }
+    cam.workerOffsetY = clampFrameOffsetY(
+      getCameraSetting(cameraSettings, cam.cameraId, "frameOffsetY", cam.workerOffsetY),
+      cam.workerOffsetY,
+    );
     if (!loggedCameraProfiles.has(cam.cameraId)) {
       loggedCameraProfiles.add(cam.cameraId);
       log(
         `[${cam.cameraId}] profile ` +
-          `zoom=${cam.workerZoom.toFixed(2)} confirm_frames=${camConfirmFrames} ` +
+          `zoom=${cam.workerZoom.toFixed(2)} offset_y=${cam.workerOffsetY.toFixed(3)} confirm_frames=${camConfirmFrames} ` +
           `min_confirm=${camMinConfirmScore.toFixed(3)} filter_min=${camFilterMinScore.toFixed(3)} ` +
           `person_min=${camPersonMinScore.toFixed(3)} person_side=${camPersonMinSidePx} ` +
           `person_streak=${camPersonMinStreak} match_th=${camMatchThreshold.toFixed(3)} ` +
@@ -2847,7 +2888,14 @@ async function main() {
           ? Math.max(64, Math.floor(sourceHeight / cam.workerZoom))
           : sourceHeight;
       const cropX = Math.max(0, Math.floor((sourceWidth - workerWidth) / 2));
-      const cropY = Math.max(0, Math.floor((sourceHeight - workerHeight) / 2));
+      const cropYRange = Math.max(0, sourceHeight - workerHeight);
+      const cropY = Math.max(
+        0,
+        Math.min(
+          cropYRange,
+          Math.floor(cropYRange / 2 - cam.workerOffsetY * cropYRange),
+        ),
+      );
 
       cam.frameOk = true;
       cam.lastFrameAt = now;
@@ -2968,12 +3016,12 @@ async function main() {
         (fastPassMode ? true : motionGate);
       cam.confirmed = isConfirmed ? cam.candidate : 0;
       if (!isConfirmed) {
-        cam.matchedNames = [];
-        cam.matchDistance = 0;
         cam.newIdGateDescriptor = null;
         cam.newIdGateStreak = 0;
         cam.newIdGateLastAt = 0;
         if (now - cam.lastConfirmedAt >= camRecognitionHoldMs) {
+          cam.matchedNames = [];
+          cam.matchDistance = 0;
           cam.people = [];
           cam.emotionSummary = "";
           cam.topEmotion = "";
@@ -3712,10 +3760,15 @@ async function main() {
               cam.score >= camPersonMinScore &&
               cam.maxFaceSide >= camPersonMinSidePx &&
               cam.streak >= camPersonMinStreak);
-          const hasFace = cam.confirmed > 0;
+          const hasFace =
+            cam.confirmed > 0 ||
+            cam.candidate > 0 ||
+            (now - cam.lastConfirmedAt < camRecognitionHoldMs &&
+              (cam.people.length > 0 || cam.matchedNames.length > 0));
           const who = cam.matchedNames.length ? cam.matchedNames.join(", ") : "unknown";
           const emotion = cam.topEmotion || "none";
           const safeZoom = Number.isFinite(cam.workerZoom) ? cam.workerZoom : 1;
+          const safeOffsetY = Number.isFinite(cam.workerOffsetY) ? cam.workerOffsetY : 0;
           const frameState = cam.frameOk
             ? `ok(${cam.lastFrameWidth}x${cam.lastFrameHeight}->${cam.workerFrameWidth}x${cam.workerFrameHeight},z=${safeZoom.toFixed(1)}x,${cam.lastFrameBytes}b)`
             : `err(${cam.lastFrameError || "unknown"})`;
@@ -3736,6 +3789,7 @@ async function main() {
             personInFrame: hasPerson,
             faceInFrame: hasFace,
             workerZoom: Number(safeZoom.toFixed(2)),
+            workerOffsetY: Number(safeOffsetY.toFixed(3)),
             people: cam.people,
             emotionSummary: cam.emotionSummary,
             topEmotion: cam.topEmotion,

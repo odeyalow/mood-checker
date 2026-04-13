@@ -7,8 +7,6 @@ import type { CameraConfig } from "@/lib/cameras";
 
 const { Text } = Typography;
 const MIN_ZOOM = 1;
-const MAX_ZOOM = 4;
-const ZOOM_STEP = 0.1;
 const WORKER_ZOOM_PRESETS = [1, 2, 3, 4, 5];
 const MJPEG_RETRY_DELAY_MS = 1500;
 const MJPEG_LOAD_TIMEOUT_MS = 5000;
@@ -32,6 +30,7 @@ type WorkerStatus = {
   lastRecognitionAt?: string;
   frameOk?: boolean;
   workerZoom?: number;
+  workerOffsetY?: number;
   frameWidth?: number;
   frameHeight?: number;
 };
@@ -44,16 +43,15 @@ type SnapshotHistoryItem = {
   capturedAt: string;
 };
 
-function clampZoom(value: number | undefined): number {
-  if (typeof value !== "number" || !Number.isFinite(value)) return MIN_ZOOM;
-  const clamped = Math.min(Math.max(value, MIN_ZOOM), MAX_ZOOM);
-  return Number(clamped.toFixed(1));
-}
-
 function clampWorkerZoom(value: number | undefined): number {
   if (typeof value !== "number" || !Number.isFinite(value)) return 1;
   const clamped = Math.min(5, Math.max(1, value));
   return Number(clamped.toFixed(1));
+}
+
+function clampFrameOffsetY(value: number | undefined): number {
+  if (typeof value !== "number" || !Number.isFinite(value)) return 0;
+  return Number(Math.min(0.35, Math.max(-0.35, value)).toFixed(3));
 }
 
 function formatRecognitionTime(raw: string) {
@@ -94,14 +92,23 @@ function renderZoomedCanvas(
   sourceWidth: number,
   sourceHeight: number,
   zoom: number,
+  offsetY = 0,
 ) {
   const safeZoom = clampWorkerZoom(zoom);
+  const safeOffsetY = clampFrameOffsetY(offsetY);
   const cropWidth =
     safeZoom > 1 ? Math.max(64, Math.floor(sourceWidth / safeZoom)) : sourceWidth;
   const cropHeight =
     safeZoom > 1 ? Math.max(64, Math.floor(sourceHeight / safeZoom)) : sourceHeight;
   const cropX = Math.max(0, Math.floor((sourceWidth - cropWidth) / 2));
-  const cropY = Math.max(0, Math.floor((sourceHeight - cropHeight) / 2));
+  const cropYRange = Math.max(0, sourceHeight - cropHeight);
+  const cropY = Math.max(
+    0,
+    Math.min(
+      cropYRange,
+      Math.floor(cropYRange / 2 - safeOffsetY * cropYRange),
+    ),
+  );
 
   const canvas = document.createElement("canvas");
   canvas.width = cropWidth;
@@ -213,8 +220,8 @@ export default function CameraTile({
   const [snapshotEmotion, setSnapshotEmotion] = useState("");
   const [lastRecognitionAt, setLastRecognitionAt] = useState("");
   const [history, setHistory] = useState<SnapshotHistoryItem[]>([]);
-  const [zoomValue, setZoomValue] = useState<number>(clampZoom(camera.digitalZoom));
   const [workerZoom, setWorkerZoom] = useState(1);
+  const [workerOffsetY, setWorkerOffsetY] = useState(clampFrameOffsetY(camera.frameOffsetY));
   const [workerZoomSaving, setWorkerZoomSaving] = useState(false);
   const [frameDownloading, setFrameDownloading] = useState(false);
 
@@ -230,7 +237,8 @@ export default function CameraTile({
     setSnapshotEmotion("");
     setLastRecognitionAt("");
     setHistory([]);
-    setWorkerZoom(1);
+    setWorkerZoom(clampWorkerZoom(camera.digitalZoom));
+    setWorkerOffsetY(clampFrameOffsetY(camera.frameOffsetY));
     setMjpegToken(0);
     setStatus("loading");
     frameSizeRef.current = { width: 0, height: 0 };
@@ -245,11 +253,6 @@ export default function CameraTile({
       mjpegLoadTimeoutRef.current = null;
     }
   }, [camera.id]);
-
-  useEffect(() => {
-    const initialZoom = clampZoom(camera.digitalZoom);
-    setZoomValue(initialZoom);
-  }, [camera.id, camera.digitalZoom]);
 
   useEffect(() => {
     const explicitBase = String(process.env.NEXT_PUBLIC_GO2RTC_BASE_URL || "").trim();
@@ -305,8 +308,10 @@ export default function CameraTile({
           const names = namesFromStatus(ws);
           const who = names.join(", ");
           const zoom = clampWorkerZoom(Number(ws.workerZoom ?? 1));
+          const offsetY = clampFrameOffsetY(Number(ws.workerOffsetY ?? camera.frameOffsetY ?? 0));
 
           setWorkerZoom(zoom);
+          setWorkerOffsetY(offsetY);
           frameSizeRef.current = {
             width: Number.isFinite(Number(ws.frameWidth)) ? Number(ws.frameWidth) : 0,
             height: Number.isFinite(Number(ws.frameHeight)) ? Number(ws.frameHeight) : 0,
@@ -376,7 +381,7 @@ export default function CameraTile({
       mounted = false;
       if (timer) window.clearTimeout(timer);
     };
-  }, [camera.id]);
+  }, [camera.frameOffsetY, camera.id]);
 
   async function setWorkerZoomRemote(nextZoom: number) {
     setWorkerZoomSaving(true);
@@ -418,6 +423,7 @@ export default function CameraTile({
   async function downloadCurrentFrame() {
     setFrameDownloading(true);
     const zoom = clampWorkerZoom(workerZoom);
+    const offsetY = clampFrameOffsetY(workerOffsetY);
     try {
       let exportCanvas: HTMLCanvasElement | null = null;
 
@@ -426,7 +432,7 @@ export default function CameraTile({
         if (frameBlob) {
           const bitmap = await createImageBitmap(frameBlob);
           try {
-            exportCanvas = renderZoomedCanvas(bitmap, bitmap.width, bitmap.height, zoom);
+            exportCanvas = renderZoomedCanvas(bitmap, bitmap.width, bitmap.height, zoom, offsetY);
           } finally {
             bitmap.close();
           }
@@ -442,7 +448,7 @@ export default function CameraTile({
         if (!previewImage || !sourceWidth || !sourceHeight) {
           throw new Error("preview_image_unavailable");
         }
-        exportCanvas = renderZoomedCanvas(previewImage, sourceWidth, sourceHeight, zoom);
+        exportCanvas = renderZoomedCanvas(previewImage, sourceWidth, sourceHeight, zoom, offsetY);
       }
 
       const blob = await canvasToJpegBlob(exportCanvas, 0.92);
@@ -463,6 +469,13 @@ export default function CameraTile({
       setMjpegToken((value) => value + 1);
     }, MJPEG_RETRY_DELAY_MS);
   }
+
+  const effectivePreviewZoom = clampWorkerZoom(workerZoom || camera.digitalZoom);
+  const effectivePreviewOffsetY = clampFrameOffsetY(workerOffsetY ?? camera.frameOffsetY);
+  const previewTransform =
+    effectivePreviewZoom > MIN_ZOOM || Math.abs(effectivePreviewOffsetY) > 0.001
+      ? `translateY(${((effectivePreviewZoom - 1) * effectivePreviewOffsetY * 100).toFixed(2)}%) scale(${effectivePreviewZoom})`
+      : "scale(1)";
 
   return (
     <Card className="camera-card" size="small">
@@ -493,7 +506,7 @@ export default function CameraTile({
               scheduleMjpegReconnect();
             }}
             style={{
-              transform: zoomValue > MIN_ZOOM ? `scale(${zoomValue})` : "scale(1)",
+              transform: previewTransform,
               transformOrigin: "center center",
               transition: "transform 0.16s ease-out",
             }}
@@ -512,32 +525,10 @@ export default function CameraTile({
           <div>
             <Text type="secondary">{camera.location || camera.id}</Text>
           </div>
-
-          <div className="camera-zoom">
-            <div className="camera-zoom-head">
-              <Text type="secondary">Zoom (UI)</Text>
-              <Text type="secondary">{`x${zoomValue.toFixed(1)}`}</Text>
-            </div>
-            <input
-              className="camera-zoom-range"
-              type="range"
-              min={MIN_ZOOM}
-              max={MAX_ZOOM}
-              step={ZOOM_STEP}
-              value={zoomValue}
-              onChange={(event) => {
-                const nextZoom = Number.parseFloat(event.target.value);
-                if (!Number.isFinite(nextZoom)) return;
-                setZoomValue(clampZoom(nextZoom));
-              }}
-              aria-label={`${camera.name} ui zoom`}
-            />
-          </div>
-
           <div className="camera-worker-zoom">
             <div className="camera-zoom-head">
-              <Text type="secondary">Zoom (worker)</Text>
-              <Text type="secondary">{`x${workerZoom.toFixed(1)}`}</Text>
+              <Text type="secondary">Zoom (UI + worker)</Text>
+              <Text type="secondary">{`x${effectivePreviewZoom.toFixed(1)} / y=${effectivePreviewOffsetY >= 0 ? "+" : ""}${effectivePreviewOffsetY.toFixed(2)}`}</Text>
             </div>
             <div className="camera-worker-zoom-buttons">
               {WORKER_ZOOM_PRESETS.map((value) => (

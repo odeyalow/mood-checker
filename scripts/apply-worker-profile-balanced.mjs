@@ -7,6 +7,7 @@ const envFile = path.join(process.cwd(), ".env.worker");
 
 const cameraSettings = {
   "cam-01": {
+    frameOffsetY: 0.18,
     confirmFrames: 1,
     minConfirmScore: 0.12,
     filterMinScore: 0.09,
@@ -17,12 +18,19 @@ const cameraSettings = {
     matchMinMargin: 0.04,
     matchMinFaceSidePx: 16,
     matchIntervalMs: 120,
-    sessionSnapshotIntervalMs: 900,
-    sessionResolveWaitMs: 1300,
-    sessionMinSamples: 2,
+    sessionSnapshotIntervalMs: 500,
+    sessionResolveWaitMs: 500,
+    sessionMinSamples: 1,
     sessionMinEmotionSamples: 1,
-    sessionAbsenceMs: 2300,
-    recognitionHoldMs: 2200,
+    sessionAbsenceMs: 3300,
+    recognitionHoldMs: 2500,
+    newIdConfirmFrames: 1,
+    newIdMinScore: 0.14,
+    newIdMinFaceSidePx: 20,
+    newIdEmptyMinScore: 0.16,
+    newIdEmptyMinFaceSidePx: 20,
+    newIdMinSharpness: 9,
+    newIdEmptyMinSharpness: 11,
   },
 };
 
@@ -35,7 +43,7 @@ const updates = new Map([
   ["WORKER_FRAME_ABORT_RETRY_QUALITY", "82"],
   ["WORKER_CAMERA_SOURCES", "cam-01=cam01_main"],
   ["WORKER_PARALLEL_CAMERAS", "1"],
-  ["WORKER_CAMERA_ZOOMS", "cam-01=1"],
+  ["WORKER_CAMERA_ZOOMS", "cam-01=2"],
   ["WORKER_DB_COOLDOWN_MS", "3000"],
   ["WORKER_DB_REENTRY_GAP_MS", "1200"],
   ["WORKER_EMOTION_ALLOW_LOW_CONFIDENCE_LABEL", "true"],
