@@ -3840,6 +3840,13 @@ async function main() {
               confirmFrames,
             ),
           );
+          const camRecognitionHoldMs = Math.max(
+            0,
+            parseFiniteInt(
+              getCameraSetting(cameraSettings, cam.cameraId, "recognitionHoldMs", recognitionHoldMs),
+              recognitionHoldMs,
+            ),
+          );
           const camPersonMinScore = parseFiniteFloat(
             getCameraSetting(cameraSettings, cam.cameraId, "personMinScore", personMinScore),
             personMinScore,
