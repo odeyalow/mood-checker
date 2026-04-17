@@ -177,12 +177,11 @@ function buildFrameApiPath(
   return `/api/camera/frame?${params.toString()}`;
 }
 
-function buildDirectMjpegUrl(baseUrl: string, src: string, token = 0) {
-  const url = new URL(baseUrl);
-  url.pathname = `${url.pathname.replace(/\/$/, "")}/api/stream.mjpeg`;
-  url.searchParams.set("src", src);
-  url.searchParams.set("v", String(token));
-  return url.toString();
+function buildMjpegApiPath(src: string, token = 0) {
+  const params = new URLSearchParams();
+  params.set("src", src);
+  params.set("v", String(token));
+  return `/api/camera/mjpeg?${params.toString()}`;
 }
 
 export default function CameraTile({
@@ -213,7 +212,6 @@ export default function CameraTile({
 
   const [status, setStatus] = useState<"loading" | "ready" | "error">("loading");
   const [mjpegToken, setMjpegToken] = useState(0);
-  const [go2rtcBaseUrl, setGo2rtcBaseUrl] = useState("");
   const [people, setPeople] = useState<WorkerPerson[]>([]);
   const [snapshotUrl, setSnapshotUrl] = useState("");
   const [snapshotWho, setSnapshotWho] = useState("");
@@ -226,9 +224,9 @@ export default function CameraTile({
   const [frameDownloading, setFrameDownloading] = useState(false);
 
   const mjpegUrl = useMemo(() => {
-    if (!camera.go2rtcSrc || !go2rtcBaseUrl) return "";
-    return buildDirectMjpegUrl(go2rtcBaseUrl, camera.go2rtcSrc, mjpegToken);
-  }, [camera.go2rtcSrc, go2rtcBaseUrl, mjpegToken]);
+    if (!camera.go2rtcSrc) return "";
+    return buildMjpegApiPath(camera.go2rtcSrc, mjpegToken);
+  }, [camera.go2rtcSrc, mjpegToken]);
 
   useEffect(() => {
     setPeople([]);
@@ -253,17 +251,6 @@ export default function CameraTile({
       mjpegLoadTimeoutRef.current = null;
     }
   }, [camera.id]);
-
-  useEffect(() => {
-    const explicitBase = String(process.env.NEXT_PUBLIC_GO2RTC_BASE_URL || "").trim();
-    if (explicitBase) {
-      setGo2rtcBaseUrl(explicitBase);
-      return;
-    }
-    if (typeof window !== "undefined") {
-      setGo2rtcBaseUrl(`${window.location.protocol}//${window.location.hostname}:1984`);
-    }
-  }, []);
 
   useEffect(() => {
     return () => {
