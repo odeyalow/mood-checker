@@ -10,6 +10,7 @@ const MIN_ZOOM = 1;
 const WORKER_ZOOM_PRESETS = [1, 2, 3, 4, 5];
 const MJPEG_RETRY_DELAY_MS = 1500;
 const MJPEG_LOAD_TIMEOUT_MS = 5000;
+const FRAME_REFRESH_DELAY_MS = 900;
 
 type WorkerPerson = {
   name: string;
@@ -209,9 +210,11 @@ export default function CameraTile({
   const frameSizeRef = useRef({ width: 0, height: 0 });
   const mjpegRetryTimerRef = useRef<number | null>(null);
   const mjpegLoadTimeoutRef = useRef<number | null>(null);
+  const frameRefreshTimerRef = useRef<number | null>(null);
 
   const [status, setStatus] = useState<"loading" | "ready" | "error">("loading");
-  const [mjpegToken, setMjpegToken] = useState(0);
+  const [previewMode, setPreviewMode] = useState<"mjpeg" | "frame">("mjpeg");
+  const [previewToken, setPreviewToken] = useState(0);
   const [people, setPeople] = useState<WorkerPerson[]>([]);
   const [snapshotUrl, setSnapshotUrl] = useState("");
   const [snapshotWho, setSnapshotWho] = useState("");
@@ -223,10 +226,15 @@ export default function CameraTile({
   const [workerZoomSaving, setWorkerZoomSaving] = useState(false);
   const [frameDownloading, setFrameDownloading] = useState(false);
 
-  const mjpegUrl = useMemo(() => {
+  const previewUrl = useMemo(() => {
     if (!camera.go2rtcSrc) return "";
-    return buildMjpegApiPath(camera.go2rtcSrc, mjpegToken);
-  }, [camera.go2rtcSrc, mjpegToken]);
+    if (previewMode === "frame") {
+      const url = new URL(buildFrameApiPath(camera.go2rtcSrc), window.location.origin);
+      url.searchParams.set("v", String(previewToken));
+      return `${url.pathname}?${url.searchParams.toString()}`;
+    }
+    return buildMjpegApiPath(camera.go2rtcSrc, previewToken);
+  }, [camera.go2rtcSrc, previewMode, previewToken]);
 
   useEffect(() => {
     setPeople([]);
@@ -237,7 +245,8 @@ export default function CameraTile({
     setHistory([]);
     setWorkerZoom(clampWorkerZoom(camera.digitalZoom));
     setWorkerOffsetY(clampFrameOffsetY(camera.frameOffsetY));
-    setMjpegToken(0);
+    setPreviewMode("mjpeg");
+    setPreviewToken(0);
     setStatus("loading");
     frameSizeRef.current = { width: 0, height: 0 };
     lastSnapshotKeyRef.current = "";
@@ -249,6 +258,10 @@ export default function CameraTile({
     if (mjpegLoadTimeoutRef.current !== null) {
       window.clearTimeout(mjpegLoadTimeoutRef.current);
       mjpegLoadTimeoutRef.current = null;
+    }
+    if (frameRefreshTimerRef.current !== null) {
+      window.clearTimeout(frameRefreshTimerRef.current);
+      frameRefreshTimerRef.current = null;
     }
   }, [camera.id]);
 
@@ -262,21 +275,29 @@ export default function CameraTile({
         window.clearTimeout(mjpegLoadTimeoutRef.current);
         mjpegLoadTimeoutRef.current = null;
       }
+      if (frameRefreshTimerRef.current !== null) {
+        window.clearTimeout(frameRefreshTimerRef.current);
+        frameRefreshTimerRef.current = null;
+      }
     };
   }, []);
 
   useEffect(() => {
-    if (!mjpegUrl) return;
-    setStatus("loading");
+    if (!previewUrl) return;
     if (mjpegLoadTimeoutRef.current !== null) {
       window.clearTimeout(mjpegLoadTimeoutRef.current);
     }
     mjpegLoadTimeoutRef.current = window.setTimeout(() => {
       mjpegLoadTimeoutRef.current = null;
+      if (previewMode === "mjpeg") {
+        setPreviewMode("frame");
+        setPreviewToken((value) => value + 1);
+        return;
+      }
       setStatus("error");
-      scheduleMjpegReconnect();
+      scheduleFrameRefresh(MJPEG_RETRY_DELAY_MS);
     }, MJPEG_LOAD_TIMEOUT_MS);
-  }, [mjpegUrl]);
+  }, [previewMode, previewUrl]);
 
   useEffect(() => {
     let mounted = true;
@@ -453,8 +474,16 @@ export default function CameraTile({
     mjpegRetryTimerRef.current = window.setTimeout(() => {
       mjpegRetryTimerRef.current = null;
       setStatus("loading");
-      setMjpegToken((value) => value + 1);
+      setPreviewToken((value) => value + 1);
     }, MJPEG_RETRY_DELAY_MS);
+  }
+
+  function scheduleFrameRefresh(delay = FRAME_REFRESH_DELAY_MS) {
+    if (frameRefreshTimerRef.current !== null) return;
+    frameRefreshTimerRef.current = window.setTimeout(() => {
+      frameRefreshTimerRef.current = null;
+      setPreviewToken((value) => value + 1);
+    }, delay);
   }
 
   const effectivePreviewZoom = clampWorkerZoom(workerZoom || camera.digitalZoom);
@@ -471,7 +500,7 @@ export default function CameraTile({
           <img
             ref={previewImageRef}
             className="camera-video"
-            src={mjpegUrl}
+            src={previewUrl}
             alt={`${camera.name} preview`}
             onLoad={() => {
               if (mjpegLoadTimeoutRef.current !== null) {
@@ -483,14 +512,23 @@ export default function CameraTile({
                 mjpegRetryTimerRef.current = null;
               }
               setStatus("ready");
+              if (previewMode === "frame") {
+                scheduleFrameRefresh();
+              }
             }}
             onError={() => {
               if (mjpegLoadTimeoutRef.current !== null) {
                 window.clearTimeout(mjpegLoadTimeoutRef.current);
                 mjpegLoadTimeoutRef.current = null;
               }
+              if (previewMode === "mjpeg") {
+                setPreviewMode("frame");
+                setStatus("loading");
+                setPreviewToken((value) => value + 1);
+                return;
+              }
               setStatus("error");
-              scheduleMjpegReconnect();
+              scheduleFrameRefresh(MJPEG_RETRY_DELAY_MS);
             }}
             style={{
               transform: previewTransform,
