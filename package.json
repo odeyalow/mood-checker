@@ -48,6 +48,7 @@
     "@tensorflow/tfjs-node": "^4.22.0",
     "antd": "^6.2.2",
     "bcryptjs": "^3.0.2",
+    "express": "^5.2.1",
     "jose": "^6.1.0",
     "next": "^16.1.4",
     "react": "^19.2.3",
