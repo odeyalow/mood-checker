@@ -10,7 +10,11 @@ const MIN_ZOOM = 1;
 const WORKER_ZOOM_PRESETS = [1, 2, 3, 4, 5];
 const MJPEG_RETRY_DELAY_MS = 1500;
 const MJPEG_LOAD_TIMEOUT_MS = 5000;
-const FRAME_REFRESH_DELAY_MS = 900;
+const FRAME_REFRESH_DELAY_MS = 120;
+const PREVIEW_FRAME_WIDTH = 960;
+const PREVIEW_FRAME_HEIGHT = 540;
+const PREVIEW_FRAME_QUALITY = 68;
+const PREVIEW_FRAME_TIMEOUT_MS = 1600;
 
 type WorkerPerson = {
   name: string;
@@ -229,9 +233,14 @@ export default function CameraTile({
   const previewUrl = useMemo(() => {
     if (!camera.go2rtcSrc) return "";
     if (previewMode === "frame") {
-      const url = new URL(buildFrameApiPath(camera.go2rtcSrc), window.location.origin);
-      url.searchParams.set("v", String(previewToken));
-      return `${url.pathname}?${url.searchParams.toString()}`;
+      const params = new URLSearchParams();
+      params.set("src", camera.go2rtcSrc);
+      params.set("width", String(PREVIEW_FRAME_WIDTH));
+      params.set("height", String(PREVIEW_FRAME_HEIGHT));
+      params.set("quality", String(PREVIEW_FRAME_QUALITY));
+      params.set("timeoutMs", String(PREVIEW_FRAME_TIMEOUT_MS));
+      params.set("v", String(previewToken));
+      return `/api/camera/frame?${params.toString()}`;
     }
     return buildMjpegApiPath(camera.go2rtcSrc, previewToken);
   }, [camera.go2rtcSrc, previewMode, previewToken]);
