@@ -244,7 +244,27 @@ export async function POST(request: Request) {
       qualityWindowByKey.set(key, current);
 
       if (suspicious && current.suspiciousCount > maxSuspiciousPerWindow) {
-        return NextResponse.json({ ok: true, skipped: "quality_guard" });
+        console.warn(
+          `[api/recognitions] quality_guard name=${name} camera=${cameraId || "none"} ` +
+            `score=${Number.isFinite(faceScoreRaw) ? faceScoreRaw.toFixed(3) : "na"} ` +
+            `side=${Number.isFinite(faceSideRaw) ? faceSideRaw.toFixed(1) : "na"} ` +
+            `sharp=${Number.isFinite(faceSharpnessRaw) ? faceSharpnessRaw.toFixed(2) : "na"} ` +
+            `window=${current.suspiciousCount}/${current.totalCount}`,
+        );
+        return NextResponse.json({
+          ok: true,
+          skipped: "quality_guard",
+          quality: {
+            lowScore,
+            lowSide,
+            lowSharpness,
+            minFaceScore,
+            minFaceSidePx,
+            minFaceSharpness,
+            suspiciousCount: current.suspiciousCount,
+            totalCount: current.totalCount,
+          },
+        });
       }
 
       // Best-effort cleanup.

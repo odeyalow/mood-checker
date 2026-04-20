@@ -1183,9 +1183,15 @@ async function postJsonWithTimeout(url, payload, timeoutMs) {
       body: JSON.stringify(payload),
       signal: controller.signal,
     });
+    const body = await res.text().catch(() => "");
     if (!res.ok) {
-      const body = await res.text().catch(() => "");
       throw new Error(`db_http_${res.status}${body ? ` body=${body.slice(0, 180)}` : ""}`);
+    }
+    if (!body) return null;
+    try {
+      return JSON.parse(body);
+    } catch {
+      return body;
     }
   } finally {
     clearTimeout(t);
@@ -1296,7 +1302,21 @@ async function drainDbQueue({
   await Promise.all(
     due.map(async (item) => {
       try {
-        await postJsonWithTimeout(dbEndpoint, item.payload, requestTimeoutMs);
+        const result = await postJsonWithTimeout(dbEndpoint, item.payload, requestTimeoutMs);
+        if (result && typeof result === "object" && !Array.isArray(result)) {
+          const skipped = String(result.skipped || "").trim();
+          if (skipped) {
+            log(
+              `[${logPrefix}] skipped reason=${skipped} name=${String(item.payload?.name || "")} ` +
+                `camera=${String(item.payload?.cameraId || "none")} mood=${String(item.payload?.mood || "")}`,
+            );
+          } else if (result.updated) {
+            log(
+              `[${logPrefix}] updated existing recognition name=${String(item.payload?.name || "")} ` +
+                `camera=${String(item.payload?.cameraId || "none")} mood=${String(item.payload?.mood || "")}`,
+            );
+          }
+        }
         sent += 1;
       } catch (err) {
         item.attempts += 1;
@@ -1439,6 +1459,19 @@ function buildFrameUrl(frameApiBase, src, timeoutMs = Number.NaN) {
   return url.toString();
 }
 
+function buildDefaultFrameApiBase() {
+  const go2rtcBaseUrl = (process.env.GO2RTC_BASE_URL || "http://127.0.0.1:1984").trim() || "http://127.0.0.1:1984";
+  const width = Math.max(160, envInt("GO2RTC_FRAME_WIDTH", 960));
+  const height = Math.max(120, envInt("GO2RTC_FRAME_HEIGHT", 540));
+  const quality = Math.min(100, Math.max(1, envInt("GO2RTC_FRAME_QUALITY", 82)));
+  const url = new URL(go2rtcBaseUrl);
+  url.pathname = `${url.pathname.replace(/\/+$/, "")}/api/frame.jpeg`;
+  url.searchParams.set("width", String(width));
+  url.searchParams.set("height", String(height));
+  url.searchParams.set("quality", String(quality));
+  return url.toString();
+}
+
 async function main() {
   // Worker-local config must win over stale PM2 env values.
   loadEnvFile(path.join(rootDir, ".env.worker"), { override: true });
@@ -1463,14 +1496,14 @@ async function main() {
   const workerZoomStateDir = path.dirname(workerZoomStateFile);
   await fsp.mkdir(workerZoomStateDir, { recursive: true }).catch(() => {});
 
-  const frameApiBase =
-    (process.env.WORKER_FRAME_API_BASE || "http://127.0.0.1:3000/api/camera/frame").replace(/\/+$/, "");
-  const frameTimeoutMs = Math.max(500, envInt("WORKER_FRAME_TIMEOUT_MS", 1200));
+  const frameApiBaseRaw = (process.env.WORKER_FRAME_API_BASE || "").trim();
+  const frameApiBase = (frameApiBaseRaw || buildDefaultFrameApiBase()).replace(/\/+$/, "");
+  const frameTimeoutMs = Math.max(500, envInt("WORKER_FRAME_TIMEOUT_MS", 3000));
   const frameAbortRetryEnabled = envBool("WORKER_FRAME_ABORT_RETRY_ENABLED", true);
-  const frameAbortRetryTimeoutMs = Math.max(500, envInt("WORKER_FRAME_ABORT_RETRY_TIMEOUT_MS", 2500));
+  const frameAbortRetryTimeoutMs = Math.max(500, envInt("WORKER_FRAME_ABORT_RETRY_TIMEOUT_MS", 5200));
   const frameAbortRetryWidth = Math.max(320, envInt("WORKER_FRAME_ABORT_RETRY_WIDTH", 1280));
   const frameAbortRetryHeight = Math.max(180, envInt("WORKER_FRAME_ABORT_RETRY_HEIGHT", 720));
-  const frameAbortRetryQuality = Math.min(100, Math.max(1, envInt("WORKER_FRAME_ABORT_RETRY_QUALITY", 85)));
+  const frameAbortRetryQuality = Math.min(100, Math.max(1, envInt("WORKER_FRAME_ABORT_RETRY_QUALITY", 82)));
   const frameApiTimeoutMs = Math.max(300, frameTimeoutMs - 300);
   const frameAbortRetryApiTimeoutMs = Math.max(500, frameAbortRetryTimeoutMs - 300);
   const imageDecodeTimeoutMs = Math.max(300, envInt("WORKER_IMAGE_DECODE_TIMEOUT_MS", 1500));
@@ -1481,19 +1514,19 @@ async function main() {
   const candidateLogCooldownMs = Math.max(200, envInt("WORKER_CANDIDATE_LOG_COOLDOWN_MS", 700));
   const confirmFrames = Math.max(1, envInt("WORKER_CONFIRM_FRAMES", 1));
   const motionThreshold = envFloat("WORKER_MOTION_THRESHOLD", 1.5);
-  const minConfirmScore = envFloat("WORKER_MIN_CONFIRM_SCORE", 0.14);
+  const minConfirmScore = envFloat("WORKER_MIN_CONFIRM_SCORE", 0.12);
   const personMinScore = envFloat(
     "WORKER_PERSON_MIN_SCORE",
-    Math.max(minConfirmScore, 0.22),
+    Math.max(minConfirmScore, 0.16),
   );
-  const personMinSidePx = Math.max(10, envInt("WORKER_PERSON_MIN_SIDE_PX", 34));
-  const personMinStreak = Math.max(1, envInt("WORKER_PERSON_MIN_STREAK", 2));
+  const personMinSidePx = Math.max(10, envInt("WORKER_PERSON_MIN_SIDE_PX", 20));
+  const personMinStreak = Math.max(1, envInt("WORKER_PERSON_MIN_STREAK", 1));
   const tinyInputSize = envInt("WORKER_TINY_INPUT_SIZE", 512);
   const tinyScoreThreshold = envFloat("WORKER_TINY_SCORE_THRESHOLD", 0.18);
   const ssdMinConfidence = envFloat("WORKER_SSD_MIN_CONFIDENCE", 0.35);
   const useSsdFallback = envBool("WORKER_USE_SSD_FALLBACK", false);
   const fastPassMode = envBool("WORKER_FAST_PASS_MODE", true);
-  const filterMinScore = envFloat("WORKER_FILTER_MIN_SCORE", 0.12);
+  const filterMinScore = envFloat("WORKER_FILTER_MIN_SCORE", 0.09);
   const filterMinSidePx = envInt("WORKER_FILTER_MIN_SIDE_PX", 12);
   const filterMinSideRatio = envFloat("WORKER_FILTER_MIN_SIDE_RATIO", 0.015);
   const filterMinAreaRatio = envFloat("WORKER_FILTER_MIN_AREA_RATIO", 0.0005);
@@ -1501,9 +1534,9 @@ async function main() {
   const filterMinAspect = envFloat("WORKER_FILTER_MIN_ASPECT", 0.52);
   const filterMaxAspect = envFloat("WORKER_FILTER_MAX_ASPECT", 1.9);
   const enableMatching = envBool("WORKER_ENABLE_MATCHING", true);
-  const matchThreshold = envFloat("WORKER_MATCH_THRESHOLD", 0.52);
-  const matchMinMargin = Math.max(0, envFloat("WORKER_MATCH_MIN_MARGIN", 0.035));
-  const matchMinFaceSidePx = Math.max(0, envInt("WORKER_MATCH_MIN_FACE_SIDE_PX", 26));
+  const matchThreshold = envFloat("WORKER_MATCH_THRESHOLD", 0.56);
+  const matchMinMargin = Math.max(0, envFloat("WORKER_MATCH_MIN_MARGIN", 0.04));
+  const matchMinFaceSidePx = Math.max(0, envInt("WORKER_MATCH_MIN_FACE_SIDE_PX", 16));
   const identityMinScore = Math.max(
     0,
     Math.min(1, envFloat("WORKER_IDENTITY_MIN_SCORE", 0.12)),
@@ -1576,8 +1609,8 @@ async function main() {
   const emotionEmaAlpha = Math.max(0, Math.min(1, envFloat("WORKER_EMOTION_EMA_ALPHA", 0.65)));
   const emotionEmaTtlMs = Math.max(2000, envInt("WORKER_EMOTION_EMA_TTL_MS", 12000));
   const dbEndpoint = (process.env.WORKER_DB_ENDPOINT || "http://127.0.0.1:3000/api/recognitions").trim();
-  const dbCooldownMs = Math.max(1000, envInt("WORKER_DB_COOLDOWN_MS", 4000));
-  const dbReentryGapMs = Math.max(300, envInt("WORKER_DB_REENTRY_GAP_MS", 1800));
+  const dbCooldownMs = Math.max(1000, envInt("WORKER_DB_COOLDOWN_MS", 3000));
+  const dbReentryGapMs = Math.max(300, envInt("WORKER_DB_REENTRY_GAP_MS", 1200));
   const dbSeenTtlMs = Math.max(dbCooldownMs * 6, dbReentryGapMs * 6);
   const dbAllowMoodFallback = envBool("WORKER_DB_ALLOW_MOOD_FALLBACK", true);
   const dbFallbackMoodRaw = (process.env.WORKER_DB_FALLBACK_MOOD || "neutral").trim().toLowerCase();

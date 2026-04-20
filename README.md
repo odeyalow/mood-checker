@@ -30,16 +30,16 @@ GO2RTC_FRAME_QUALITY=92
 GO2RTC_FRAME_TIMEOUT_MS=3500
 # Worker timeout fallback for unstable cameras
 WORKER_FRAME_ABORT_RETRY_ENABLED=true
-WORKER_FRAME_ABORT_RETRY_TIMEOUT_MS=2500
+WORKER_FRAME_ABORT_RETRY_TIMEOUT_MS=5200
 WORKER_FRAME_ABORT_RETRY_WIDTH=1280
 WORKER_FRAME_ABORT_RETRY_HEIGHT=720
-WORKER_FRAME_ABORT_RETRY_QUALITY=85
+WORKER_FRAME_ABORT_RETRY_QUALITY=82
 # Optional explicit worker override (otherwise worker inherits camera zoom from .env)
 # WORKER_CAMERA_ZOOMS=cam-01=1
 # Optional per-camera quality profiles
-# WORKER_CAMERA_SETTINGS_JSON={"cam-01":{"matchThreshold":0.50,"frameOffsetY":0}}
+# WORKER_CAMERA_SETTINGS_JSON={"cam-01":{"matchThreshold":0.56,"matchMinMargin":0.04,"frameOffsetY":0}}
 # Re-entry writes a new recognition event when person reappears after short absence
-# WORKER_DB_REENTRY_GAP_MS=1800
+# WORKER_DB_REENTRY_GAP_MS=1200
 # Emotion fallback for weak confidence (prevents missing events in distance/zoom scenes)
 # WORKER_EMOTION_LOW_CONFIDENCE_FLOOR=0.18
 # WORKER_EMOTION_ALLOW_LOW_CONFIDENCE_LABEL=true
@@ -59,8 +59,8 @@ Notes:
 - `GO2RTC_FRAME_WIDTH/HEIGHT/QUALITY` control snapshot resolution/quality for worker recognition (`/api/camera/frame`).
 - `NEXT_PUBLIC_ENABLE_WEBCAM_TILE=true` enables the local webcam tile for debugging.
 - `NEXT_PUBLIC_DETECTION_MODE=worker` disables browser-side face detection and shows worker live status under camera tiles.
-- Recommended worker source:
-  `WORKER_FRAME_API_BASE=http://127.0.0.1:1984/api/frame.jpeg?width=960&height=540&quality=82`
+- If `WORKER_FRAME_API_BASE` is empty, the worker now derives a direct go2rtc frame endpoint from `GO2RTC_BASE_URL` and `GO2RTC_FRAME_*`. This keeps worker snapshots independent from the Next.js app and removes one common boot-order failure on clean deploys.
+- `.env.worker.example` now ships with the balanced single-camera baseline. For a clean deploy, copying it as-is is enough to start with the tuned defaults.
 
 ## Node detection worker
 
@@ -87,6 +87,12 @@ Optional identity env (app process):
 - `FACE_IDENTITY_MATCH_THRESHOLD=0.56`
 - `FACE_IDENTITY_POSTCHECK_THRESHOLD=0.60` (optional, background duplicate cleanup threshold)
 - `FACE_IDENTITY_DESCRIPTOR_ALPHA=0.2`
+- `RECOGNITION_QUALITY_GUARD_ENABLED=true`
+- `RECOGNITION_MIN_FACE_SCORE=0.12`
+- `RECOGNITION_MIN_FACE_SIDE_PX=20`
+- `RECOGNITION_MIN_FACE_SHARPNESS=7`
+
+When app-side quality guard drops a recognition, both `/api/recognitions` and the worker DB queue now log the skip reason explicitly. This makes it visible when the worker matched someone but the app intentionally refused to save a low-quality event.
 
 Face registry maintenance:
 - `npm run faces:clear` - remove all registered faces and related snapshots/records.
@@ -116,14 +122,14 @@ Verify:
 pm2 logs mood-checker-worker --lines 80
 ```
 
-Apply balanced worker profile:
+Re-apply the balanced worker baseline:
 
 ```bash
 npm run worker:profile:balanced
 pm2 restart mood-checker-worker --update-env
 ```
 
-Restore pre-request profile (the values used before latest strict tuning):
+Restore the legacy pre-request profile:
 
 ```bash
 npm run worker:profile:pre-request
