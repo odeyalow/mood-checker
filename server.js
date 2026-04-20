@@ -1,7 +1,6 @@
 const http = require("http");
 const express = require("express");
 const next = require("next");
-const rtspRelay = require("rtsp-relay");
 const path = require("path");
 const dev = process.argv.includes("--dev");
 process.env.NODE_ENV = dev ? "development" : "production";
@@ -90,47 +89,11 @@ app
   .then(() => {
     const expressApp = express();
     const server = http.createServer(expressApp);
-    const { proxy } = rtspRelay(expressApp, server);
     const publicDir = path.join(__dirname, "public");
 
     // Serve worker/face snapshots directly to avoid Next.js 404 on underscored paths.
     expressApp.use("/_faces", express.static(path.join(publicDir, "_faces")));
     expressApp.use("/_worker-snaps", express.static(path.join(publicDir, "_worker-snaps")));
-
-    expressApp.ws("/api/stream", (ws, req) => {
-      ws.on("error", (error) => {
-        if (isIgnorableWsError(error)) return;
-        console.error("[ws] Stream socket error:", error);
-      });
-
-      const rawUrl = req.query?.url;
-      const url = Array.isArray(rawUrl) ? rawUrl[0] : rawUrl;
-      const zoom = parseZoomParam(req.query?.zoom);
-
-      if (typeof url !== "string" || !url.startsWith("rtsp://")) {
-        ws.close(1008, "invalid_rtsp_url");
-        return;
-      }
-
-      try {
-        const filter = buildVideoFilter(zoom);
-        const additionalFlags = ["-q", String(previewQuality), "-r", String(previewFrameRate)];
-        if (filter) {
-          additionalFlags.push("-vf", filter);
-        }
-
-        const handler = proxy({
-          url,
-          transport: "tcp",
-          additionalFlags,
-          verbose: false,
-        });
-        handler(ws);
-      } catch (error) {
-        console.error("[ws] Failed to attach stream handler:", error);
-        ws.close(1011, "stream_handler_error");
-      }
-    });
 
     expressApp.use((req, res) => handle(req, res));
 
