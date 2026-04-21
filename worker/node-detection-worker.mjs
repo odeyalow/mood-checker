@@ -1370,6 +1370,7 @@ function createEmptyCameraStatus({ workerZoom = 1, workerOffsetY = 0, frameError
     people: [],
     emotionSummary: "",
     topEmotion: "",
+    previewUrl: "",
     snapshotUrl: "",
     lastRecognitionAt: "",
     frameOk: false,
@@ -1417,6 +1418,7 @@ function createState(cameraId, src) {
     people: [],
     emotionSummary: "",
     topEmotion: "",
+    previewUrl: "",
     snapshotUrl: "",
     frameOk: false,
     lastFrameAt: 0,
@@ -1431,6 +1433,7 @@ function createState(cameraId, src) {
     lastMatchAt: 0,
     lastSnapshotAt: 0,
     lastSnapshotSavedAt: 0,
+    lastPreviewSavedAt: 0,
     snapshotSavedCount: 0,
     lastEmotionAt: 0,
     lastBestBox: null,
@@ -1466,6 +1469,14 @@ function buildFrameUrl(frameApiBase, src, timeoutMs = Number.NaN) {
     url.searchParams.set("timeoutMs", String(Math.floor(timeoutMs)));
   }
   return url.toString();
+}
+
+async function writeFileAtomic(filePath, buffer) {
+  const dir = path.dirname(filePath);
+  await fsp.mkdir(dir, { recursive: true }).catch(() => {});
+  const tmp = `${filePath}.tmp`;
+  await fsp.writeFile(tmp, buffer);
+  await fsp.rename(tmp, filePath);
 }
 
 function buildDefaultFrameApiBase() {
@@ -1637,6 +1648,17 @@ async function main() {
     /\/+$/,
     "",
   );
+  const workerPreviewEnabled = envBool("WORKER_PREVIEW_ENABLED", true);
+  const workerPreviewDir =
+    process.env.WORKER_PREVIEW_DIR || path.join(rootDir, "public", "_worker-live");
+  const workerPreviewPublicBase = (
+    process.env.WORKER_PREVIEW_PUBLIC_BASE || "/_worker-live"
+  ).replace(/\/+$/, "");
+  const workerPreviewIntervalMs = Math.max(0, envInt("WORKER_PREVIEW_INTERVAL_MS", 0));
+  const workerPreviewQuality = Math.min(
+    0.98,
+    Math.max(0.4, envFloat("WORKER_PREVIEW_QUALITY", 0.82)),
+  );
   const faceRegistryEndpoint = (
     process.env.WORKER_FACE_REGISTRY_ENDPOINT || "http://127.0.0.1:3000/api/faces/registry"
   ).trim();
@@ -1773,6 +1795,9 @@ async function main() {
 
   if (saveSnapshots) {
     await fsp.mkdir(snapshotDir, { recursive: true }).catch(() => {});
+  }
+  if (workerPreviewEnabled) {
+    await fsp.mkdir(workerPreviewDir, { recursive: true }).catch(() => {});
   }
   if (faceArchiveEnabled) {
     await fsp.mkdir(faceArchiveDir, { recursive: true }).catch(() => {});
@@ -3033,6 +3058,27 @@ async function main() {
         workerWidth,
         workerHeight,
       );
+
+      if (
+        workerPreviewEnabled &&
+        now - Number(cam.lastPreviewSavedAt || 0) >= workerPreviewIntervalMs
+      ) {
+        try {
+          const previewBuffer = Buffer.from(
+            canvas.toBuffer("image/jpeg", { quality: workerPreviewQuality }),
+          );
+          const previewFile = path.join(workerPreviewDir, `${cam.cameraId}.jpg`);
+          await writeFileAtomic(previewFile, previewBuffer);
+          cam.previewUrl = `${workerPreviewPublicBase}/${cam.cameraId}.jpg?v=${now}`;
+          cam.lastPreviewSavedAt = now;
+        } catch (err) {
+          if (now - cam.lastErrLogAt >= 2000) {
+            log(`[${cam.cameraId}] worker preview save error: ${String(err)}`);
+            cam.lastErrLogAt = now;
+          }
+        }
+      }
+
       const rgba = ctx.getImageData(0, 0, workerWidth, workerHeight).data;
       const rgb = rgbaToRgbTensorData(rgba);
       const frameTensor = faceapi.tf.tensor3d(rgb, [workerHeight, workerWidth, 3], "int32");
@@ -3946,6 +3992,7 @@ async function main() {
             people: cam.people,
             emotionSummary: cam.emotionSummary,
             topEmotion: cam.topEmotion,
+            previewUrl: cam.previewUrl,
             snapshotUrl: cam.snapshotUrl,
             snapshotSavedCount: Number.isFinite(cam.snapshotSavedCount) ? cam.snapshotSavedCount : 0,
             lastRecognitionAt: cam.lastRecognitionAt ? new Date(cam.lastRecognitionAt).toISOString() : "",

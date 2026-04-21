@@ -12,7 +12,7 @@ const MJPEG_RETRY_DELAY_MS = 1500;
 const MJPEG_LOAD_TIMEOUT_MS = 5000;
 const MJPEG_MAX_RECOVERY_ATTEMPTS = 2;
 
-type PreviewMode = "mjpeg-direct" | "mjpeg-proxy" | "frame";
+type PreviewMode = "worker" | "mjpeg-direct" | "mjpeg-proxy" | "frame";
 
 function parseClientEnvInt(
   rawValue: string | undefined,
@@ -29,6 +29,7 @@ function parsePreviewMode(rawValue: string | undefined, fallback: PreviewMode): 
   const normalized = String(rawValue || "")
     .trim()
     .toLowerCase();
+  if (normalized === "worker") return "worker";
   if (normalized === "mjpeg" || normalized === "mjpeg-direct") return "mjpeg-direct";
   if (normalized === "mjpeg-proxy") return "mjpeg-proxy";
   if (normalized === "frame") return "frame";
@@ -37,7 +38,7 @@ function parsePreviewMode(rawValue: string | undefined, fallback: PreviewMode): 
 
 const DEFAULT_PREVIEW_MODE = parsePreviewMode(
   process.env.NEXT_PUBLIC_CAMERA_PREVIEW_MODE,
-  "mjpeg-direct",
+  "worker",
 );
 const FRAME_REFRESH_DELAY_MS = parseClientEnvInt(
   process.env.NEXT_PUBLIC_CAMERA_PREVIEW_REFRESH_MS,
@@ -97,6 +98,7 @@ type WorkerStatus = {
   matchedNames?: string[];
   topEmotion?: string;
   people?: WorkerPerson[];
+  previewUrl?: string;
   snapshotUrl?: string;
   lastRecognitionAt?: string;
   frameOk?: boolean;
@@ -301,6 +303,7 @@ export default function CameraTile({
   const [previewMode, setPreviewMode] = useState<PreviewMode>(DEFAULT_PREVIEW_MODE);
   const [previewToken, setPreviewToken] = useState(0);
   const [go2rtcPublicBaseUrl, setGo2rtcPublicBaseUrl] = useState("");
+  const [workerPreviewUrl, setWorkerPreviewUrl] = useState("");
   const [people, setPeople] = useState<WorkerPerson[]>([]);
   const [snapshotUrl, setSnapshotUrl] = useState("");
   const [snapshotWho, setSnapshotWho] = useState("");
@@ -314,6 +317,9 @@ export default function CameraTile({
 
   const previewUrl = useMemo(() => {
     if (!camera.go2rtcSrc) return "";
+    if (previewMode === "worker") {
+      return workerPreviewUrl;
+    }
     if (previewMode === "frame") {
       const params = new URLSearchParams();
       params.set("src", camera.go2rtcSrc);
@@ -328,7 +334,7 @@ export default function CameraTile({
       return buildDirectMjpegUrl(go2rtcPublicBaseUrl, camera.go2rtcSrc, previewToken);
     }
     return buildMjpegApiPath(camera.go2rtcSrc, previewToken);
-  }, [camera.go2rtcSrc, go2rtcPublicBaseUrl, previewMode, previewToken]);
+  }, [camera.go2rtcSrc, go2rtcPublicBaseUrl, previewMode, previewToken, workerPreviewUrl]);
 
   useEffect(() => {
     const explicitBase = String(process.env.NEXT_PUBLIC_GO2RTC_BASE_URL || "").trim();
@@ -352,6 +358,7 @@ export default function CameraTile({
     setWorkerOffsetY(clampFrameOffsetY(camera.frameOffsetY));
     setPreviewMode(DEFAULT_PREVIEW_MODE);
     setPreviewToken(0);
+    setWorkerPreviewUrl("");
     setStatus("loading");
     frameSizeRef.current = { width: 0, height: 0 };
     lastSnapshotKeyRef.current = "";
@@ -392,6 +399,7 @@ export default function CameraTile({
 
   useEffect(() => {
     if (!previewUrl) return;
+    if (previewMode === "worker") return;
     if (mjpegLoadTimeoutRef.current !== null) {
       window.clearTimeout(mjpegLoadTimeoutRef.current);
     }
@@ -432,6 +440,7 @@ export default function CameraTile({
             width: Number.isFinite(Number(ws.frameWidth)) ? Number(ws.frameWidth) : 0,
             height: Number.isFinite(Number(ws.frameHeight)) ? Number(ws.frameHeight) : 0,
           };
+          setWorkerPreviewUrl(typeof ws.previewUrl === "string" ? ws.previewUrl : "");
 
           const nextPeople = Array.isArray(ws.people)
             ? ws.people
@@ -670,6 +679,10 @@ export default function CameraTile({
               if (mjpegLoadTimeoutRef.current !== null) {
                 window.clearTimeout(mjpegLoadTimeoutRef.current);
                 mjpegLoadTimeoutRef.current = null;
+              }
+              if (previewMode === "worker") {
+                setStatus(previewHadSuccessRef.current ? "ready" : "error");
+                return;
               }
               if (isMjpegPreviewMode(previewMode)) {
                 handleMjpegPreviewFailure();
