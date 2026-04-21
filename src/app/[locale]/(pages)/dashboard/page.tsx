@@ -21,6 +21,7 @@ const L10N = {
     emotionDynamics: "Динамика эмоций",
     dynamicsHint: "Обновляется раз в минуту, окно 24 часа.",
     recentRecognitions: "Последние распознавания",
+    noRecognitions: "Пока нет распознаваний",
     loadError: "Ошибка загрузки",
     connectionError: "Ошибка соединения",
     noChange: "Без изменений к прошлому дню",
@@ -36,6 +37,7 @@ const L10N = {
     emotionDynamics: "Эмоция динамикасы",
     dynamicsHint: "Әр минут сайын жаңарады, терезе 24 сағат.",
     recentRecognitions: "Соңғы танулар",
+    noRecognitions: "Әзірге танулар жоқ",
     loadError: "Жүктеу қатесі",
     connectionError: "Байланыс қатесі",
     noChange: "Өткен күнмен салыстырғанда өзгеріс жоқ",
@@ -51,6 +53,7 @@ const L10N = {
     emotionDynamics: "Emotion Dynamics",
     dynamicsHint: "Updated every minute, window is 24 hours.",
     recentRecognitions: "Recent Recognitions",
+    noRecognitions: "No recognitions yet",
     loadError: "Load error",
     connectionError: "Connection error",
     noChange: "No change vs previous day",
@@ -234,6 +237,7 @@ export default function DashboardPage({
           <Card title={t.recentRecognitions} className="soft-card">
             <Space orientation="vertical" size={16} style={{ width: "100%" }}>
               {loadError ? <Text type="danger">{loadError}</Text> : null}
+              {!loadError && recentEvents.length === 0 ? <Text type="secondary">{t.noRecognitions}</Text> : null}
               {recentEvents.map((item) => (
                 <div
                   key={item.id}
@@ -245,9 +249,9 @@ export default function DashboardPage({
                   }}
                 >
                   <Space>
-                    <Avatar>{item.name[0]}</Avatar>
+                    <Avatar>{(item.name || "?").trim().charAt(0).toUpperCase() || "?"}</Avatar>
                     <div>
-                      <Text strong>{item.name}</Text>
+                      <Text strong>{item.name || "Unknown"}</Text>
                       <div>
                         <Text type="secondary">{formatDetectedAt(item.detectedAt, safeLocale)}</Text>
                       </div>

@@ -7,6 +7,13 @@ import { normalizeDescriptor } from "@/lib/faces";
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
 
+type RecognitionListItem = {
+  id: string;
+  name: string;
+  mood: string;
+  detectedAt: Date;
+};
+
 const BLOCKED_IDS_FILE =
   process.env.WORKER_BLOCKED_FACE_IDS_FILE || path.join(process.cwd(), "worker", "blocked-face-ids.json");
 const BLOCKED_IDS_RELOAD_MS = Math.max(
@@ -168,8 +175,22 @@ export async function GET(request: Request) {
     const items = await prisma.recognition.findMany({
       orderBy: { detectedAt: "desc" },
       take: limit,
+      select: {
+        id: true,
+        name: true,
+        mood: true,
+        detectedAt: true,
+      },
     });
-    return NextResponse.json({ items });
+
+    const normalizedItems: RecognitionListItem[] = items.map((item) => ({
+      id: item.id,
+      name: String(item.name || "Unknown").trim() || "Unknown",
+      mood: String(item.mood || "neutral").trim() || "neutral",
+      detectedAt: item.detectedAt,
+    }));
+
+    return NextResponse.json({ items: normalizedItems });
   } catch (error) {
     console.error("[api/recognitions] GET failed", error);
     return NextResponse.json({ items: [], error: "recognitions_unavailable" });
