@@ -16,6 +16,7 @@ const L10N = {
     noData: "\u041b\u0438\u0446\u0430 \u043f\u043e\u043a\u0430 \u043d\u0435 \u0437\u0430\u0440\u0435\u0433\u0438\u0441\u0442\u0440\u0438\u0440\u043e\u0432\u0430\u043d\u044b",
     noImage: "\u041d\u0435\u0442 \u0441\u043d\u0438\u043c\u043a\u0430",
     detections: "\u0420\u0430\u0441\u043f\u043e\u0437\u043d\u0430\u0432\u0430\u043d\u0438\u0439",
+    mood: "\u042d\u043c\u043e\u0446\u0438\u044f",
     open: "\u041e\u0442\u043a\u0440\u044b\u0442\u044c",
     delete: "\u0423\u0434\u0430\u043b\u0438\u0442\u044c",
     deleteConfirm: "\u0423\u0434\u0430\u043b\u0438\u0442\u044c \u043b\u0438\u0446\u043e?",
@@ -30,6 +31,7 @@ const L10N = {
     noData: "\u04d8\u0437\u0456\u0440\u0433\u0435 \u0441\u0430\u049b\u0442\u0430\u043b\u0493\u0430\u043d \u0442\u04b1\u043b\u0493\u0430\u043b\u0430\u0440 \u0436\u043e\u049b",
     noImage: "\u0421\u0443\u0440\u0435\u0442 \u0436\u043e\u049b",
     detections: "\u0422\u0430\u043d\u0443\u043b\u0430\u0440",
+    mood: "\u042d\u043c\u043e\u0446\u0438\u044f",
     open: "\u0410\u0448\u0443",
     delete: "\u0416\u043e\u044e",
     deleteConfirm: "\u0422\u04b1\u043b\u0493\u0430\u043d\u044b \u0436\u043e\u044e \u043a\u0435\u0440\u0435\u043a \u043f\u0435?",
@@ -44,6 +46,7 @@ const L10N = {
     noData: "No registered faces yet",
     noImage: "No image",
     detections: "Recognitions",
+    mood: "Mood",
     open: "Open",
     delete: "Delete",
     deleteConfirm: "Delete this face?",
@@ -60,6 +63,7 @@ type FaceCard = {
   recognitionCount: number;
   snapshotUrl: string;
   lastDetectedAt: string;
+  lastMood?: string;
 };
 
 function formatDateTime(value: string, locale: AppLocale) {
@@ -197,6 +201,7 @@ export default function FacesPage({
                     <Space direction="vertical" size={6} style={{ width: "100%" }}>
                       <Text strong>{item.shortId}</Text>
                       <Tag>{`${t.detections}: ${item.recognitionCount}`}</Tag>
+                      {item.lastMood ? <Tag color="blue">{`${t.mood}: ${item.lastMood}`}</Tag> : null}
                       {item.lastDetectedAt ? (
                         <Text type="secondary">{formatDateTime(item.lastDetectedAt, safeLocale)}</Text>
                       ) : null}

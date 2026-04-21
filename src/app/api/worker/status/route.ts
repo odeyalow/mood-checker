@@ -17,6 +17,8 @@ type WorkerStatusCamera = {
   workerOffsetY?: number;
   emotionSummary?: string;
   topEmotion?: string;
+  lastRecognitionEmotion?: string;
+  lastRecognitionMood?: string;
   people?: { name: string; emotion?: string; emotionConfidence?: number; distance?: number }[];
   previewUrl?: string;
   snapshotUrl?: string;

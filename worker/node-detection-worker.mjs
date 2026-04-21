@@ -1370,6 +1370,8 @@ function createEmptyCameraStatus({ workerZoom = 1, workerOffsetY = 0, frameError
     people: [],
     emotionSummary: "",
     topEmotion: "",
+    lastRecognitionEmotion: "",
+    lastRecognitionMood: "",
     previewUrl: "",
     snapshotUrl: "",
     lastRecognitionAt: "",
@@ -1418,6 +1420,8 @@ function createState(cameraId, src) {
     people: [],
     emotionSummary: "",
     topEmotion: "",
+    lastRecognitionEmotion: "",
+    lastRecognitionMood: "",
     previewUrl: "",
     snapshotUrl: "",
     frameOk: false,
@@ -3185,6 +3189,8 @@ async function main() {
           cam.people = [];
           cam.emotionSummary = "";
           cam.topEmotion = "";
+          cam.lastRecognitionEmotion = "";
+          cam.lastRecognitionMood = "";
           cam.lastRecognitionAt = 0;
           cam.identityLockName = "";
           cam.identityLockDistance = 0;
@@ -3673,6 +3679,12 @@ async function main() {
               if (!person.emotion && resolvedEmotionLabel) {
                 person.emotion = resolvedEmotionLabel;
               }
+              const effectiveEmotionLabel =
+                String(person.emotion || "").trim() ||
+                String(resolvedEmotionLabel || "").trim() ||
+                String(moodLabel || "").trim();
+              cam.lastRecognitionMood = String(moodLabel || "").trim();
+              cam.lastRecognitionEmotion = effectiveEmotionLabel;
               person.emotionConfidence = Number(
                 Number.isFinite(resolvedEmotionConfidence)
                   ? resolvedEmotionConfidence
@@ -3749,6 +3761,8 @@ async function main() {
           cam.people = [];
           cam.emotionSummary = "";
           cam.topEmotion = "";
+          cam.lastRecognitionEmotion = "";
+          cam.lastRecognitionMood = "";
           cam.identityLockName = "";
           cam.identityLockDistance = 0;
           cam.identityLockUntil = 0;
@@ -3779,6 +3793,8 @@ async function main() {
       cam.people = [];
       cam.emotionSummary = "";
       cam.topEmotion = "";
+      cam.lastRecognitionEmotion = "";
+      cam.lastRecognitionMood = "";
       cam.lastRecognitionAt = 0;
       cam.identityLockName = "";
       cam.identityLockDistance = 0;
@@ -3840,6 +3856,8 @@ async function main() {
       cam.people = [];
       cam.emotionSummary = "";
       cam.topEmotion = "";
+      cam.lastRecognitionEmotion = "";
+      cam.lastRecognitionMood = "";
       cam.lastRecognitionAt = 0;
       cam.identityLockName = "";
       cam.identityLockDistance = 0;
@@ -3992,6 +4010,8 @@ async function main() {
             people: cam.people,
             emotionSummary: cam.emotionSummary,
             topEmotion: cam.topEmotion,
+            lastRecognitionEmotion: cam.lastRecognitionEmotion,
+            lastRecognitionMood: cam.lastRecognitionMood,
             previewUrl: cam.previewUrl,
             snapshotUrl: cam.snapshotUrl,
             snapshotSavedCount: Number.isFinite(cam.snapshotSavedCount) ? cam.snapshotSavedCount : 0,

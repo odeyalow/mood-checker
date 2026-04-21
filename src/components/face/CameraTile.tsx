@@ -96,6 +96,8 @@ type WorkerStatus = {
   faceInFrame?: boolean;
   matchedNames?: string[];
   topEmotion?: string;
+  lastRecognitionEmotion?: string;
+  lastRecognitionMood?: string;
   people?: WorkerPerson[];
   previewUrl?: string;
   snapshotUrl?: string;
@@ -445,8 +447,14 @@ export default function CameraTile({
             : names.map((name) => ({ name, emotion: "" }));
           const emotion =
             emotionSummaryFromPeople(nextPeople) ||
+            (typeof ws.lastRecognitionEmotion === "string" && ws.lastRecognitionEmotion.trim().length > 0
+              ? ws.lastRecognitionEmotion.trim()
+              : "") ||
             (typeof ws.topEmotion === "string" && ws.topEmotion.trim().length > 0
               ? ws.topEmotion.trim()
+              : "") ||
+            (typeof ws.lastRecognitionMood === "string" && ws.lastRecognitionMood.trim().length > 0
+              ? ws.lastRecognitionMood.trim()
               : "");
           setPeople(nextPeople);
 

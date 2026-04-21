@@ -6,6 +6,14 @@ import path from "node:path";
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
 
+type FaceRecognitionMeta = {
+  id: string;
+  mood: string;
+  cameraId: string;
+  detectedAt: string;
+  snapshotUrl: string;
+};
+
 function sanitizeShortId(shortId: string) {
   return shortId.replace(/[^A-Za-z0-9_-]/g, "").slice(0, 32);
 }
@@ -69,6 +77,36 @@ async function listDiskSnapshots(shortId: string, limit = 5) {
     }));
 }
 
+function enrichDiskSnapshotsWithRecognitionMeta(diskItems: Array<{
+  id: string;
+  snapshotUrl: string;
+  mood: string;
+  cameraId: string;
+  detectedAt: string;
+}>, recognitionItems: FaceRecognitionMeta[]) {
+  return diskItems.map((diskItem) => {
+    const diskTs = new Date(diskItem.detectedAt).getTime();
+    if (!Number.isFinite(diskTs)) return diskItem;
+    let best: FaceRecognitionMeta | null = null;
+    let bestDiff = Number.POSITIVE_INFINITY;
+    for (const recognition of recognitionItems) {
+      const recTs = new Date(recognition.detectedAt).getTime();
+      if (!Number.isFinite(recTs)) continue;
+      const diff = Math.abs(recTs - diskTs);
+      if (diff < bestDiff) {
+        bestDiff = diff;
+        best = recognition;
+      }
+    }
+    if (!best) return diskItem;
+    return {
+      ...diskItem,
+      mood: diskItem.mood || best.mood || "",
+      cameraId: diskItem.cameraId || best.cameraId || "",
+    };
+  });
+}
+
 async function removeFaceSnapshots(shortId: string) {
   const safeId = sanitizeShortId(shortId);
   if (!safeId) return;
@@ -100,13 +138,12 @@ export async function GET(
       return NextResponse.json({ error: "not_found" }, { status: 404 });
     }
 
-    const images = await prisma.recognition.findMany({
+    const recognitions = await prisma.recognition.findMany({
       where: {
         OR: [
           { faceIdentityId: face.id },
           { name: face.shortId },
         ],
-        snapshotUrl: { not: null },
       },
       orderBy: { detectedAt: "desc" },
       take: 200,
@@ -118,6 +155,14 @@ export async function GET(
         snapshotUrl: true,
       },
     });
+    const recognitionItems: FaceRecognitionMeta[] = recognitions.map((item) => ({
+      id: item.id,
+      snapshotUrl: item.snapshotUrl || "",
+      mood: String(item.mood || "").trim(),
+      cameraId: String(item.cameraId || "").trim(),
+      detectedAt: item.detectedAt.toISOString(),
+    }));
+    const images = recognitions.filter((item) => Boolean(item.snapshotUrl));
     const validImages = (
       await Promise.all(
         images.map(async (item) => ({
@@ -129,7 +174,10 @@ export async function GET(
       .filter((entry) => entry.ok)
       .map((entry) => entry.item);
 
-    const diskFallback = await listDiskSnapshots(face.shortId, 5);
+    const diskFallback = enrichDiskSnapshotsWithRecognitionMeta(
+      await listDiskSnapshots(face.shortId, 5),
+      recognitionItems,
+    );
     const dbImages = validImages.map((item) => ({
       id: item.id,
       snapshotUrl: item.snapshotUrl || "",

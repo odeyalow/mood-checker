@@ -6,6 +6,14 @@ import path from "node:path";
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
 
+type LatestRecognitionMeta = {
+  faceIdentityId: string;
+  mood: string;
+  cameraId: string;
+  detectedAt: Date;
+  snapshotUrl: string | null;
+};
+
 function parseLimit(raw: string | null, fallback = 100) {
   const n = Number.parseInt(raw ?? "", 10);
   if (!Number.isFinite(n)) return fallback;
@@ -93,19 +101,20 @@ export async function GET(request: Request) {
     const ids = identities.map((item) => item.id);
     const shortIds = identities.map((item) => item.shortId);
     const idByShortId = new Map(identities.map((item) => [item.shortId, item.id]));
-    const latestWithSnapshot = ids.length
+    const latestRecognitionsRaw = ids.length
       ? await prisma.recognition.findMany({
           where: {
             OR: [
               { faceIdentityId: { in: ids } },
               { name: { in: shortIds } },
             ],
-            snapshotUrl: { not: null },
           },
           orderBy: { detectedAt: "desc" },
           select: {
             faceIdentityId: true,
             name: true,
+            mood: true,
+            cameraId: true,
             snapshotUrl: true,
             detectedAt: true,
           },
@@ -113,15 +122,32 @@ export async function GET(request: Request) {
         })
       : [];
 
+    const latestRecognitions = latestRecognitionsRaw.map((item) => ({
+      faceIdentityId:
+        String(item.faceIdentityId ?? "") || String(idByShortId.get(String(item.name ?? "")) ?? ""),
+      mood: String(item.mood ?? "").trim(),
+      cameraId: String(item.cameraId ?? "").trim(),
+      snapshotUrl: item.snapshotUrl,
+      detectedAt: item.detectedAt,
+    })) as LatestRecognitionMeta[];
+
     const latestByFaceId = new Map<
+      string,
+      LatestRecognitionMeta
+    >();
+    for (const item of latestRecognitions) {
+      const faceIdentityId = item.faceIdentityId;
+      if (!faceIdentityId || latestByFaceId.has(faceIdentityId)) continue;
+      latestByFaceId.set(faceIdentityId, item);
+    }
+
+    const latestSnapshotByFaceId = new Map<
       string,
       { snapshotUrl: string | null; detectedAt: Date }
     >();
-    for (const item of latestWithSnapshot) {
-      const faceIdentityId =
-        String(item.faceIdentityId ?? "") || String(idByShortId.get(String(item.name ?? "")) ?? "");
-      if (!faceIdentityId || latestByFaceId.has(faceIdentityId)) continue;
-      latestByFaceId.set(faceIdentityId, {
+    for (const item of latestRecognitions) {
+      if (!item.faceIdentityId || latestSnapshotByFaceId.has(item.faceIdentityId) || !item.snapshotUrl) continue;
+      latestSnapshotByFaceId.set(item.faceIdentityId, {
         snapshotUrl: item.snapshotUrl,
         detectedAt: item.detectedAt,
       });
@@ -138,16 +164,19 @@ export async function GET(request: Request) {
     const items = await Promise.all(
       identities.map(async (identity) => {
         const latest = latestByFaceId.get(identity.id);
+        const latestSnapshot = latestSnapshotByFaceId.get(identity.id);
         const disk = diskByFaceId.get(identity.id);
-        const latestSnapshotOk = await snapshotExists(latest?.snapshotUrl);
+        const latestSnapshotOk = await snapshotExists(latestSnapshot?.snapshotUrl);
         return {
           id: identity.id,
           shortId: identity.shortId,
           recognitionCount: identity._count.recognitions,
-          snapshotUrl: latestSnapshotOk ? latest?.snapshotUrl || "" : disk?.snapshotUrl || "",
+          snapshotUrl: latestSnapshotOk ? latestSnapshot?.snapshotUrl || "" : disk?.snapshotUrl || "",
           lastDetectedAt: latestSnapshotOk
-            ? latest?.detectedAt?.toISOString() || ""
+            ? latestSnapshot?.detectedAt?.toISOString() || ""
             : disk?.detectedAt || "",
+          lastMood: latest?.mood || "",
+          lastCameraId: latest?.cameraId || "",
           createdAt: identity.createdAt.toISOString(),
         };
       }),
