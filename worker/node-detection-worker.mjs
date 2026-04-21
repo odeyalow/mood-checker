@@ -439,9 +439,11 @@ function parseEmotionFromExpressions(expressions, keys) {
     const safe = Number.isFinite(v) ? Math.max(0, v) : 0;
     vector[k] = safe;
     let effective = safe;
-    if (k === "neutral") effective *= 1.18;
-    if (k === "sad") effective *= 0.94;
-    if (k === "angry") effective *= 0.9;
+    if (k === "neutral") effective *= 1.08;
+    if (k === "happy") effective *= 1.04;
+    if (k === "surprised") effective *= 1.03;
+    if (k === "sad") effective *= 0.97;
+    if (k === "angry") effective *= 0.95;
     adjusted[k] = effective;
     if (effective > topVal) {
       topVal = effective;
@@ -453,7 +455,7 @@ function parseEmotionFromExpressions(expressions, keys) {
   if (neutral > 0 && topKey && topKey !== "neutral") {
     const topAdjusted = Number(adjusted[topKey] ?? 0);
     const neutralAdjusted = Number(adjusted.neutral ?? neutral);
-    if (neutralAdjusted > 0 && topAdjusted - neutralAdjusted <= 0.05) {
+    if (neutralAdjusted > 0 && topAdjusted - neutralAdjusted <= 0.025) {
       topKey = "neutral";
     }
   }
@@ -1570,8 +1572,8 @@ async function main() {
     0,
     envFloat("WORKER_IDENTITY_LOCK_SWITCH_MARGIN", 0.02),
   );
-  const identifyMinIntervalMs = Math.max(400, envInt("WORKER_IDENTIFY_MIN_INTERVAL_MS", 1500));
-  const autoCreateCooldownMs = Math.max(0, envInt("WORKER_AUTO_CREATE_COOLDOWN_MS", 4500));
+  const identifyMinIntervalMs = Math.max(350, envInt("WORKER_IDENTIFY_MIN_INTERVAL_MS", 900));
+  const autoCreateCooldownMs = Math.max(0, envInt("WORKER_AUTO_CREATE_COOLDOWN_MS", 2200));
   const requireFrontalFace = envBool("WORKER_REQUIRE_FRONTAL_FACE", true);
   const frontalMinEyeDistanceRatio = Math.max(
     0.05,
@@ -1587,10 +1589,10 @@ async function main() {
   const enableEmotions = envBool("WORKER_ENABLE_EMOTIONS", true);
   const emotionIntervalMs = Math.max(150, envInt("WORKER_EMOTION_INTERVAL_MS", 300));
   const snapshotCooldownMs = Math.max(150, envInt("WORKER_SNAPSHOT_COOLDOWN_MS", 300));
-  const recognitionHoldMs = Math.max(0, envInt("WORKER_RECOGNITION_HOLD_MS", 2500));
+  const recognitionHoldMs = Math.max(0, envInt("WORKER_RECOGNITION_HOLD_MS", 1800));
   const sessionSnapshotIntervalMs = Math.max(
-    500,
-    envInt("WORKER_SESSION_SNAPSHOT_INTERVAL_MS", 500),
+    250,
+    envInt("WORKER_SESSION_SNAPSHOT_INTERVAL_MS", 300),
   );
   const sessionAbsenceMs = Math.max(
     700,
@@ -1598,7 +1600,7 @@ async function main() {
   );
   const sessionResolveWaitMs = Math.max(
     300,
-    envInt("WORKER_SESSION_RESOLVE_WAIT_MS", 500),
+    envInt("WORKER_SESSION_RESOLVE_WAIT_MS", 300),
   );
   const sessionMinSamples = Math.max(1, envInt("WORKER_SESSION_MIN_SAMPLES", 1));
   const sessionMinEmotionSamples = Math.max(
@@ -1620,11 +1622,11 @@ async function main() {
   );
   const emotionMinConfidence = Math.max(
     0,
-    Math.min(1, envFloat("WORKER_EMOTION_MIN_CONFIDENCE", 0.45)),
+    Math.min(1, envFloat("WORKER_EMOTION_MIN_CONFIDENCE", 0.28)),
   );
   const emotionLowConfidenceFloor = Math.max(
     0,
-    Math.min(1, envFloat("WORKER_EMOTION_LOW_CONFIDENCE_FLOOR", 0.18)),
+    Math.min(1, envFloat("WORKER_EMOTION_LOW_CONFIDENCE_FLOOR", 0.08)),
   );
   const emotionAllowLowConfidenceLabel = envBool(
     "WORKER_EMOTION_ALLOW_LOW_CONFIDENCE_LABEL",
@@ -1633,8 +1635,8 @@ async function main() {
   const emotionEmaAlpha = Math.max(0, Math.min(1, envFloat("WORKER_EMOTION_EMA_ALPHA", 0.65)));
   const emotionEmaTtlMs = Math.max(2000, envInt("WORKER_EMOTION_EMA_TTL_MS", 12000));
   const dbEndpoint = (process.env.WORKER_DB_ENDPOINT || "http://127.0.0.1:3000/api/recognitions").trim();
-  const dbCooldownMs = Math.max(1000, envInt("WORKER_DB_COOLDOWN_MS", 3000));
-  const dbReentryGapMs = Math.max(300, envInt("WORKER_DB_REENTRY_GAP_MS", 1200));
+  const dbCooldownMs = Math.max(800, envInt("WORKER_DB_COOLDOWN_MS", 2000));
+  const dbReentryGapMs = Math.max(250, envInt("WORKER_DB_REENTRY_GAP_MS", 800));
   const dbSeenTtlMs = Math.max(dbCooldownMs * 6, dbReentryGapMs * 6);
   const dbAllowMoodFallback = envBool("WORKER_DB_ALLOW_MOOD_FALLBACK", true);
   const dbFallbackMoodRaw = (process.env.WORKER_DB_FALLBACK_MOOD || "neutral").trim().toLowerCase();
@@ -2522,7 +2524,7 @@ async function main() {
       ),
     );
     const camSessionSnapshotIntervalMs = Math.max(
-      500,
+      250,
       parseFiniteInt(
         getCameraSetting(
           cameraSettings,
@@ -3189,9 +3191,6 @@ async function main() {
           cam.people = [];
           cam.emotionSummary = "";
           cam.topEmotion = "";
-          cam.lastRecognitionEmotion = "";
-          cam.lastRecognitionMood = "";
-          cam.lastRecognitionAt = 0;
           cam.identityLockName = "";
           cam.identityLockDistance = 0;
           cam.identityLockUntil = 0;
@@ -3761,8 +3760,6 @@ async function main() {
           cam.people = [];
           cam.emotionSummary = "";
           cam.topEmotion = "";
-          cam.lastRecognitionEmotion = "";
-          cam.lastRecognitionMood = "";
           cam.identityLockName = "";
           cam.identityLockDistance = 0;
           cam.identityLockUntil = 0;
@@ -3793,9 +3790,6 @@ async function main() {
       cam.people = [];
       cam.emotionSummary = "";
       cam.topEmotion = "";
-      cam.lastRecognitionEmotion = "";
-      cam.lastRecognitionMood = "";
-      cam.lastRecognitionAt = 0;
       cam.identityLockName = "";
       cam.identityLockDistance = 0;
       cam.identityLockUntil = 0;
@@ -3856,9 +3850,6 @@ async function main() {
       cam.people = [];
       cam.emotionSummary = "";
       cam.topEmotion = "";
-      cam.lastRecognitionEmotion = "";
-      cam.lastRecognitionMood = "";
-      cam.lastRecognitionAt = 0;
       cam.identityLockName = "";
       cam.identityLockDistance = 0;
       cam.identityLockUntil = 0;
