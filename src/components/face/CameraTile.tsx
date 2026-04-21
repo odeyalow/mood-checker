@@ -10,8 +10,9 @@ const MIN_ZOOM = 1;
 const WORKER_ZOOM_PRESETS = [1, 2, 3, 4, 5];
 const MJPEG_RETRY_DELAY_MS = 1500;
 const MJPEG_LOAD_TIMEOUT_MS = 5000;
+const MJPEG_MAX_RECOVERY_ATTEMPTS = 2;
 
-type PreviewMode = "mjpeg" | "frame";
+type PreviewMode = "mjpeg-direct" | "mjpeg-proxy" | "frame";
 
 function parseClientEnvInt(
   rawValue: string | undefined,
@@ -28,14 +29,15 @@ function parsePreviewMode(rawValue: string | undefined, fallback: PreviewMode): 
   const normalized = String(rawValue || "")
     .trim()
     .toLowerCase();
-  if (normalized === "mjpeg") return "mjpeg";
+  if (normalized === "mjpeg" || normalized === "mjpeg-direct") return "mjpeg-direct";
+  if (normalized === "mjpeg-proxy") return "mjpeg-proxy";
   if (normalized === "frame") return "frame";
   return fallback;
 }
 
 const DEFAULT_PREVIEW_MODE = parsePreviewMode(
   process.env.NEXT_PUBLIC_CAMERA_PREVIEW_MODE,
-  "frame",
+  "mjpeg-direct",
 );
 const FRAME_REFRESH_DELAY_MS = parseClientEnvInt(
   process.env.NEXT_PUBLIC_CAMERA_PREVIEW_REFRESH_MS,
@@ -253,6 +255,18 @@ function buildMjpegApiPath(src: string, token = 0) {
   return `/api/camera/mjpeg?${params.toString()}`;
 }
 
+function buildDirectMjpegUrl(baseUrl: string, src: string, token = 0) {
+  const url = new URL(baseUrl);
+  url.pathname = `${url.pathname.replace(/\/$/, "")}/api/stream.mjpeg`;
+  url.searchParams.set("src", src);
+  url.searchParams.set("v", String(token));
+  return url.toString();
+}
+
+function isMjpegPreviewMode(mode: PreviewMode) {
+  return mode === "mjpeg-direct" || mode === "mjpeg-proxy";
+}
+
 export default function CameraTile({
   camera,
   labels,
@@ -281,10 +295,12 @@ export default function CameraTile({
   const frameRefreshTimerRef = useRef<number | null>(null);
   const previewHadSuccessRef = useRef(false);
   const frameFailureCountRef = useRef(0);
+  const mjpegFailureCountRef = useRef(0);
 
   const [status, setStatus] = useState<"loading" | "ready" | "error">("loading");
   const [previewMode, setPreviewMode] = useState<PreviewMode>(DEFAULT_PREVIEW_MODE);
   const [previewToken, setPreviewToken] = useState(0);
+  const [go2rtcPublicBaseUrl, setGo2rtcPublicBaseUrl] = useState("");
   const [people, setPeople] = useState<WorkerPerson[]>([]);
   const [snapshotUrl, setSnapshotUrl] = useState("");
   const [snapshotWho, setSnapshotWho] = useState("");
@@ -308,8 +324,22 @@ export default function CameraTile({
       params.set("v", String(previewToken));
       return `/api/camera/frame?${params.toString()}`;
     }
+    if (previewMode === "mjpeg-direct" && go2rtcPublicBaseUrl) {
+      return buildDirectMjpegUrl(go2rtcPublicBaseUrl, camera.go2rtcSrc, previewToken);
+    }
     return buildMjpegApiPath(camera.go2rtcSrc, previewToken);
-  }, [camera.go2rtcSrc, previewMode, previewToken]);
+  }, [camera.go2rtcSrc, go2rtcPublicBaseUrl, previewMode, previewToken]);
+
+  useEffect(() => {
+    const explicitBase = String(process.env.NEXT_PUBLIC_GO2RTC_BASE_URL || "").trim();
+    if (explicitBase) {
+      setGo2rtcPublicBaseUrl(explicitBase);
+      return;
+    }
+    if (typeof window !== "undefined") {
+      setGo2rtcPublicBaseUrl(`${window.location.protocol}//${window.location.hostname}:1984`);
+    }
+  }, []);
 
   useEffect(() => {
     setPeople([]);
@@ -327,6 +357,7 @@ export default function CameraTile({
     lastSnapshotKeyRef.current = "";
     previewHadSuccessRef.current = false;
     frameFailureCountRef.current = 0;
+    mjpegFailureCountRef.current = 0;
 
     if (mjpegRetryTimerRef.current !== null) {
       window.clearTimeout(mjpegRetryTimerRef.current);
@@ -365,12 +396,11 @@ export default function CameraTile({
       window.clearTimeout(mjpegLoadTimeoutRef.current);
     }
     const loadTimeoutMs =
-      previewMode === "mjpeg" ? MJPEG_LOAD_TIMEOUT_MS : PREVIEW_FRAME_TIMEOUT_MS + 500;
+      isMjpegPreviewMode(previewMode) ? MJPEG_LOAD_TIMEOUT_MS : PREVIEW_FRAME_TIMEOUT_MS + 500;
     mjpegLoadTimeoutRef.current = window.setTimeout(() => {
       mjpegLoadTimeoutRef.current = null;
-      if (previewMode === "mjpeg") {
-        setPreviewMode("frame");
-        setPreviewToken((value) => value + 1);
+      if (isMjpegPreviewMode(previewMode)) {
+        handleMjpegPreviewFailure();
         return;
       }
       handleFramePreviewFailure();
@@ -564,6 +594,35 @@ export default function CameraTile({
     }, delay);
   }
 
+  function fallbackFromMjpegMode() {
+    if (previewMode === "mjpeg-direct") {
+      setPreviewMode("mjpeg-proxy");
+      setStatus("loading");
+      mjpegFailureCountRef.current = 0;
+      setPreviewToken((value) => value + 1);
+      return;
+    }
+    setPreviewMode("frame");
+    setStatus("loading");
+    mjpegFailureCountRef.current = 0;
+    setPreviewToken((value) => value + 1);
+  }
+
+  function handleMjpegPreviewFailure() {
+    mjpegFailureCountRef.current += 1;
+
+    const canRetryCurrentMjpeg =
+      previewHadSuccessRef.current &&
+      mjpegFailureCountRef.current <= MJPEG_MAX_RECOVERY_ATTEMPTS;
+    if (canRetryCurrentMjpeg) {
+      setStatus("loading");
+      scheduleMjpegReconnect();
+      return;
+    }
+
+    fallbackFromMjpegMode();
+  }
+
   function handleFramePreviewFailure() {
     frameFailureCountRef.current += 1;
     const retryDelay = Math.min(
@@ -601,6 +660,7 @@ export default function CameraTile({
               }
               previewHadSuccessRef.current = true;
               frameFailureCountRef.current = 0;
+              mjpegFailureCountRef.current = 0;
               setStatus("ready");
               if (previewMode === "frame") {
                 scheduleFrameRefresh();
@@ -611,10 +671,8 @@ export default function CameraTile({
                 window.clearTimeout(mjpegLoadTimeoutRef.current);
                 mjpegLoadTimeoutRef.current = null;
               }
-              if (previewMode === "mjpeg") {
-                setPreviewMode("frame");
-                setStatus("loading");
-                setPreviewToken((value) => value + 1);
+              if (isMjpegPreviewMode(previewMode)) {
+                handleMjpegPreviewFailure();
                 return;
               }
               handleFramePreviewFailure();
