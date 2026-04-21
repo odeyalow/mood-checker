@@ -122,6 +122,29 @@ export async function GET(request: Request) {
         })
       : [];
 
+    const recognitionCountRows = ids.length
+      ? await prisma.recognition.findMany({
+          where: {
+            OR: [
+              { faceIdentityId: { in: ids } },
+              { name: { in: shortIds } },
+            ],
+          },
+          select: {
+            faceIdentityId: true,
+            name: true,
+          },
+        })
+      : [];
+
+    const recognitionCountByFaceId = new Map<string, number>();
+    for (const row of recognitionCountRows) {
+      const faceIdentityId =
+        String(row.faceIdentityId ?? "") || String(idByShortId.get(String(row.name ?? "")) ?? "");
+      if (!faceIdentityId) continue;
+      recognitionCountByFaceId.set(faceIdentityId, (recognitionCountByFaceId.get(faceIdentityId) ?? 0) + 1);
+    }
+
     const latestRecognitions = latestRecognitionsRaw.map((item) => ({
       faceIdentityId:
         String(item.faceIdentityId ?? "") || String(idByShortId.get(String(item.name ?? "")) ?? ""),
@@ -170,7 +193,8 @@ export async function GET(request: Request) {
         return {
           id: identity.id,
           shortId: identity.shortId,
-          recognitionCount: identity._count.recognitions,
+          recognitionCount:
+            recognitionCountByFaceId.get(identity.id) ?? identity._count.recognitions ?? 0,
           snapshotUrl: latestSnapshotOk ? latestSnapshot?.snapshotUrl || "" : disk?.snapshotUrl || "",
           lastDetectedAt: latestSnapshotOk
             ? latestSnapshot?.detectedAt?.toISOString() || ""

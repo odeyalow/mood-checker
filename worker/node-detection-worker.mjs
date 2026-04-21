@@ -3637,6 +3637,7 @@ async function main() {
               let resolvedEmotionLabel = String(person.emotion || "");
               let resolvedEmotionConfidence = Number(person.emotionConfidence ?? 0);
               const sessionAgeMs = now - session.startedAt;
+              const readyByRegistration = Boolean(person.justRegistered);
               const canResolveFromSamples =
                 session.sampleCount >= camSessionMinSamples &&
                 sessionAgeMs >= camSessionResolveWaitMs &&
@@ -3660,9 +3661,16 @@ async function main() {
                 }
               }
 
+              if (!moodLabel && readyByRegistration && dbAllowMoodFallback) {
+                moodLabel = dbFallbackMood;
+              }
+              if (!resolvedEmotionLabel && moodLabel) {
+                resolvedEmotionLabel = moodLabel;
+              }
+
               const readyBySession = canResolveFromSamples && Boolean(moodLabel);
               const shouldEmitSessionRecord =
-                !session.emittedAt && readyBySession;
+                !session.emittedAt && (readyBySession || readyByRegistration);
               if (!shouldEmitSessionRecord) continue;
 
               const prevSeenAt = cam.lastSeenMatchedAt.get(person.name) ?? 0;
