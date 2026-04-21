@@ -10,11 +10,75 @@ const MIN_ZOOM = 1;
 const WORKER_ZOOM_PRESETS = [1, 2, 3, 4, 5];
 const MJPEG_RETRY_DELAY_MS = 1500;
 const MJPEG_LOAD_TIMEOUT_MS = 5000;
-const FRAME_REFRESH_DELAY_MS = 120;
-const PREVIEW_FRAME_WIDTH = 960;
-const PREVIEW_FRAME_HEIGHT = 540;
-const PREVIEW_FRAME_QUALITY = 68;
-const PREVIEW_FRAME_TIMEOUT_MS = 1600;
+
+type PreviewMode = "mjpeg" | "frame";
+
+function parseClientEnvInt(
+  rawValue: string | undefined,
+  fallback: number,
+  min: number,
+  max: number,
+) {
+  const parsed = Number.parseInt(rawValue || "", 10);
+  if (!Number.isFinite(parsed)) return fallback;
+  return Math.min(max, Math.max(min, parsed));
+}
+
+function parsePreviewMode(rawValue: string | undefined, fallback: PreviewMode): PreviewMode {
+  const normalized = String(rawValue || "")
+    .trim()
+    .toLowerCase();
+  if (normalized === "mjpeg") return "mjpeg";
+  if (normalized === "frame") return "frame";
+  return fallback;
+}
+
+const DEFAULT_PREVIEW_MODE = parsePreviewMode(
+  process.env.NEXT_PUBLIC_CAMERA_PREVIEW_MODE,
+  "frame",
+);
+const FRAME_REFRESH_DELAY_MS = parseClientEnvInt(
+  process.env.NEXT_PUBLIC_CAMERA_PREVIEW_REFRESH_MS,
+  220,
+  80,
+  5000,
+);
+const FRAME_ERROR_RETRY_MS = parseClientEnvInt(
+  process.env.NEXT_PUBLIC_CAMERA_PREVIEW_ERROR_RETRY_MS,
+  900,
+  200,
+  10000,
+);
+const FRAME_ERROR_MAX_RETRY_MS = parseClientEnvInt(
+  process.env.NEXT_PUBLIC_CAMERA_PREVIEW_MAX_RETRY_MS,
+  4000,
+  500,
+  20000,
+);
+const PREVIEW_FRAME_WIDTH = parseClientEnvInt(
+  process.env.NEXT_PUBLIC_CAMERA_PREVIEW_WIDTH,
+  480,
+  160,
+  1920,
+);
+const PREVIEW_FRAME_HEIGHT = parseClientEnvInt(
+  process.env.NEXT_PUBLIC_CAMERA_PREVIEW_HEIGHT,
+  270,
+  120,
+  1080,
+);
+const PREVIEW_FRAME_QUALITY = parseClientEnvInt(
+  process.env.NEXT_PUBLIC_CAMERA_PREVIEW_QUALITY,
+  75,
+  1,
+  100,
+);
+const PREVIEW_FRAME_TIMEOUT_MS = parseClientEnvInt(
+  process.env.NEXT_PUBLIC_CAMERA_PREVIEW_TIMEOUT_MS,
+  2600,
+  300,
+  15000,
+);
 
 type WorkerPerson = {
   name: string;
@@ -215,9 +279,11 @@ export default function CameraTile({
   const mjpegRetryTimerRef = useRef<number | null>(null);
   const mjpegLoadTimeoutRef = useRef<number | null>(null);
   const frameRefreshTimerRef = useRef<number | null>(null);
+  const previewHadSuccessRef = useRef(false);
+  const frameFailureCountRef = useRef(0);
 
   const [status, setStatus] = useState<"loading" | "ready" | "error">("loading");
-  const [previewMode, setPreviewMode] = useState<"mjpeg" | "frame">("mjpeg");
+  const [previewMode, setPreviewMode] = useState<PreviewMode>(DEFAULT_PREVIEW_MODE);
   const [previewToken, setPreviewToken] = useState(0);
   const [people, setPeople] = useState<WorkerPerson[]>([]);
   const [snapshotUrl, setSnapshotUrl] = useState("");
@@ -254,11 +320,13 @@ export default function CameraTile({
     setHistory([]);
     setWorkerZoom(clampWorkerZoom(camera.digitalZoom));
     setWorkerOffsetY(clampFrameOffsetY(camera.frameOffsetY));
-    setPreviewMode("mjpeg");
+    setPreviewMode(DEFAULT_PREVIEW_MODE);
     setPreviewToken(0);
     setStatus("loading");
     frameSizeRef.current = { width: 0, height: 0 };
     lastSnapshotKeyRef.current = "";
+    previewHadSuccessRef.current = false;
+    frameFailureCountRef.current = 0;
 
     if (mjpegRetryTimerRef.current !== null) {
       window.clearTimeout(mjpegRetryTimerRef.current);
@@ -296,6 +364,8 @@ export default function CameraTile({
     if (mjpegLoadTimeoutRef.current !== null) {
       window.clearTimeout(mjpegLoadTimeoutRef.current);
     }
+    const loadTimeoutMs =
+      previewMode === "mjpeg" ? MJPEG_LOAD_TIMEOUT_MS : PREVIEW_FRAME_TIMEOUT_MS + 500;
     mjpegLoadTimeoutRef.current = window.setTimeout(() => {
       mjpegLoadTimeoutRef.current = null;
       if (previewMode === "mjpeg") {
@@ -303,9 +373,8 @@ export default function CameraTile({
         setPreviewToken((value) => value + 1);
         return;
       }
-      setStatus("error");
-      scheduleFrameRefresh(MJPEG_RETRY_DELAY_MS);
-    }, MJPEG_LOAD_TIMEOUT_MS);
+      handleFramePreviewFailure();
+    }, loadTimeoutMs);
   }, [previewMode, previewUrl]);
 
   useEffect(() => {
@@ -495,6 +564,16 @@ export default function CameraTile({
     }, delay);
   }
 
+  function handleFramePreviewFailure() {
+    frameFailureCountRef.current += 1;
+    const retryDelay = Math.min(
+      FRAME_ERROR_MAX_RETRY_MS,
+      FRAME_ERROR_RETRY_MS * frameFailureCountRef.current,
+    );
+    setStatus(previewHadSuccessRef.current ? "ready" : "error");
+    scheduleFrameRefresh(retryDelay);
+  }
+
   const effectivePreviewZoom = clampWorkerZoom(workerZoom || camera.digitalZoom);
   const effectivePreviewOffsetY = clampFrameOffsetY(workerOffsetY ?? camera.frameOffsetY);
   const previewTransform =
@@ -520,6 +599,8 @@ export default function CameraTile({
                 window.clearTimeout(mjpegRetryTimerRef.current);
                 mjpegRetryTimerRef.current = null;
               }
+              previewHadSuccessRef.current = true;
+              frameFailureCountRef.current = 0;
               setStatus("ready");
               if (previewMode === "frame") {
                 scheduleFrameRefresh();
@@ -536,8 +617,7 @@ export default function CameraTile({
                 setPreviewToken((value) => value + 1);
                 return;
               }
-              setStatus("error");
-              scheduleFrameRefresh(MJPEG_RETRY_DELAY_MS);
+              handleFramePreviewFailure();
             }}
             style={{
               transform: previewTransform,

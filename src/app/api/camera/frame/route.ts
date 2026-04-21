@@ -1,9 +1,19 @@
+import { Buffer } from "node:buffer";
 import { NextRequest } from "next/server";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 const DEFAULT_GO2RTC_BASE_URL = "http://127.0.0.1:1984";
+const STALE_FRAME_MAX_AGE_MS = 10_000;
+
+type CachedFrame = {
+  body: Buffer;
+  contentType: string;
+  createdAt: number;
+};
+
+const staleFrameCache = new Map<string, CachedFrame>();
 
 function isValidSrc(value: string) {
   return /^[a-zA-Z0-9_-]+$/.test(value);
@@ -19,6 +29,49 @@ function parseIntParam(
   if (!Number.isFinite(parsed)) return null;
   if (parsed < min || parsed > max) return null;
   return parsed;
+}
+
+function buildCacheKey(
+  src: string,
+  width: number | null,
+  height: number | null,
+  quality: number | null,
+) {
+  return `${src}|${width ?? "auto"}|${height ?? "auto"}|${quality ?? "auto"}`;
+}
+
+function buildImageResponse(
+  body: Buffer,
+  contentType: string,
+  extraHeaders?: Record<string, string>,
+) {
+  const bytes = new Uint8Array(body.byteLength);
+  bytes.set(body);
+  return new Response(bytes.buffer, {
+    headers: {
+      "Content-Type": contentType,
+      "Cache-Control": "no-store, no-cache, must-revalidate, proxy-revalidate",
+      Pragma: "no-cache",
+      Expires: "0",
+      ...extraHeaders,
+    },
+  });
+}
+
+function getStaleFrameResponse(cacheKey: string, reason: string, upstreamStatus?: number) {
+  const cached = staleFrameCache.get(cacheKey);
+  if (!cached) return null;
+  const ageMs = Date.now() - cached.createdAt;
+  if (ageMs > STALE_FRAME_MAX_AGE_MS) {
+    staleFrameCache.delete(cacheKey);
+    return null;
+  }
+  return buildImageResponse(cached.body, cached.contentType, {
+    "X-Camera-Stale": "1",
+    "X-Camera-Stale-Age-Ms": String(ageMs),
+    "X-Camera-Stale-Reason": reason,
+    ...(upstreamStatus ? { "X-Camera-Upstream-Status": String(upstreamStatus) } : {}),
+  });
 }
 
 export async function GET(req: NextRequest) {
@@ -48,6 +101,7 @@ export async function GET(req: NextRequest) {
     300,
     15000,
   );
+  const cacheKey = buildCacheKey(src, width, height, quality);
 
   const upstreamUrl = new URL(go2rtcBaseUrl);
   upstreamUrl.pathname = `${upstreamUrl.pathname.replace(/\/$/, "")}/api/frame.jpeg`;
@@ -66,6 +120,8 @@ export async function GET(req: NextRequest) {
       clearTimeout(t);
     });
     if (!upstream.ok) {
+      const stale = getStaleFrameResponse(cacheKey, "upstream_status", upstream.status);
+      if (stale) return stale;
       const reason = await upstream.text().catch(() => "");
       return new Response(
         `go2rtc upstream status=${upstream.status} src=${src} body=${reason.slice(0, 300)}`,
@@ -73,20 +129,23 @@ export async function GET(req: NextRequest) {
       );
     }
 
-    const body = await upstream.arrayBuffer();
-    return new Response(body, {
-      headers: {
-        "Content-Type": upstream.headers.get("content-type") || "image/jpeg",
-        "Cache-Control": "no-store, no-cache, must-revalidate, proxy-revalidate",
-        Pragma: "no-cache",
-        Expires: "0",
-      },
+    const contentType = upstream.headers.get("content-type") || "image/jpeg";
+    const body = Buffer.from(await upstream.arrayBuffer());
+    staleFrameCache.set(cacheKey, {
+      body,
+      contentType,
+      createdAt: Date.now(),
     });
+    return buildImageResponse(body, contentType);
   } catch (error) {
     if (error instanceof Error && error.name === "AbortError") {
+      const stale = getStaleFrameResponse(cacheKey, "upstream_timeout");
+      if (stale) return stale;
       return new Response(`camera frame timeout src=${src}`, { status: 504 });
     }
     console.error("[camera-frame] proxy error:", error);
+    const stale = getStaleFrameResponse(cacheKey, "proxy_error");
+    if (stale) return stale;
     return new Response("camera frame proxy error", { status: 500 });
   }
 }

@@ -1247,6 +1247,15 @@ function isAbortError(err) {
   );
 }
 
+function isRetriableFrameError(err) {
+  const message = String(err ?? "");
+  return (
+    isAbortError(err) ||
+    /frame_http_5\d\d/.test(message) ||
+    /frame_http_429/.test(message)
+  );
+}
+
 function buildAbortFallbackFrameUrl(frameUrl, width, height, quality, timeoutMs = Number.NaN) {
   const url = new URL(frameUrl);
   if (Number.isFinite(width) && width > 0) {
@@ -2968,7 +2977,7 @@ async function main() {
       try {
         jpg = await fetchFrame(frameUrl, frameTimeoutMs);
       } catch (err) {
-        if (!frameAbortRetryEnabled || !isAbortError(err)) throw err;
+        if (!frameAbortRetryEnabled || !isRetriableFrameError(err)) throw err;
         const retryUrl = buildAbortFallbackFrameUrl(
           frameUrl,
           frameAbortRetryWidth,
