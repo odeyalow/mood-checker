@@ -393,7 +393,7 @@ export async function POST(request: Request) {
         const nextConfidence = Number.isFinite(emotionConfidenceRaw) ? emotionConfidenceRaw : 0;
         const shouldPromoteEmotion =
           nextConfidence >= recentConfidence ||
-          (mood === "neutral" && String(recent.mood || "") !== "neutral");
+          (String(recent.mood || "") === "neutral" && mood !== "neutral");
 
         if (shouldPromoteEmotion) {
           try {
