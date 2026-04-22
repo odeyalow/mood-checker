@@ -277,6 +277,38 @@ body {
   cursor: not-allowed;
 }
 
+.faces-pagination {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.faces-pagination-button.ant-btn {
+  border-color: #cbd5e1;
+  border-radius: 10px;
+  color: #334155;
+  box-shadow: none;
+}
+
+.faces-pagination-button.ant-btn:hover,
+.faces-pagination-button.ant-btn:focus {
+  border-color: #1d4ed8;
+  color: #1d4ed8;
+}
+
+.faces-pagination-button.ant-btn[disabled] {
+  color: #94a3b8;
+  border-color: #e2e8f0;
+  background: #f8fafc;
+}
+
+.faces-pagination-label {
+  min-width: 110px;
+  text-align: center;
+}
+
 .chart-placeholder {
   height: 220px;
   border-radius: 16px;
