@@ -38,5 +38,17 @@ module.exports = {
         NODE_ENV: "production",
       },
     },
+    {
+      name: "go2rtc",
+      script: "/opt/mood-checker/go2rtc_linux_amd64",
+      args: "-config /opt/mood-checker/go2rtc.yaml",
+      cwd: "/opt/mood-checker",
+      exec_mode: "fork",
+      instances: 1,
+      autorestart: true,
+      max_restarts: 20,
+      restart_delay: 2000,
+      interpreter: "none",
+    },
   ],
 };
