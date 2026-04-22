@@ -439,11 +439,13 @@ function parseEmotionFromExpressions(expressions, keys) {
     const safe = Number.isFinite(v) ? Math.max(0, v) : 0;
     vector[k] = safe;
     let effective = safe;
-    if (k === "neutral") effective *= 1.08;
-    if (k === "happy") effective *= 1.04;
-    if (k === "surprised") effective *= 1.03;
-    if (k === "sad") effective *= 0.97;
-    if (k === "angry") effective *= 0.95;
+    if (k === "neutral") effective *= 0.82;
+    if (k === "happy") effective *= 1.10;
+    if (k === "surprised") effective *= 1.08;
+    if (k === "sad") effective *= 1.05;
+    if (k === "angry") effective *= 1.05;
+    if (k === "disgusted") effective *= 1.03;
+    if (k === "fearful") effective *= 1.03;
     adjusted[k] = effective;
     if (effective > topVal) {
       topVal = effective;
@@ -455,9 +457,7 @@ function parseEmotionFromExpressions(expressions, keys) {
   if (neutral > 0 && topKey && topKey !== "neutral") {
     const topAdjusted = Number(adjusted[topKey] ?? 0);
     const neutralAdjusted = Number(adjusted.neutral ?? neutral);
-    if (neutralAdjusted > 0 && topAdjusted - neutralAdjusted <= 0.025) {
-      topKey = "neutral";
-    }
+    // Removed neutral-absorption: only snap to neutral if it genuinely wins
   }
 
   return {
