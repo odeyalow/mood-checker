@@ -1507,6 +1507,15 @@ function buildFrameUrl(frameApiBase, src, timeoutMs = Number.NaN) {
   return url.toString();
 }
 
+function evictPresenceSessions(cam, now, absenceMs, activeNames = null) {
+  if (!cam?.presenceSessions || typeof cam.presenceSessions.entries !== "function") return;
+  for (const [savedName, session] of cam.presenceSessions.entries()) {
+    if (activeNames && activeNames.has(savedName)) continue;
+    if (now - Number(session?.lastSeenAt ?? 0) <= absenceMs) continue;
+    cam.presenceSessions.delete(savedName);
+  }
+}
+
 async function writeFileAtomic(filePath, buffer) {
   const dir = path.dirname(filePath);
   await fsp.mkdir(dir, { recursive: true }).catch(() => {});
@@ -2905,13 +2914,6 @@ async function main() {
         autoBlockCooldownMs,
       ),
     );
-    const evictPresenceSessions = (activeNames = null) => {
-      for (const [savedName, session] of cam.presenceSessions.entries()) {
-        if (activeNames && activeNames.has(savedName)) continue;
-        if (now - (session?.lastSeenAt ?? 0) <= camSessionAbsenceMs) continue;
-        cam.presenceSessions.delete(savedName);
-      }
-    };
     const resetNewIdGate = () => {
       cam.newIdGateDescriptor = null;
       cam.newIdGateStreak = 0;
@@ -3562,8 +3564,11 @@ async function main() {
 
           for (const [savedName, seenAt] of cam.emotionSeenAtByName.entries()) {
             if (now - seenAt > emotionEmaTtlMs) {
-              if (seenNames.has(savedName)) continue;
-              if (now - Number(savedAt || 0) > archiveTtl) {
+              if (matchedNamesNow.has(savedName)) continue;
+              const savedAt = cam.lastSeenMatchedAt.get(savedName) ?? 0;
+              if (now - Number(savedAt || 0) > dbSeenTtlMs) {
+                cam.emotionSeenAtByName.delete(savedName);
+                cam.emotionEmaByName.delete(savedName);
                 cam.lastFaceArchiveAtByName.delete(savedName);
                 cam.lastFaceArchiveUrlByName.delete(savedName);
               }
@@ -3586,7 +3591,7 @@ async function main() {
               cam.lastFaceArchiveUrlByName.delete(savedName);
             }
           }
-          evictPresenceSessions(matchedNamesNow);
+          evictPresenceSessions(cam, now, camSessionAbsenceMs, matchedNamesNow);
           if (people.length) {
             cam.lastRecognitionAt = now;
           }
@@ -3826,7 +3831,7 @@ async function main() {
         cam.identityLockName = "";
         cam.identityLockDistance = 0;
         cam.identityLockUntil = 0;
-        evictPresenceSessions(new Set());
+        evictPresenceSessions(cam, now, camSessionAbsenceMs, new Set());
       }
     } catch (err) {
       cam.candidate = 0;
@@ -3842,7 +3847,7 @@ async function main() {
       cam.identityLockName = "";
       cam.identityLockDistance = 0;
       cam.identityLockUntil = 0;
-      evictPresenceSessions(new Set());
+      evictPresenceSessions(cam, now, camSessionAbsenceMs, new Set());
       cam.frameOk = false;
       cam.workerFrameWidth = 0;
       cam.workerFrameHeight = 0;
@@ -3902,7 +3907,7 @@ async function main() {
       cam.identityLockName = "";
       cam.identityLockDistance = 0;
       cam.identityLockUntil = 0;
-      evictPresenceSessions(new Set());
+      evictPresenceSessions(cam, now, camSessionAbsenceMs, new Set());
       cam.frameOk = false;
       cam.lastFrameError = String(err);
       if (now - cam.lastErrLogAt >= 2000) {
