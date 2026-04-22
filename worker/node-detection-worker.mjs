@@ -834,6 +834,36 @@ function iou(a, b) {
   return union > 0 ? inter / union : 0;
 }
 
+function boxCenterDistanceRatio(a, b) {
+  if (!a || !b) return Number.POSITIVE_INFINITY;
+  const acx = a.x + a.width / 2;
+  const acy = a.y + a.height / 2;
+  const bcx = b.x + b.width / 2;
+  const bcy = b.y + b.height / 2;
+  const dx = acx - bcx;
+  const dy = acy - bcy;
+  const diagonal = Math.hypot(
+    Math.max(1, (a.width + b.width) / 2),
+    Math.max(1, (a.height + b.height) / 2),
+  );
+  return Math.hypot(dx, dy) / diagonal;
+}
+
+function boxSizeSimilarity(a, b) {
+  if (!a || !b) return 0;
+  const widthRatio = Math.min(a.width, b.width) / Math.max(1, Math.max(a.width, b.width));
+  const heightRatio = Math.min(a.height, b.height) / Math.max(1, Math.max(a.height, b.height));
+  return Math.max(0, Math.min(1, (widthRatio + heightRatio) / 2));
+}
+
+function emotionDetectionMatchScore(faceBox, emotionBox) {
+  const overlap = iou(faceBox, emotionBox);
+  const centerRatio = boxCenterDistanceRatio(faceBox, emotionBox);
+  const sizeSimilarity = boxSizeSimilarity(faceBox, emotionBox);
+  if (!Number.isFinite(centerRatio)) return -1;
+  return overlap * 1.8 + sizeSimilarity * 0.7 - centerRatio;
+}
+
 function rectOverlapRatio(subject, zone) {
   const sx2 = subject.x + subject.width;
   const sy2 = subject.y + subject.height;
@@ -1986,11 +2016,22 @@ async function main() {
           const emotionBox = getBox(emotionDet);
           if (!emotionBox) continue;
           const overlap = iou(detBox, emotionBox);
-          if (!bestMatch || overlap > bestMatch.overlap) {
-            bestMatch = { overlap, expressions: emotionDet?.expressions };
+          const centerRatio = boxCenterDistanceRatio(detBox, emotionBox);
+          const score = emotionDetectionMatchScore(detBox, emotionBox);
+          if (!bestMatch || score > bestMatch.score) {
+            bestMatch = {
+              overlap,
+              centerRatio,
+              score,
+              expressions: emotionDet?.expressions,
+            };
           }
         }
-        if (bestMatch && bestMatch.overlap >= 0.1 && bestMatch.expressions) {
+        if (
+          bestMatch &&
+          bestMatch.expressions &&
+          (bestMatch.overlap >= 0.04 || bestMatch.centerRatio <= 0.32 || bestMatch.score >= 0.18)
+        ) {
           det.expressions = normalizeEmotionExpressions(bestMatch.expressions);
         }
       }
