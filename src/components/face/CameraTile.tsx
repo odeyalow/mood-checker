@@ -37,11 +37,11 @@ function parsePreviewMode(rawValue: string | undefined, fallback: PreviewMode): 
 
 const DEFAULT_PREVIEW_MODE = parsePreviewMode(
   process.env.NEXT_PUBLIC_CAMERA_PREVIEW_MODE,
-  "mjpeg-direct",
+  "mjpeg-proxy",
 );
 const FRAME_REFRESH_DELAY_MS = parseClientEnvInt(
   process.env.NEXT_PUBLIC_CAMERA_PREVIEW_REFRESH_MS,
-  220,
+  140,
   80,
   5000,
 );
@@ -59,25 +59,25 @@ const FRAME_ERROR_MAX_RETRY_MS = parseClientEnvInt(
 );
 const PREVIEW_FRAME_WIDTH = parseClientEnvInt(
   process.env.NEXT_PUBLIC_CAMERA_PREVIEW_WIDTH,
-  480,
+  1280,
   160,
   1920,
 );
 const PREVIEW_FRAME_HEIGHT = parseClientEnvInt(
   process.env.NEXT_PUBLIC_CAMERA_PREVIEW_HEIGHT,
-  270,
+  720,
   120,
   1080,
 );
 const PREVIEW_FRAME_QUALITY = parseClientEnvInt(
   process.env.NEXT_PUBLIC_CAMERA_PREVIEW_QUALITY,
-  75,
+  88,
   1,
   100,
 );
 const PREVIEW_FRAME_TIMEOUT_MS = parseClientEnvInt(
   process.env.NEXT_PUBLIC_CAMERA_PREVIEW_TIMEOUT_MS,
-  2600,
+  3200,
   300,
   15000,
 );
