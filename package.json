@@ -37,6 +37,7 @@
     "faces:block:list": "node scripts/face-block.mjs list",
     "faces:block:clear": "node scripts/face-block.mjs clear",
     "worker:profile:balanced": "node scripts/apply-worker-profile-balanced.mjs",
+    "worker:profile:low-latency": "node scripts/apply-worker-profile-low-latency.mjs",
     "worker:profile:pre-request": "node scripts/apply-worker-profile-pre-request.mjs",
     "worker:diagnose": "bash scripts/diagnose-worker.sh"
   },
