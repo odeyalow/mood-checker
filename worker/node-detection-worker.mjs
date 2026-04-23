@@ -432,20 +432,34 @@ function parseEmotionFromExpressions(expressions, keys) {
 
   const vector = {};
   const adjusted = {};
-  let topKey = "";
-  let topVal = -1;
+  let nonNeutralSum = 0;
   for (const k of keys) {
     const v = Number(expressions[k] ?? 0);
     const safe = Number.isFinite(v) ? Math.max(0, v) : 0;
     vector[k] = safe;
+    if (k !== "neutral") {
+      nonNeutralSum += safe;
+    }
+  }
+
+  const neutral = Number(vector.neutral ?? 0);
+  const expressiveShare = neutral + nonNeutralSum > 0 ? nonNeutralSum / (neutral + nonNeutralSum) : 0;
+  let topKey = "";
+  let topVal = -1;
+  for (const k of keys) {
+    const safe = Number(vector[k] ?? 0);
     let effective = safe;
-    if (k === "neutral") effective *= 0.82;
+    if (k === "neutral") {
+      const neutralDiscount = Math.max(0.56, 0.82 - expressiveShare * 0.28);
+      effective *= neutralDiscount;
+    }
     if (k === "happy") effective *= 1.10;
     if (k === "surprised") effective *= 1.08;
     if (k === "sad") effective *= 1.05;
     if (k === "angry") effective *= 1.05;
     if (k === "disgusted") effective *= 1.03;
     if (k === "fearful") effective *= 1.03;
+    if (k !== "neutral" && expressiveShare >= 0.22) effective *= 1.04;
     adjusted[k] = effective;
     if (effective > topVal) {
       topVal = effective;
@@ -453,16 +467,40 @@ function parseEmotionFromExpressions(expressions, keys) {
     }
   }
 
-  const neutral = Number(vector.neutral ?? 0);
-  if (neutral > 0 && topKey && topKey !== "neutral") {
-    const topAdjusted = Number(adjusted[topKey] ?? 0);
-    const neutralAdjusted = Number(adjusted.neutral ?? neutral);
-    // Removed neutral-absorption: only snap to neutral if it genuinely wins
+  let runnerUpKey = "";
+  let runnerUpAdjusted = -1;
+  for (const k of keys) {
+    if (k === topKey) continue;
+    const candidate = Number(adjusted[k] ?? 0);
+    if (candidate > runnerUpAdjusted) {
+      runnerUpAdjusted = candidate;
+      runnerUpKey = k;
+    }
   }
+
+  if (topKey === "neutral" && runnerUpKey && runnerUpKey !== "neutral") {
+    const expressiveRaw = Number(vector[runnerUpKey] ?? 0);
+    const expressiveAdjusted = Number(adjusted[runnerUpKey] ?? expressiveRaw);
+    const neutralAdjusted = Number(adjusted.neutral ?? neutral);
+    const expressiveClose = expressiveAdjusted >= neutralAdjusted * Math.max(0.76, 0.9 - expressiveShare * 0.3);
+    const expressiveEnough = expressiveRaw >= Math.max(0.12, neutral * 0.34);
+    if (expressiveEnough && expressiveClose) {
+      topKey = runnerUpKey;
+      topVal = expressiveAdjusted;
+      runnerUpAdjusted = neutralAdjusted;
+    }
+  }
+
+  const rawConfidence = Number(vector[topKey] ?? 0);
+  const adjustedConfidence = Number(adjusted[topKey] ?? rawConfidence);
+  const contrast = Math.max(0, adjustedConfidence - Math.max(0, runnerUpAdjusted));
+  const confidence = topKey === "neutral"
+    ? rawConfidence
+    : Math.min(0.99, Math.max(rawConfidence, adjustedConfidence) + contrast * 0.35 + expressiveShare * 0.05);
 
   return {
     key: topKey,
-    confidence: Number(vector[topKey] ?? 0) > 0 ? Number(vector[topKey] ?? 0) : 0,
+    confidence: confidence > 0 ? confidence : 0,
     vector,
   };
 }
@@ -1664,7 +1702,7 @@ async function main() {
   );
   const emotionMinConfidence = Math.max(
     0,
-    Math.min(1, envFloat("WORKER_EMOTION_MIN_CONFIDENCE", 0.28)),
+    Math.min(1, envFloat("WORKER_EMOTION_MIN_CONFIDENCE", 0.24)),
   );
   const emotionLowConfidenceFloor = Math.max(
     0,
@@ -1674,7 +1712,7 @@ async function main() {
     "WORKER_EMOTION_ALLOW_LOW_CONFIDENCE_LABEL",
     true,
   );
-  const emotionEmaAlpha = Math.max(0, Math.min(1, envFloat("WORKER_EMOTION_EMA_ALPHA", 0.65)));
+  const emotionEmaAlpha = Math.max(0, Math.min(1, envFloat("WORKER_EMOTION_EMA_ALPHA", 0.58)));
   const emotionEmaTtlMs = Math.max(2000, envInt("WORKER_EMOTION_EMA_TTL_MS", 12000));
   const dbEndpoint = (process.env.WORKER_DB_ENDPOINT || "http://127.0.0.1:3000/api/recognitions").trim();
   const dbCooldownMs = Math.max(800, envInt("WORKER_DB_COOLDOWN_MS", 2000));
@@ -3536,8 +3574,11 @@ async function main() {
               for (const key of emotionKeys) {
                 const currentVal = Number(parsedEmotion.vector[key] ?? 0);
                 const prevVal = Number(prev?.[key] ?? currentVal);
+                const smoothingAlpha = key === "neutral"
+                  ? camEmotionEmaAlpha
+                  : Math.min(1, camEmotionEmaAlpha + 0.16);
                 smoothed[key] = prev
-                  ? camEmotionEmaAlpha * currentVal + (1 - camEmotionEmaAlpha) * prevVal
+                  ? smoothingAlpha * currentVal + (1 - smoothingAlpha) * prevVal
                   : currentVal;
               }
 
