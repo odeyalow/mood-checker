@@ -1472,8 +1472,10 @@ function createState(cameraId, src) {
     lastSnapshotSavedAt: 0,
     lastPreviewSavedAt: 0,
     snapshotSavedCount: 0,
+    lastCandidateAt: 0,
     lastEmotionAt: 0,
     lastBestBox: null,
+    lastDetectionBoxes: [],
     prevLuma: null,
     emotionEmaByName: new Map(),
     emotionSeenAtByName: new Map(),
@@ -3259,10 +3261,13 @@ async function main() {
       cam.lastDetectionBoxes = currentBoxes;
 
       if (cam.candidate > 0) {
+        cam.lastCandidateAt = now;
         if (trackStable || similarCrowdSize || cam.streak === 0) cam.streak += 1;
         else cam.streak = 1;
       } else {
-        cam.streak = 0;
+        const candidateGapMs = now - Number(cam.lastCandidateAt || 0);
+        const keepWarm = candidateGapMs <= Math.max(450, Math.floor(camMatchIntervalMs * 3));
+        cam.streak = keepWarm ? Math.min(cam.streak, Math.max(1, camConfirmFrames - 1)) : 0;
         cam.lastDetectionBoxes = [];
       }
 
