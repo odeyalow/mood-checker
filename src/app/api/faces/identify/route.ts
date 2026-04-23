@@ -321,13 +321,12 @@ export async function POST(request: Request) {
       const usedThreshold = mergeByStrict ? postCheckThreshold : postCheckRelaxedThreshold;
       const mergeRule = mergeByStrict ? "strict" : "relaxed";
 
-      await prisma.$transaction(async (tx) => {
-        await tx.faceIdentity.update({
+      await prisma.$transaction([
+        prisma.faceIdentity.update({
           where: { id: duplicateCandidate.id },
           data: { descriptor: mergedDescriptor },
-        });
-
-        await tx.recognition.updateMany({
+        }),
+        prisma.recognition.updateMany({
           where: {
             OR: [{ faceIdentityId: created.id }, { name: created.shortId }],
           },
@@ -335,9 +334,8 @@ export async function POST(request: Request) {
             faceIdentityId: duplicateCandidate.id,
             name: duplicateCandidate.shortId,
           },
-        });
-
-        await tx.faceDedupLog.create({
+        }),
+        prisma.faceDedupLog.create({
           data: {
             action: "deleted_duplicate",
             reason: DUPLICATE_REASON,
@@ -350,10 +348,9 @@ export async function POST(request: Request) {
             distance: Number(duplicateCandidate.distance.toFixed(6)),
             threshold: Number(usedThreshold.toFixed(6)),
           },
-        });
-
-        await tx.faceIdentity.delete({ where: { id: created.id } });
-      });
+        }),
+        prisma.faceIdentity.delete({ where: { id: created.id } }),
+      ]);
 
       return NextResponse.json({
         shortId: duplicateCandidate.shortId,

@@ -45,12 +45,26 @@ export async function GET(request: Request) {
       },
     });
 
-    return NextResponse.json({
-      items: items.map((item) => ({
+    const serializedItems: Array<{
+      id: string;
+      action: string;
+      reason: string;
+      sourceShortId: string | null;
+      targetShortId: string | null;
+      sourceSnapshotUrl: string | null;
+      targetSnapshotUrl: string | null;
+      distance: number | null;
+      threshold: number | null;
+      createdAt: string;
+    }> = [];
+    for (const item of items) {
+      serializedItems.push({
         ...item,
         createdAt: item.createdAt.toISOString(),
-      })),
-    });
+      });
+    }
+
+    return NextResponse.json({ items: serializedItems });
   } catch (error) {
     console.error("[api/faces/dedup-logs] GET failed", error);
     return NextResponse.json({ items: [], error: "dedup_logs_unavailable" }, { status: 500 });

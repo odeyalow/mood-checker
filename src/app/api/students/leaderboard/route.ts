@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
-import { addMoodCount, computeRiskStats } from "@/lib/stats";
+import { addMoodCount, computeRiskStats, type MoodCounts } from "@/lib/stats";
 
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
@@ -16,7 +16,10 @@ export async function GET(request: Request) {
     select: { name: true, mood: true, detectedAt: true },
   });
 
-  const byName = new Map();
+  const byName = new Map<
+    string,
+    MoodCounts & { last: { mood: string; detectedAt: Date } | null }
+  >();
   for (const item of items) {
     const entry =
       byName.get(item.name) || { positive: 0, neutral: 0, negative: 0, last: null };
@@ -27,9 +30,17 @@ export async function GET(request: Request) {
     byName.set(item.name, entry);
   }
 
-  const list = [...byName.entries()].map(([name, counts]) => {
+  const list: Array<{
+    id: string;
+    name: string;
+    riskPercent: number;
+    lastMood: string;
+    lastDetectedAt: Date | string;
+    totals: MoodCounts;
+  }> = [];
+  for (const [name, counts] of byName.entries()) {
     const stats = computeRiskStats(counts);
-    return {
+    list.push({
       id: name,
       name,
       riskPercent: stats.riskPercent,
@@ -40,8 +51,8 @@ export async function GET(request: Request) {
         neutral: counts.neutral,
         negative: counts.negative,
       },
-    };
-  });
+    });
+  }
 
   list.sort((a, b) => b.riskPercent - a.riskPercent);
   const itemsOut = list.slice(0, limit).map((item, index) => ({

@@ -98,9 +98,14 @@ export async function GET(request: Request) {
       },
     });
 
-    const ids = identities.map((item) => item.id);
-    const shortIds = identities.map((item) => item.shortId);
-    const idByShortId = new Map(identities.map((item) => [item.shortId, item.id]));
+    const ids: string[] = [];
+    const shortIds: string[] = [];
+    const idByShortId = new Map<string, string>();
+    for (const identity of identities) {
+      ids.push(identity.id);
+      shortIds.push(identity.shortId);
+      idByShortId.set(identity.shortId, identity.id);
+    }
     const latestRecognitionsRaw = ids.length
       ? await prisma.recognition.findMany({
           where: {
@@ -145,14 +150,17 @@ export async function GET(request: Request) {
       recognitionCountByFaceId.set(faceIdentityId, (recognitionCountByFaceId.get(faceIdentityId) ?? 0) + 1);
     }
 
-    const latestRecognitions = latestRecognitionsRaw.map((item) => ({
-      faceIdentityId:
-        String(item.faceIdentityId ?? "") || String(idByShortId.get(String(item.name ?? "")) ?? ""),
-      mood: String(item.mood ?? "").trim(),
-      cameraId: String(item.cameraId ?? "").trim(),
-      snapshotUrl: item.snapshotUrl,
-      detectedAt: item.detectedAt,
-    })) as LatestRecognitionMeta[];
+    const latestRecognitions: LatestRecognitionMeta[] = [];
+    for (const item of latestRecognitionsRaw) {
+      latestRecognitions.push({
+        faceIdentityId:
+          String(item.faceIdentityId ?? "") || String(idByShortId.get(String(item.name ?? "")) ?? ""),
+        mood: String(item.mood ?? "").trim(),
+        cameraId: String(item.cameraId ?? "").trim(),
+        snapshotUrl: item.snapshotUrl,
+        detectedAt: item.detectedAt,
+      });
+    }
 
     const latestByFaceId = new Map<
       string,
@@ -176,35 +184,47 @@ export async function GET(request: Request) {
       });
     }
 
-    const diskSnapshots = await Promise.all(
-      identities.map(async (identity) => ({
+    const diskSnapshots: Array<{ faceId: string; disk: Awaited<ReturnType<typeof getLatestDiskSnapshot>> }> = [];
+    for (const identity of identities) {
+      diskSnapshots.push({
         faceId: identity.id,
         disk: await getLatestDiskSnapshot(identity.shortId),
-      })),
-    );
-    const diskByFaceId = new Map(diskSnapshots.map((item) => [item.faceId, item.disk]));
+      });
+    }
+    const diskByFaceId = new Map<string, Awaited<ReturnType<typeof getLatestDiskSnapshot>>>();
+    for (const item of diskSnapshots) {
+      diskByFaceId.set(item.faceId, item.disk);
+    }
 
-    const items = await Promise.all(
-      identities.map(async (identity) => {
-        const latest = latestByFaceId.get(identity.id);
-        const latestSnapshot = latestSnapshotByFaceId.get(identity.id);
-        const disk = diskByFaceId.get(identity.id);
-        const latestSnapshotOk = await snapshotExists(latestSnapshot?.snapshotUrl);
-        return {
-          id: identity.id,
-          shortId: identity.shortId,
-          recognitionCount:
-            recognitionCountByFaceId.get(identity.id) ?? identity._count.recognitions ?? 0,
-          snapshotUrl: latestSnapshotOk ? latestSnapshot?.snapshotUrl || "" : disk?.snapshotUrl || "",
-          lastDetectedAt: latestSnapshotOk
-            ? latestSnapshot?.detectedAt?.toISOString() || ""
-            : disk?.detectedAt || "",
-          lastMood: latest?.mood || "",
-          lastCameraId: latest?.cameraId || "",
-          createdAt: identity.createdAt.toISOString(),
-        };
-      }),
-    );
+    const items: Array<{
+      id: string;
+      shortId: string;
+      recognitionCount: number;
+      snapshotUrl: string;
+      lastDetectedAt: string;
+      lastMood: string;
+      lastCameraId: string;
+      createdAt: string;
+    }> = [];
+    for (const identity of identities) {
+      const latest = latestByFaceId.get(identity.id);
+      const latestSnapshot = latestSnapshotByFaceId.get(identity.id);
+      const disk = diskByFaceId.get(identity.id);
+      const latestSnapshotOk = await snapshotExists(latestSnapshot?.snapshotUrl);
+      items.push({
+        id: identity.id,
+        shortId: identity.shortId,
+        recognitionCount:
+          recognitionCountByFaceId.get(identity.id) ?? identity._count.recognitions ?? 0,
+        snapshotUrl: latestSnapshotOk ? latestSnapshot?.snapshotUrl || "" : disk?.snapshotUrl || "",
+        lastDetectedAt: latestSnapshotOk
+          ? latestSnapshot?.detectedAt?.toISOString() || ""
+          : disk?.detectedAt || "",
+        lastMood: latest?.mood || "",
+        lastCameraId: latest?.cameraId || "",
+        createdAt: identity.createdAt.toISOString(),
+      });
+    }
 
     return NextResponse.json({ items });
   } catch (error) {

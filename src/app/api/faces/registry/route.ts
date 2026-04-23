@@ -21,19 +21,24 @@ export async function GET(request: Request) {
       select: { id: true, shortId: true, descriptor: true, createdAt: true, updatedAt: true },
     });
 
-    const normalized = items
-      .map((item) => {
-        const descriptor = normalizeDescriptor(item.descriptor);
-        if (!descriptor) return null;
-        return {
-          id: item.id,
-          shortId: item.shortId,
-          descriptor,
-          createdAt: item.createdAt.toISOString(),
-          updatedAt: item.updatedAt.toISOString(),
-        };
-      })
-      .filter(Boolean);
+    const normalized: Array<{
+      id: string;
+      shortId: string;
+      descriptor: number[];
+      createdAt: string;
+      updatedAt: string;
+    }> = [];
+    for (const item of items) {
+      const descriptor = normalizeDescriptor(item.descriptor);
+      if (!descriptor) continue;
+      normalized.push({
+        id: item.id,
+        shortId: item.shortId,
+        descriptor,
+        createdAt: item.createdAt.toISOString(),
+        updatedAt: item.updatedAt.toISOString(),
+      });
+    }
 
     return NextResponse.json({ items: normalized });
   } catch (error) {

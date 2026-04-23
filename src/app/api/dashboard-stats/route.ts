@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { CAMERA_CONFIGS } from "@/lib/cameras";
-import { addMoodCount, computeRiskStats } from "@/lib/stats";
+import { addMoodCount, computeRiskStats, type MoodCounts } from "@/lib/stats";
 
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
@@ -23,17 +23,21 @@ export async function GET() {
       }),
     ]);
 
-    const recentCounts = { positive: 0, neutral: 0, negative: 0 };
-    recent.forEach((item) => addMoodCount(recentCounts, item.mood));
+    const recentCounts: MoodCounts = { positive: 0, neutral: 0, negative: 0 };
+    for (const item of recent) {
+      addMoodCount(recentCounts, item.mood);
+    }
     const recentStats = computeRiskStats(recentCounts);
 
-    const prevCounts = { positive: 0, neutral: 0, negative: 0 };
-    previous.forEach((item) => addMoodCount(prevCounts, item.mood));
+    const prevCounts: MoodCounts = { positive: 0, neutral: 0, negative: 0 };
+    for (const item of previous) {
+      addMoodCount(prevCounts, item.mood);
+    }
     const prevStats = computeRiskStats(prevCounts);
 
     const negativeDeltaVsPrevDay = recentStats.negativePercent - prevStats.negativePercent;
 
-    const byName = new Map();
+    const byName = new Map<string, MoodCounts>();
     for (const item of recent) {
       const entry = byName.get(item.name) || { positive: 0, neutral: 0, negative: 0 };
       addMoodCount(entry, item.mood);

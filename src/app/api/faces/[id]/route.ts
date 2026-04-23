@@ -155,14 +155,26 @@ export async function GET(
         snapshotUrl: true,
       },
     });
-    const recognitionItems: FaceRecognitionMeta[] = recognitions.map((item) => ({
-      id: item.id,
-      snapshotUrl: item.snapshotUrl || "",
-      mood: String(item.mood || "").trim(),
-      cameraId: String(item.cameraId || "").trim(),
-      detectedAt: item.detectedAt.toISOString(),
-    }));
-    const images = recognitions.filter((item) => Boolean(item.snapshotUrl));
+    const recognitionItems: FaceRecognitionMeta[] = [];
+    const images: Array<{
+      id: string;
+      mood: string;
+      cameraId: string | null;
+      detectedAt: Date;
+      snapshotUrl: string | null;
+    }> = [];
+    for (const recognition of recognitions) {
+      recognitionItems.push({
+        id: recognition.id,
+        snapshotUrl: recognition.snapshotUrl || "",
+        mood: String(recognition.mood || "").trim(),
+        cameraId: String(recognition.cameraId || "").trim(),
+        detectedAt: recognition.detectedAt.toISOString(),
+      });
+      if (recognition.snapshotUrl) {
+        images.push(recognition);
+      }
+    }
     const validImages = (
       await Promise.all(
         images.map(async (item) => ({
@@ -178,15 +190,21 @@ export async function GET(
       await listDiskSnapshots(face.shortId, 5),
       recognitionItems,
     );
-    const dbImages = validImages.map((item) => ({
-      id: item.id,
-      snapshotUrl: item.snapshotUrl || "",
-      mood: item.mood,
-      cameraId: item.cameraId || "",
-      detectedAt: item.detectedAt.toISOString(),
-    }));
-    const seen = new Set(dbImages.map((item) => item.snapshotUrl.split("?")[0]));
-    const mergedImages = [...dbImages];
+    const dbImages: FaceRecognitionMeta[] = [];
+    for (const item of validImages) {
+      dbImages.push({
+        id: item.id,
+        snapshotUrl: item.snapshotUrl || "",
+        mood: item.mood,
+        cameraId: item.cameraId || "",
+        detectedAt: item.detectedAt.toISOString(),
+      });
+    }
+    const seen = new Set<string>();
+    for (const item of dbImages) {
+      seen.add(item.snapshotUrl.split("?")[0]);
+    }
+    const mergedImages: FaceRecognitionMeta[] = [...dbImages];
     for (const diskItem of diskFallback) {
       const clean = String(diskItem.snapshotUrl || "").split("?")[0];
       if (!clean || seen.has(clean)) continue;
