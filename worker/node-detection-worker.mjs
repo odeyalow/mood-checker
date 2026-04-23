@@ -1821,6 +1821,36 @@ async function main() {
   let insightFaceServiceChild = null;
   let inferenceBackend = requestedInferenceBackend === "faceapi" ? "faceapi" : "insightface";
 
+  const restartInsightFaceService = async (reason) => {
+    if (inferenceBackend !== "insightface") return false;
+    if (restartInsightFaceService.inFlight) return false;
+    restartInsightFaceService.inFlight = true;
+    try {
+      log(`[insightface] restart requested reason=${reason}`);
+      if (insightFaceServiceChild && !insightFaceServiceChild.killed) {
+        try {
+          insightFaceServiceChild.kill("SIGTERM");
+        } catch {
+          // ignore shutdown errors while recovering the child process
+        }
+        await sleep(250);
+      }
+
+      const started = await startInsightFaceService({
+        endpointBase: insightFaceEndpointBase,
+        startupTimeoutMs: insightFaceStartupTimeoutMs,
+      });
+      insightFaceServiceChild = started.child;
+      return true;
+    } catch (err) {
+      log(`[insightface] restart failed reason=${reason} err=${String(err)}`);
+      return false;
+    } finally {
+      restartInsightFaceService.inFlight = false;
+    }
+  };
+  restartInsightFaceService.inFlight = false;
+
   if (inferenceBackend === "insightface") {
     log(`[boot] starting insightface endpoint=${insightFaceEndpointBase}`);
     try {
@@ -1957,6 +1987,7 @@ async function main() {
     }
   };
   let lastInsightFaceErrLogAt = 0;
+  let lastInsightFaceRestartAt = 0;
   const analyzeWithInsightFace = async (
     {
       jpgBuffer,
@@ -1988,6 +2019,13 @@ async function main() {
       if (current - lastInsightFaceErrLogAt >= 3000) {
         log(`[insightface] analyze failed err=${String(err)}`);
         lastInsightFaceErrLogAt = current;
+      }
+      const canRestart =
+        inferenceBackend === "insightface" &&
+        current - lastInsightFaceRestartAt >= Math.max(2000, insightFaceTimeoutMs);
+      if (canRestart && !(await isInsightFaceServiceHealthy(`${insightFaceEndpointBase}/health`, 800))) {
+        lastInsightFaceRestartAt = current;
+        await restartInsightFaceService("analyze_fetch_failed");
       }
       return null;
     }
