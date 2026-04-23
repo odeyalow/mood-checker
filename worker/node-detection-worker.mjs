@@ -1414,6 +1414,7 @@ function createEmptyCameraStatus({ workerZoom = 1, workerOffsetY = 0, frameError
     frameHeight: 0,
     workerFrameWidth: 0,
     workerFrameHeight: 0,
+    lastDetectionBoxes: [],
     snapshotSavedCount: 0,
     frameError,
   };
@@ -3240,17 +3241,29 @@ async function main() {
 
       const best = detections[0];
       const bestBox = getBox(best);
+      const currentBoxes = detections
+        .map((det) => getBox(det))
+        .filter(Boolean)
+        .slice(0, 8);
       const trackStable = Boolean(
-        bestBox && cam.lastBestBox && iou(bestBox, cam.lastBestBox) > 0.08,
+        currentBoxes.length &&
+          cam.lastDetectionBoxes.length &&
+          currentBoxes.some((box) => cam.lastDetectionBoxes.some((prevBox) => iou(box, prevBox) > 0.08)),
       );
+      const similarCrowdSize =
+        currentBoxes.length > 1 &&
+        cam.lastDetectionBoxes.length > 0 &&
+        Math.abs(currentBoxes.length - cam.lastDetectionBoxes.length) <= 1;
       if (bestBox) cam.lastBestBox = bestBox;
       if (!bestBox) cam.lastBestBox = null;
+      cam.lastDetectionBoxes = currentBoxes;
 
       if (cam.candidate > 0) {
-        if (trackStable || cam.streak === 0) cam.streak += 1;
+        if (trackStable || similarCrowdSize || cam.streak === 0) cam.streak += 1;
         else cam.streak = 1;
       } else {
         cam.streak = 0;
+        cam.lastDetectionBoxes = [];
       }
 
       const recentConfirm = now - cam.lastConfirmedAt < 2500;
