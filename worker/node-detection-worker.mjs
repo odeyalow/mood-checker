@@ -3226,6 +3226,8 @@ async function main() {
       const rgb = rgbaToRgbTensorData(rgba);
       const frameTensor = faceapi.tf.tensor3d(rgb, [workerHeight, workerWidth, 3], "int32");
 
+      // Cache InsightFace results for reuse in snapshot phase (avoids double inference).
+      let cachedInsightResults = null;
       let detections = [];
       try {
         if (inferenceBackend === "insightface") {
@@ -3235,7 +3237,9 @@ async function main() {
             width: workerWidth,
             height: workerHeight,
           }, {
-            includeDescriptor: false,
+            // Include descriptors here so the snapshot phase can reuse these results
+            // without a second InsightFace call on the same frame.
+            includeDescriptor: enableMatching,
             maxFaces: 12,
             minScore: 0.05,
           });
@@ -3245,6 +3249,7 @@ async function main() {
               detections = await faceapi.detectAllFaces(frameTensor, ssdOptions);
             }
           } else {
+            cachedInsightResults = insightResults;
             detections = insightResults || [];
           }
         } else {
@@ -3395,16 +3400,19 @@ async function main() {
 
           try {
             if (inferenceBackend === "insightface") {
-              const insightResults = await analyzeWithInsightFace({
-                jpgBuffer: jpg,
-                rgb,
-                width: workerWidth,
-                height: workerHeight,
-              }, {
-                includeDescriptor: enableMatching,
-                maxFaces: 12,
-                minScore: 0.05,
-              });
+              // Reuse results from the detection phase (same frame, already has descriptors).
+              const insightResults = cachedInsightResults !== null
+                ? cachedInsightResults
+                : await analyzeWithInsightFace({
+                    jpgBuffer: jpg,
+                    rgb,
+                    width: workerWidth,
+                    height: workerHeight,
+                  }, {
+                    includeDescriptor: enableMatching,
+                    maxFaces: 12,
+                    minScore: 0.05,
+                  });
               if (insightResults === null && allowFaceApiFallback) {
                 snapTensor = faceapi.tf.tensor3d(rgb, [workerHeight, workerWidth, 3], "int32");
                 results = await runFaceApiDetect(tinyOptions);

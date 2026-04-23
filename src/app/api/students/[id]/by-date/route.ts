@@ -43,7 +43,7 @@ export async function GET(
   });
 
   const counts = { positive: 0, neutral: 0, negative: 0 };
-  items.forEach((item) => addMoodCount(counts, item.mood));
+  for (const item of items) addMoodCount(counts, item.mood);
   const stats = computeRiskStats(counts);
 
   const pointsMap = new Map();
@@ -84,13 +84,13 @@ export async function GET(
       neutralCount: counts.neutral,
       negativeCount: counts.negative,
     },
-    points: points.map((p) => ({
+    points: points.map((p: { bucketStart: string; positive: number; neutral: number; negative: number }) => ({
       bucketStart: p.bucketStart,
       positiveCount: p.positive,
       neutralCount: p.neutral,
       negativeCount: p.negative,
     })),
-    recent: items.slice(0, 30).map((item) => ({
+    recent: items.slice(0, 30).map((item: { id: string; mood: string; detectedAt: Date }) => ({
       id: item.id,
       mood: item.mood,
       detectedAt: item.detectedAt.toISOString(),

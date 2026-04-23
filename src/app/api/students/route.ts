@@ -31,7 +31,7 @@ export async function GET(request: Request) {
   });
 
   const allNames = dedupeByLowercase(
-    recognizedNames.map((item) => String(item.name ?? "").trim()).filter(Boolean),
+    recognizedNames.map((item: { name: string }) => String(item.name ?? "").trim()).filter(Boolean),
   );
   const filtered = q
     ? allNames.filter((name) => name.toLocaleLowerCase().includes(q))

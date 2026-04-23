@@ -183,12 +183,15 @@ export async function GET(request: Request) {
       },
     });
 
-    const normalizedItems: RecognitionListItem[] = items.map((item) => ({
-      id: item.id,
-      name: String(item.name || "Unknown").trim() || "Unknown",
-      mood: String(item.mood || "neutral").trim() || "neutral",
-      detectedAt: item.detectedAt,
-    }));
+    const normalizedItems: RecognitionListItem[] = [];
+    for (const item of items) {
+      normalizedItems.push({
+        id: item.id,
+        name: String(item.name || "Unknown").trim() || "Unknown",
+        mood: String(item.mood || "neutral").trim() || "neutral",
+        detectedAt: item.detectedAt,
+      });
+    }
 
     return NextResponse.json({ items: normalizedItems });
   } catch (error) {

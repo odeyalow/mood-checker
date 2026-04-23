@@ -28,7 +28,7 @@ export async function GET(
   }
 
   const counts = { positive: 0, neutral: 0, negative: 0 };
-  items.forEach((item) => addMoodCount(counts, item.mood));
+  for (const item of items) addMoodCount(counts, item.mood);
   const stats = computeRiskStats(counts);
 
   const dynamicsPointsMap = new Map();
@@ -76,18 +76,18 @@ export async function GET(
       riskByRule: stats.riskByRule,
       ruleText: stats.riskByRule ? "Risk alert" : "Normal",
     },
-    dynamics: items.map((item) => ({
+    dynamics: items.map((item: { id: string; mood: string; detectedAt: Date }) => ({
       id: item.id,
       mood: item.mood,
       detectedAt: item.detectedAt.toISOString(),
     })),
-    dynamicsPoints: dynamicsPoints.map((p) => ({
+    dynamicsPoints: dynamicsPoints.map((p: { bucketStart: string; positive: number; neutral: number; negative: number }) => ({
       bucketStart: p.bucketStart,
       positiveCount: p.positive,
       neutralCount: p.neutral,
       negativeCount: p.negative,
     })),
-    recent: items.slice(0, 20).map((item) => ({
+    recent: items.slice(0, 20).map((item: { id: string; mood: string; detectedAt: Date }) => ({
       id: item.id,
       mood: item.mood,
       detectedAt: item.detectedAt.toISOString(),
