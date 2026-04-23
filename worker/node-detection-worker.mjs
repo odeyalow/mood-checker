@@ -1679,7 +1679,7 @@ async function main() {
     envInt("WORKER_SESSION_ABSENCE_MS", Math.max(2200, recognitionHoldMs + 800)),
   );
   const sessionResolveWaitMs = Math.max(
-    300,
+    0,
     envInt("WORKER_SESSION_RESOLVE_WAIT_MS", 300),
   );
   const sessionMinSamples = Math.max(1, envInt("WORKER_SESSION_MIN_SAMPLES", 1));
@@ -2687,7 +2687,7 @@ async function main() {
       ),
     );
     const camSessionResolveWaitMs = Math.max(
-      300,
+      0,
       parseFiniteInt(
         getCameraSetting(cameraSettings, cam.cameraId, "sessionResolveWaitMs", sessionResolveWaitMs),
         sessionResolveWaitMs,
