@@ -2029,6 +2029,8 @@ async function main() {
   };
   let lastInsightFaceErrLogAt = 0;
   let lastInsightFaceRestartAt = 0;
+  let consecutiveInsightFaceFailures = 0;
+  let lastInsightFaceFailureAt = 0;
   const analyzeWithInsightFace = async (
     {
       jpgBuffer,
@@ -2054,17 +2056,30 @@ async function main() {
         },
         insightFaceTimeoutMs,
       );
+      consecutiveInsightFaceFailures = 0;
+      lastInsightFaceFailureAt = 0;
       return normalizeInsightFaceResult(payload);
     } catch (err) {
       const current = Date.now();
+      consecutiveInsightFaceFailures =
+        current - lastInsightFaceFailureAt <= Math.max(15000, insightFaceTimeoutMs * 3)
+          ? consecutiveInsightFaceFailures + 1
+          : 1;
+      lastInsightFaceFailureAt = current;
       if (current - lastInsightFaceErrLogAt >= 3000) {
-        log(`[insightface] analyze failed err=${String(err)}`);
+        log(
+          `[insightface] analyze failed count=${consecutiveInsightFaceFailures} err=${String(err)}`,
+        );
         lastInsightFaceErrLogAt = current;
       }
       const canRestart =
         inferenceBackend === "insightface" &&
-        current - lastInsightFaceRestartAt >= Math.max(2000, insightFaceTimeoutMs);
-      if (canRestart && !(await isInsightFaceServiceHealthy(`${insightFaceEndpointBase}/health`, 800))) {
+        consecutiveInsightFaceFailures >= 2 &&
+        current - lastInsightFaceRestartAt >= Math.max(4000, insightFaceTimeoutMs * 2);
+      if (
+        canRestart &&
+        !(await isInsightFaceServiceHealthy(`${insightFaceEndpointBase}/health`, Math.min(1500, insightFaceTimeoutMs)))
+      ) {
         lastInsightFaceRestartAt = current;
         await restartInsightFaceService("analyze_fetch_failed");
       }
