@@ -73,6 +73,11 @@ function readLines(filePath) {
   return fs.readFileSync(filePath, "utf-8").split(/\r?\n/);
 }
 
+function getEnvKey(line) {
+  const match = line.match(/^\s*([A-Za-z_][A-Za-z0-9_]*)=(.*)$/);
+  return match ? match[1] : null;
+}
+
 function writeLines(filePath, lines) {
   const dir = path.dirname(filePath);
   fs.mkdirSync(dir, { recursive: true });
@@ -80,34 +85,17 @@ function writeLines(filePath, lines) {
   fs.writeFileSync(filePath, body, "utf-8");
 }
 
-function findKeyLineIndexes(lines) {
-  const result = new Map();
-  lines.forEach((line, index) => {
-    const match = line.match(/^\s*([A-Za-z_][A-Za-z0-9_]*)=(.*)$/);
-    if (!match) return;
-    const key = match[1];
-    if (!result.has(key)) result.set(key, index);
-  });
-  return result;
-}
-
 function applyUpdates(filePath, pairs) {
-  const lines = readLines(filePath);
-  const keyIndexes = findKeyLineIndexes(lines);
+  const managedKeys = new Set(pairs.keys());
+  const lines = readLines(filePath).filter((line) => {
+    const key = getEnvKey(line);
+    return !key || !managedKeys.has(key);
+  });
   const changed = [];
 
   for (const [key, value] of pairs) {
     const nextLine = `${key}=${value}`;
-    if (keyIndexes.has(key)) {
-      const idx = keyIndexes.get(key);
-      if (lines[idx] !== nextLine) {
-        lines[idx] = nextLine;
-        changed.push(key);
-      }
-      continue;
-    }
     lines.push(nextLine);
-    keyIndexes.set(key, lines.length - 1);
     changed.push(key);
   }
 
