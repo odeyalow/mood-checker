@@ -450,16 +450,16 @@ function parseEmotionFromExpressions(expressions, keys) {
     const safe = Number(vector[k] ?? 0);
     let effective = safe;
     if (k === "neutral") {
-      const neutralDiscount = Math.max(0.40, 0.68 - expressiveShare * 0.40);
+      const neutralDiscount = Math.max(0.28, 0.52 - expressiveShare * 0.45);
       effective *= neutralDiscount;
     }
-    if (k === "happy") effective *= 1.12;
-    if (k === "surprised") effective *= 1.10;
-    if (k === "sad") effective *= 1.07;
-    if (k === "angry") effective *= 1.07;
-    if (k === "disgusted") effective *= 1.05;
-    if (k === "fearful") effective *= 1.05;
-    if (k !== "neutral" && expressiveShare >= 0.15) effective *= 1.06;
+    if (k === "happy") effective *= 1.18;
+    if (k === "surprised") effective *= 1.14;
+    if (k === "sad") effective *= 1.10;
+    if (k === "angry") effective *= 1.10;
+    if (k === "disgusted") effective *= 1.07;
+    if (k === "fearful") effective *= 1.07;
+    if (k !== "neutral" && expressiveShare >= 0.10) effective *= 1.10;
     adjusted[k] = effective;
     if (effective > topVal) {
       topVal = effective;
@@ -482,8 +482,8 @@ function parseEmotionFromExpressions(expressions, keys) {
     const expressiveRaw = Number(vector[runnerUpKey] ?? 0);
     const expressiveAdjusted = Number(adjusted[runnerUpKey] ?? expressiveRaw);
     const neutralAdjusted = Number(adjusted.neutral ?? neutral);
-    const expressiveClose = expressiveAdjusted >= neutralAdjusted * Math.max(0.55, 0.75 - expressiveShare * 0.3);
-    const expressiveEnough = expressiveRaw >= Math.max(0.09, neutral * 0.20);
+    const expressiveClose = expressiveAdjusted >= neutralAdjusted * Math.max(0.40, 0.62 - expressiveShare * 0.3);
+    const expressiveEnough = expressiveRaw >= Math.max(0.06, neutral * 0.12);
     if (expressiveEnough && expressiveClose) {
       topKey = runnerUpKey;
       topVal = expressiveAdjusted;
