@@ -482,8 +482,8 @@ function parseEmotionFromExpressions(expressions, keys) {
     const expressiveRaw = Number(vector[runnerUpKey] ?? 0);
     const expressiveAdjusted = Number(adjusted[runnerUpKey] ?? expressiveRaw);
     const neutralAdjusted = Number(adjusted.neutral ?? neutral);
-    const expressiveClose = expressiveAdjusted >= neutralAdjusted * Math.max(0.40, 0.62 - expressiveShare * 0.3);
-    const expressiveEnough = expressiveRaw >= Math.max(0.06, neutral * 0.12);
+    const expressiveClose = expressiveAdjusted >= neutralAdjusted * Math.max(0.28, 0.50 - expressiveShare * 0.3);
+    const expressiveEnough = expressiveRaw >= Math.max(0.04, neutral * 0.07);
     if (expressiveEnough && expressiveClose) {
       topKey = runnerUpKey;
       topVal = expressiveAdjusted;
@@ -3494,8 +3494,7 @@ async function main() {
                 const accepted =
                   Boolean(bestCandidate) &&
                   bestCandidate.distance <= camMatchThreshold &&
-                  margin >= camMatchMinMargin &&
-                  (!second || bestCandidate.distance <= Math.max(0, camMatchThreshold - 0.02));
+                  margin >= camMatchMinMargin;
                 const readyForNewId = confirmNewIdCandidate(
                   descriptor,
                   faceSide,
@@ -3589,6 +3588,11 @@ async function main() {
             }
 
             const parsedEmotion = parseEmotionFromExpressions(det?.expressions, emotionKeys);
+            if (det?.expressions && process.env.WORKER_EMOTION_DEBUG === "1") {
+              const exprStr = Object.entries(det.expressions)
+                .map(([k, v]) => `${k}=${Number(v).toFixed(3)}`).join(" ");
+              log(`[${cam.cameraId}] emotion_raw ${exprStr} → key=${parsedEmotion.key} conf=${parsedEmotion.confidence.toFixed(3)}`);
+            }
             let emotionKey = parsedEmotion.key;
             let emotionConfidence = parsedEmotion.confidence;
             if (emotionKey && !isUnknownIdentity(name)) {
