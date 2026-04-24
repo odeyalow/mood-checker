@@ -813,13 +813,15 @@ function isLikelyFrontalFace(
   if (!box) return false;
   const landmarks = det?.landmarks;
   if (!landmarks?.getLeftEye || !landmarks?.getRightEye || !landmarks?.getNose) {
-    return false;
+    // No landmark API — can't check, allow through
+    return true;
   }
 
   const leftEye = getLandmarkCenter(landmarks.getLeftEye());
   const rightEye = getLandmarkCenter(landmarks.getRightEye());
   const nose = getLandmarkCenter(landmarks.getNose());
-  if (!leftEye || !rightEye || !nose) return false;
+  // Landmark data missing (e.g. InsightFace with empty arrays) — allow through
+  if (!leftEye || !rightEye || !nose) return true;
 
   const eyeDx = rightEye.x - leftEye.x;
   const eyeDy = rightEye.y - leftEye.y;
