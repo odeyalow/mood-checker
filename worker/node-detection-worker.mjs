@@ -2090,55 +2090,61 @@ async function main() {
   const enrichDetectionsWithEmotionFallback = async (rgb, frameWidth, frameHeight, detections) => {
     if (!enableEmotions || !Array.isArray(detections) || !detections.length) return detections;
     try {
-      const snapTensor = faceapi.tf.tensor3d(rgb, [frameHeight, frameWidth, 3], "int32");
-      let emotionDetections = [];
-      try {
-        emotionDetections = await faceapi.detectAllFaces(snapTensor, tinyOptions).withFaceExpressions();
-        if ((!emotionDetections || !emotionDetections.length) && ssdLoaded) {
-          emotionDetections = await faceapi.detectAllFaces(snapTensor, ssdOptions).withFaceExpressions();
-        }
-      } finally {
-        snapTensor.dispose();
-      }
-
-      emotionDetections = filterAndDedupeDetections(emotionDetections || [], frameWidth, frameHeight, {
-        minSidePxBase: 6,
-        minSideRatio: 0,
-        minAreaRatio: 0,
-        maxAreaRatio: 1,
-        minScore: 0.05,
-        minAspect: 0.2,
-        maxAspect: 5,
-      });
-
       for (const det of detections) {
         const detBox = getBox(det);
         if (!detBox) continue;
-        let bestMatch = null;
-        for (const emotionDet of emotionDetections) {
-          const emotionBox = getBox(emotionDet);
-          if (!emotionBox) continue;
-          const overlap = iou(detBox, emotionBox);
-          const centerRatio = boxCenterDistanceRatio(detBox, emotionBox);
-          const score = emotionDetectionMatchScore(detBox, emotionBox);
-          if (!bestMatch || score > bestMatch.score) {
-            bestMatch = {
-              overlap,
-              centerRatio,
-              score,
-              expressions: emotionDet?.expressions,
-            };
+        // Crop the face region from the full rgb frame and run face-api on the crop.
+        // This avoids tiny-face-detector failing to find faces in large 1920x1080 frames.
+        const pad = Math.round(Math.max(detBox.width, detBox.height) * 0.25);
+        const cx = Math.max(0, Math.floor(detBox.x - pad));
+        const cy = Math.max(0, Math.floor(detBox.y - pad));
+        const cw = Math.min(frameWidth - cx, Math.ceil(detBox.width + pad * 2));
+        const ch = Math.min(frameHeight - cy, Math.ceil(detBox.height + pad * 2));
+        if (cw < 32 || ch < 32) continue;
+        // Extract crop from rgb (HWC uint8)
+        const cropRgb = new Uint8Array(cw * ch * 3);
+        for (let row = 0; row < ch; row++) {
+          const srcRow = cy + row;
+          if (srcRow >= frameHeight) break;
+          for (let col = 0; col < cw; col++) {
+            const srcCol = cx + col;
+            if (srcCol >= frameWidth) continue;
+            const srcIdx = (srcRow * frameWidth + srcCol) * 3;
+            const dstIdx = (row * cw + col) * 3;
+            cropRgb[dstIdx] = rgb[srcIdx];
+            cropRgb[dstIdx + 1] = rgb[srcIdx + 1];
+            cropRgb[dstIdx + 2] = rgb[srcIdx + 2];
           }
         }
-        if (
-          bestMatch &&
-          bestMatch.expressions &&
-          (bestMatch.overlap >= 0.04 || bestMatch.centerRatio <= 0.32 || bestMatch.score >= 0.18)
-        ) {
-          det.expressions = normalizeEmotionExpressions(bestMatch.expressions);
+        let cropTensor = null;
+        try {
+          cropTensor = faceapi.tf.tensor3d(cropRgb, [ch, cw, 3], "int32");
+          let emotionDetections = await faceapi.detectAllFaces(cropTensor, tinyOptions).withFaceExpressions();
+          if ((!emotionDetections || !emotionDetections.length) && ssdLoaded) {
+            emotionDetections = await faceapi.detectAllFaces(cropTensor, ssdOptions).withFaceExpressions();
+          }
+          if (emotionDetections && emotionDetections.length) {
+            // Pick the detection closest to crop center
+            const cropCx = cw / 2;
+            const cropCy = ch / 2;
+            let best = null;
+            let bestDist = Infinity;
+            for (const ed of emotionDetections) {
+              const eb = getBox(ed);
+              if (!eb || !ed.expressions) continue;
+              const dx = (eb.x + eb.width / 2) - cropCx;
+              const dy = (eb.y + eb.height / 2) - cropCy;
+              const dist = dx * dx + dy * dy;
+              if (dist < bestDist) { bestDist = dist; best = ed; }
+            }
+            if (best?.expressions) {
+              det.expressions = normalizeEmotionExpressions(best.expressions);
+            }
+          }
+        } finally {
+          cropTensor?.dispose?.();
         }
       }
-
       return detections;
     } catch (err) {
       const current = Date.now();
