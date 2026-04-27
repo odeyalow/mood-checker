@@ -3344,6 +3344,7 @@ async function main() {
       }
 
       const recentConfirm = now - cam.lastConfirmedAt < 2500;
+      const wasConfirmed = cam.confirmed > 0;
       const motionGate =
         cam.motion >= camMotionThreshold || recentConfirm || maxScore >= 0.65 || maxSide >= 150;
       const isConfirmed =
@@ -3352,6 +3353,7 @@ async function main() {
         maxScore >= camMinConfirmScore &&
         (fastPassMode ? true : motionGate);
       cam.confirmed = isConfirmed ? cam.candidate : 0;
+      const confirmStarted = isConfirmed && !wasConfirmed;
       if (!isConfirmed) {
         cam.newIdGateDescriptor = null;
         cam.newIdGateStreak = 0;
@@ -3386,7 +3388,13 @@ async function main() {
       }
 
       const needMatch = enableMatching && now - cam.lastMatchAt >= camMatchIntervalMs;
-      const needEmotion = enableEmotions && now - cam.lastEmotionAt >= camEmotionIntervalMs;
+      const needEmotionBase = enableEmotions && now - cam.lastEmotionAt >= camEmotionIntervalMs;
+      const needEmotionOnConfirmStart = enableEmotions && confirmStarted;
+      const needEmotionWhileConfirmed =
+        enableEmotions &&
+        isConfirmed &&
+        now - cam.lastEmotionAt >= Math.max(120, Math.floor(camEmotionIntervalMs * 0.5));
+      const needEmotion = needEmotionBase || needEmotionOnConfirmStart || needEmotionWhileConfirmed;
       const effectiveSnapshotCooldownMs = Math.max(
         camSnapshotCooldownMs,
         camSessionSnapshotIntervalMs,
