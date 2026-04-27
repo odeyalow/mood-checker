@@ -3068,6 +3068,9 @@ async function main() {
       const effectiveMinSharpness = noKnownIdentities
         ? Math.max(camNewIdMinSharpness, camNewIdEmptyMinSharpness)
         : camNewIdMinSharpness;
+      const effectiveConfirmFrames = noKnownIdentities
+        ? camNewIdConfirmFrames
+        : Math.max(2, camNewIdConfirmFrames);
       if (
         faceSide < effectiveMinFaceSide ||
         identityScore < effectiveMinScore ||
@@ -3088,7 +3091,7 @@ async function main() {
       cam.newIdGateStreak = isStable ? cam.newIdGateStreak + 1 : 1;
       cam.newIdGateLastAt = now;
       cam.newIdGateDescriptor = descriptor.slice();
-      return cam.newIdGateStreak >= camNewIdConfirmFrames;
+      return cam.newIdGateStreak >= effectiveConfirmFrames;
     };
     const applyIdentityLock = (name, distance) => {
       const safeName = String(name || "").trim();
@@ -3585,7 +3588,7 @@ async function main() {
                     const identifyReady = now - (cam.lastIdentifyAt || 0) >= camIdentifyMinIntervalMs;
                     const autoCreateCoolingDown =
                       cam.lastAutoCreatedAt > 0 &&
-                      now - cam.lastAutoCreatedAt < camAutoCreateCooldownMs;
+                      now - cam.lastAutoCreatedAt < Math.max(camAutoCreateCooldownMs, 4500);
                     if (identifyReady && !autoCreateCoolingDown) {
                       cam.lastIdentifyAt = now;
                       const identified = await identifyFaceDescriptor(
