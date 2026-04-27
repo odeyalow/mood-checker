@@ -1734,6 +1734,7 @@ async function main() {
   );
   const emotionEmaAlpha = Math.max(0, Math.min(1, envFloat("WORKER_EMOTION_EMA_ALPHA", 0.58)));
   const emotionEmaTtlMs = Math.max(2000, envInt("WORKER_EMOTION_EMA_TTL_MS", 12000));
+  const emotionCarryoverMs = Math.max(1000, envInt("WORKER_EMOTION_CARRYOVER_MS", 10000));
   const dbEndpoint = (process.env.WORKER_DB_ENDPOINT || "http://127.0.0.1:3000/api/recognitions").trim();
   const dbCooldownMs = Math.max(800, envInt("WORKER_DB_COOLDOWN_MS", 2000));
   const dbReentryGapMs = Math.max(250, envInt("WORKER_DB_REENTRY_GAP_MS", 800));
@@ -2406,7 +2407,8 @@ async function main() {
   log(
     `emotion min_confidence=${emotionMinConfidence} ema_alpha=${emotionEmaAlpha} ` +
       `ema_ttl_ms=${emotionEmaTtlMs} low_floor=${emotionLowConfidenceFloor} ` +
-      `allow_low_label=${emotionAllowLowConfidenceLabel ? "on" : "off"}`,
+      `allow_low_label=${emotionAllowLowConfidenceLabel ? "on" : "off"} ` +
+      `carryover_ms=${emotionCarryoverMs}`,
   );
   log(
     `db cooldown_ms=${dbCooldownMs} reentry_gap_ms=${dbReentryGapMs} ` +
@@ -3677,7 +3679,7 @@ async function main() {
             const recentRawEmotionUsable =
               !emotionLabel &&
               !fallbackEmotionLabel &&
-              now - Number(cam.lastRawEmotionAt || 0) <= 4000 &&
+              now - Number(cam.lastRawEmotionAt || 0) <= emotionCarryoverMs &&
               String(cam.lastRawEmotionKey || "").trim() &&
               Number(cam.lastRawEmotionConfidence || 0) >= camEmotionLowConfidenceFloor;
             const recentRawEmotionLabel = recentRawEmotionUsable
