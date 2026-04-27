@@ -2148,6 +2148,13 @@ async function main() {
           if ((!emotionDetections || !emotionDetections.length) && ssdLoaded) {
             emotionDetections = await faceapi.detectAllFaces(cropTensor, ssdOptions).withFaceExpressions();
           }
+          if (!emotionDetections || !emotionDetections.length) {
+            let singleDetection = await faceapi.detectSingleFace(cropTensor, emotionTinyOptions).withFaceExpressions();
+            if (!singleDetection && ssdLoaded) {
+              singleDetection = await faceapi.detectSingleFace(cropTensor, ssdOptions).withFaceExpressions();
+            }
+            emotionDetections = singleDetection ? [singleDetection] : [];
+          }
           if (emotionDetections && emotionDetections.length) {
             // Pick the detection closest to crop center
             const cropCx = cw / 2;
