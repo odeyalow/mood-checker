@@ -3403,6 +3403,7 @@ async function main() {
         cam.confirmed > 0 &&
         (needMatch || needEmotion) &&
         now - cam.lastSnapshotAt >= effectiveSnapshotCooldownMs;
+      const needExpressionsForSnapshot = enableEmotions && (needEmotion || needMatch);
 
       if (shouldSnapshot) {
         cam.lastSnapshotAt = now;
@@ -3414,7 +3415,7 @@ async function main() {
             if (enableMatching) {
               task = task.withFaceLandmarks(true).withFaceDescriptors();
             }
-            if (enableEmotions && needEmotion) {
+            if (needExpressionsForSnapshot) {
               task = task.withFaceExpressions();
             }
             return task;
@@ -3473,7 +3474,7 @@ async function main() {
                 ),
             );
           }
-          if (inferenceBackend === "insightface" && enableEmotions && needEmotion && results.length) {
+          if (inferenceBackend === "insightface" && needExpressionsForSnapshot && results.length) {
             results = await enrichDetectionsWithEmotionFallback(rgb, workerWidth, workerHeight, results);
           }
           if (camRequireFrontalFace && results.length) {
