@@ -1521,6 +1521,9 @@ function createState(cameraId, src) {
     snapshotSavedCount: 0,
     lastCandidateAt: 0,
     lastEmotionAt: 0,
+    lastRawEmotionKey: "",
+    lastRawEmotionConfidence: 0,
+    lastRawEmotionAt: 0,
     lastBestBox: null,
     lastDetectionBoxes: [],
     prevLuma: null,
@@ -3632,6 +3635,11 @@ async function main() {
             }
             let emotionKey = parsedEmotion.key;
             let emotionConfidence = parsedEmotion.confidence;
+            if (emotionKey && Number.isFinite(emotionConfidence) && emotionConfidence > 0) {
+              cam.lastRawEmotionKey = String(emotionKey || "").trim();
+              cam.lastRawEmotionConfidence = Number(emotionConfidence);
+              cam.lastRawEmotionAt = now;
+            }
             if (emotionKey && !isUnknownIdentity(name)) {
               const prev = cam.emotionEmaByName.get(name);
               const smoothed = {};
@@ -3666,7 +3674,16 @@ async function main() {
               emotionKey && Number.isFinite(emotionConfidence) && emotionConfidence > 0
                 ? `${emotionKey} ${(emotionConfidence * 100).toFixed(0)}%`
                 : "";
-            const displayEmotionLabel = emotionLabel || fallbackEmotionLabel;
+            const recentRawEmotionUsable =
+              !emotionLabel &&
+              !fallbackEmotionLabel &&
+              now - Number(cam.lastRawEmotionAt || 0) <= 4000 &&
+              String(cam.lastRawEmotionKey || "").trim() &&
+              Number(cam.lastRawEmotionConfidence || 0) >= camEmotionLowConfidenceFloor;
+            const recentRawEmotionLabel = recentRawEmotionUsable
+              ? `${cam.lastRawEmotionKey} ${(Number(cam.lastRawEmotionConfidence) * 100).toFixed(0)}%`
+              : "";
+            const displayEmotionLabel = emotionLabel || fallbackEmotionLabel || recentRawEmotionLabel;
 
             if (!isUnknownIdentity(name)) {
               people.push({
@@ -3792,7 +3809,7 @@ async function main() {
               cam.snapshotUrl = `${snapshotPublicBase}/${cam.cameraId}.jpg?v=${now}`;
               cam.lastSnapshotSavedAt = now;
               const snapshotFaces = people
-                .map((person) => `${person.name}:${person.emotion || "-"}`)
+                .map((person) => `${person.name}:${person.emotion || person.emotionKey || "-"}`)
                 .join(", ");
               if (snapshotFaces) {
                 log(`[${cam.cameraId}] snapshot faces=${snapshotFaces}`);
