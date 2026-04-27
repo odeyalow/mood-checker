@@ -29,6 +29,19 @@ function parseThreshold(raw: unknown) {
   return Math.max(0.2, Math.min(1, value));
 }
 
+function parseMatchMinMargin(raw: unknown) {
+  const value = Number(raw ?? process.env.FACE_IDENTITY_MATCH_MIN_MARGIN ?? 0.1);
+  if (!Number.isFinite(value)) return 0.1;
+  return Math.max(0, Math.min(0.6, value));
+}
+
+function parseDescriptorUpdateStrictDistance(raw: unknown, threshold: number) {
+  const fallback = Math.max(0.2, threshold - 0.04);
+  const value = Number(raw ?? process.env.FACE_IDENTITY_UPDATE_MAX_DISTANCE ?? fallback);
+  if (!Number.isFinite(value)) return fallback;
+  return Math.max(0.2, Math.min(1, value));
+}
+
 function parsePostCheckThreshold(raw: unknown, baseThreshold: number) {
   const fallback = Math.min(1, Math.max(0.68, baseThreshold + 0.08));
   const value = Number(raw ?? process.env.FACE_IDENTITY_POSTCHECK_THRESHOLD ?? fallback);
@@ -202,6 +215,11 @@ export async function POST(request: Request) {
     }
 
     const threshold = parseThreshold(body?.threshold);
+    const matchMinMargin = parseMatchMinMargin(body?.matchMinMargin);
+    const descriptorUpdateMaxDistance = parseDescriptorUpdateStrictDistance(
+      body?.descriptorUpdateMaxDistance,
+      threshold,
+    );
     const postCheckThreshold = parsePostCheckThreshold(body?.postCheckThreshold, threshold);
     const postCheckRelaxedThreshold = parsePostCheckRelaxedThreshold(
       body?.postCheckRelaxedThreshold,
@@ -235,8 +253,15 @@ export async function POST(request: Request) {
     }
     ranked.sort((a, b) => a.distance - b.distance);
 
-    if (best && best.distance <= threshold) {
-      const nextDescriptor = mergeDescriptor(best.descriptor, descriptor, updateAlpha);
+    const second = ranked[1] ?? null;
+    const margin = second ? second.distance - (best?.distance ?? Number.POSITIVE_INFINITY) : Number.POSITIVE_INFINITY;
+    const acceptedBest = Boolean(best) && (best?.distance ?? Number.POSITIVE_INFINITY) <= threshold && margin >= matchMinMargin;
+
+    if (best && acceptedBest) {
+      const shouldUpdateDescriptor = best.distance <= descriptorUpdateMaxDistance;
+      const nextDescriptor = shouldUpdateDescriptor
+        ? mergeDescriptor(best.descriptor, descriptor, updateAlpha)
+        : best.descriptor;
       await prisma.faceIdentity.update({
         where: { id: best.id },
         data: { descriptor: nextDescriptor },
@@ -279,6 +304,7 @@ export async function POST(request: Request) {
           descriptor: number[];
           createdAt: Date;
           distance: number;
+          margin: number;
         }
       | null = null;
     for (const item of postCheckCandidates) {
@@ -286,6 +312,11 @@ export async function POST(request: Request) {
       if (!known) continue;
       const distance = descriptorDistance(descriptor, known);
       if (!Number.isFinite(distance)) continue;
+      const competitor = ranked.find((candidate) => candidate.id !== item.id);
+      const competitorDistance = Number(competitor?.distance ?? Number.POSITIVE_INFINITY);
+      const candidateMargin = Number.isFinite(competitorDistance)
+        ? Math.max(0, competitorDistance - distance)
+        : Number.POSITIVE_INFINITY;
       if (
         !duplicateCandidate ||
         distance < duplicateCandidate.distance ||
@@ -297,6 +328,7 @@ export async function POST(request: Request) {
           descriptor: known,
           createdAt: item.createdAt,
           distance,
+          margin: candidateMargin,
         };
       }
     }
@@ -306,12 +338,15 @@ export async function POST(request: Request) {
         ? Math.abs(created.createdAt.getTime() - duplicateCandidate.createdAt.getTime())
         : Number.POSITIVE_INFINITY;
     const mergeByStrict = Boolean(
-      duplicateCandidate && duplicateCandidate.distance <= postCheckThreshold,
+      duplicateCandidate &&
+        duplicateCandidate.distance <= postCheckThreshold &&
+        duplicateCandidate.margin >= matchMinMargin,
     );
     const mergeByRelaxed = Boolean(
       duplicateCandidate &&
         createdAtDeltaMs <= postCheckWindowMs &&
-        duplicateCandidate.distance <= postCheckRelaxedThreshold,
+        duplicateCandidate.distance <= postCheckRelaxedThreshold &&
+        duplicateCandidate.margin >= Math.max(0.06, matchMinMargin * 0.75),
     );
     const shouldMerge = mergeByStrict || mergeByRelaxed;
 

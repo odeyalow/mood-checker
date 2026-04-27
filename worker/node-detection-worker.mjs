@@ -450,16 +450,16 @@ function parseEmotionFromExpressions(expressions, keys) {
     const safe = Number(vector[k] ?? 0);
     let effective = safe;
     if (k === "neutral") {
-      const neutralDiscount = Math.max(0.28, 0.52 - expressiveShare * 0.45);
+      const neutralDiscount = Math.max(0.18, 0.42 - expressiveShare * 0.5);
       effective *= neutralDiscount;
     }
-    if (k === "happy") effective *= 1.18;
-    if (k === "surprised") effective *= 1.14;
-    if (k === "sad") effective *= 1.10;
-    if (k === "angry") effective *= 1.10;
-    if (k === "disgusted") effective *= 1.07;
-    if (k === "fearful") effective *= 1.07;
-    if (k !== "neutral" && expressiveShare >= 0.10) effective *= 1.10;
+    if (k === "happy") effective *= 1.24;
+    if (k === "surprised") effective *= 1.2;
+    if (k === "sad") effective *= 1.14;
+    if (k === "angry") effective *= 1.14;
+    if (k === "disgusted") effective *= 1.12;
+    if (k === "fearful") effective *= 1.12;
+    if (k !== "neutral" && expressiveShare >= 0.05) effective *= 1.14;
     adjusted[k] = effective;
     if (effective > topVal) {
       topVal = effective;
@@ -482,13 +482,20 @@ function parseEmotionFromExpressions(expressions, keys) {
     const expressiveRaw = Number(vector[runnerUpKey] ?? 0);
     const expressiveAdjusted = Number(adjusted[runnerUpKey] ?? expressiveRaw);
     const neutralAdjusted = Number(adjusted.neutral ?? neutral);
-    const expressiveClose = expressiveAdjusted >= neutralAdjusted * Math.max(0.28, 0.50 - expressiveShare * 0.3);
-    const expressiveEnough = expressiveRaw >= Math.max(0.04, neutral * 0.07);
+    const expressiveClose = expressiveAdjusted >= neutralAdjusted * Math.max(0.18, 0.42 - expressiveShare * 0.32);
+    const expressiveEnough = expressiveRaw >= Math.max(0.02, neutral * 0.04);
     if (expressiveEnough && expressiveClose) {
       topKey = runnerUpKey;
       topVal = expressiveAdjusted;
       runnerUpAdjusted = neutralAdjusted;
     }
+  }
+
+  // Keep neutral from dominating long-tail signals: promote the strongest
+  // expressive class when non-neutral share is non-trivial.
+  if (topKey === "neutral" && runnerUpKey && runnerUpKey !== "neutral" && expressiveShare >= 0.04) {
+    topKey = runnerUpKey;
+    topVal = Number(adjusted[runnerUpKey] ?? vector[runnerUpKey] ?? 0);
   }
 
   const rawConfidence = Number(vector[topKey] ?? 0);
@@ -3071,7 +3078,11 @@ async function main() {
         const incomingDistance = safeDistance;
         const incomingClearlyBetter =
           incomingDistance > 0 &&
-          (lockDistance <= 0 || incomingDistance + camIdentityLockSwitchMargin < lockDistance);
+          (
+            lockDistance <= 0 ||
+            incomingDistance + camIdentityLockSwitchMargin < lockDistance ||
+            incomingDistance <= Math.max(0, camMatchThreshold - 0.03)
+          );
 
         if (!incomingClearlyBetter) {
           return {
@@ -3495,6 +3506,10 @@ async function main() {
                   Boolean(bestCandidate) &&
                   bestCandidate.distance <= camMatchThreshold &&
                   margin >= camMatchMinMargin;
+                const ambiguousNearMatch =
+                  Boolean(bestCandidate) &&
+                  bestCandidate.distance <= camMatchThreshold + 0.03 &&
+                  margin < Math.max(camMatchMinMargin, 0.12);
                 const readyForNewId = confirmNewIdCandidate(
                   descriptor,
                   faceSide,
@@ -3532,7 +3547,7 @@ async function main() {
                   if (lockActive) {
                     name = cam.identityLockName;
                     distance = Number(cam.identityLockDistance) || 0;
-                  } else if (readyForNewId && !blockedByPhantomBank) {
+                  } else if (readyForNewId && !blockedByPhantomBank && !ambiguousNearMatch) {
                     const identifyReady = now - (cam.lastIdentifyAt || 0) >= camIdentifyMinIntervalMs;
                     const autoCreateCoolingDown =
                       cam.lastAutoCreatedAt > 0 &&

@@ -20,6 +20,13 @@ function parseLimit(raw: string | null, fallback = 100) {
   return Math.max(1, Math.min(500, n));
 }
 
+function parseBool(raw: string | null, fallback = false) {
+  if (raw == null) return fallback;
+  const normalized = String(raw).trim().toLowerCase();
+  if (!normalized) return fallback;
+  return ["1", "true", "yes", "on"].includes(normalized);
+}
+
 function sanitizeShortId(shortId: string) {
   return shortId.replace(/[^A-Za-z0-9_-]/g, "").slice(0, 32);
 }
@@ -87,6 +94,7 @@ export async function GET(request: Request) {
   try {
     const url = new URL(request.url);
     const limit = parseLimit(url.searchParams.get("limit"), 120);
+    const includeEmpty = parseBool(url.searchParams.get("includeEmpty"), false);
 
     const identities = await prisma.faceIdentity.findMany({
       orderBy: { updatedAt: "desc" },
@@ -211,11 +219,15 @@ export async function GET(request: Request) {
       const latestSnapshot = latestSnapshotByFaceId.get(identity.id);
       const disk = diskByFaceId.get(identity.id);
       const latestSnapshotOk = await snapshotExists(latestSnapshot?.snapshotUrl);
+      const recognitionCount =
+        recognitionCountByFaceId.get(identity.id) ?? identity._count.recognitions ?? 0;
+      if (!includeEmpty && recognitionCount <= 0) {
+        continue;
+      }
       items.push({
         id: identity.id,
         shortId: identity.shortId,
-        recognitionCount:
-          recognitionCountByFaceId.get(identity.id) ?? identity._count.recognitions ?? 0,
+        recognitionCount,
         snapshotUrl: latestSnapshotOk ? latestSnapshot?.snapshotUrl || "" : disk?.snapshotUrl || "",
         lastDetectedAt: latestSnapshotOk
           ? latestSnapshot?.detectedAt?.toISOString() || ""
