@@ -3873,8 +3873,7 @@ async function main() {
               }
               const effectiveEmotionLabel =
                 String(person.emotion || "").trim() ||
-                String(resolvedEmotionLabel || "").trim() ||
-                String(moodLabel || "").trim();
+                String(resolvedEmotionLabel || "").trim();
               cam.lastRecognitionMood = String(moodLabel || "").trim();
               cam.lastRecognitionEmotion = effectiveEmotionLabel;
               person.emotionConfidence = Number(
@@ -3938,8 +3937,15 @@ async function main() {
                 `${p.name}:${p.emotion || p.emotionKey || "-"}(${Number(p.emotionConfidence ?? 0).toFixed(2)})`,
               )
               .join(", ");
+            const topExpressive = cam.people.find((person) => {
+              const key = String(person?.emotionKey ?? "").trim().toLowerCase();
+              const confidence = Number(person?.emotionConfidence ?? 0);
+              return key && key !== "neutral" && Number.isFinite(confidence) && confidence >= camEmotionLowConfidenceFloor;
+            });
             cam.topEmotion =
-              cam.people.find((person) => String(person?.emotion ?? person?.emotionKey ?? "").trim())?.emotion ||
+              String(topExpressive?.emotion ?? "").trim() ||
+              String(topExpressive?.emotionKey ?? "").trim() ||
+              cam.people.find((person) => String(person?.emotion ?? "").trim())?.emotion ||
               cam.people.find((person) => String(person?.emotionKey ?? "").trim())?.emotionKey ||
               "";
             if (cam.topEmotion && now - cam.lastEmotionLogAt >= 1500) {
