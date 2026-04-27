@@ -1638,6 +1638,14 @@ async function main() {
   const personMinStreak = Math.max(1, envInt("WORKER_PERSON_MIN_STREAK", 1));
   const tinyInputSize = envInt("WORKER_TINY_INPUT_SIZE", 512);
   const tinyScoreThreshold = envFloat("WORKER_TINY_SCORE_THRESHOLD", 0.18);
+  const emotionTinyInputSize = Math.max(
+    128,
+    envInt("WORKER_EMOTION_TINY_INPUT_SIZE", Math.min(320, Math.max(160, tinyInputSize))),
+  );
+  const emotionTinyScoreThreshold = Math.max(
+    0.01,
+    Math.min(0.5, envFloat("WORKER_EMOTION_TINY_SCORE_THRESHOLD", Math.min(0.12, tinyScoreThreshold))),
+  );
   const ssdMinConfidence = envFloat("WORKER_SSD_MIN_CONFIDENCE", 0.35);
   const useSsdFallback = envBool("WORKER_USE_SSD_FALLBACK", false);
   const fastPassMode = envBool("WORKER_FAST_PASS_MODE", true);
@@ -1965,6 +1973,10 @@ async function main() {
     inputSize: tinyInputSize,
     scoreThreshold: tinyScoreThreshold,
   });
+  const emotionTinyOptions = new faceapi.TinyFaceDetectorOptions({
+    inputSize: emotionTinyInputSize,
+    scoreThreshold: emotionTinyScoreThreshold,
+  });
   const ssdOptions = new faceapi.SsdMobilenetv1Options({ minConfidence: ssdMinConfidence });
   const reloadFaceRegistry = async (reason) => {
     const loadedAt = Date.now();
@@ -2104,7 +2116,7 @@ async function main() {
         if (!detBox) continue;
         // Crop the face region from the full rgb frame and run face-api on the crop.
         // This avoids tiny-face-detector failing to find faces in large 1920x1080 frames.
-        const pad = Math.round(Math.max(detBox.width, detBox.height) * 0.25);
+        const pad = Math.round(Math.max(detBox.width, detBox.height) * 0.35);
         const cx = Math.max(0, Math.floor(detBox.x - pad));
         const cy = Math.max(0, Math.floor(detBox.y - pad));
         const cw = Math.min(frameWidth - cx, Math.ceil(detBox.width + pad * 2));
@@ -2128,7 +2140,7 @@ async function main() {
         let cropTensor = null;
         try {
           cropTensor = faceapi.tf.tensor3d(cropRgb, [ch, cw, 3], "int32");
-          let emotionDetections = await faceapi.detectAllFaces(cropTensor, tinyOptions).withFaceExpressions();
+          let emotionDetections = await faceapi.detectAllFaces(cropTensor, emotionTinyOptions).withFaceExpressions();
           if ((!emotionDetections || !emotionDetections.length) && ssdLoaded) {
             emotionDetections = await faceapi.detectAllFaces(cropTensor, ssdOptions).withFaceExpressions();
           }
@@ -2254,7 +2266,8 @@ async function main() {
   if (inferenceBackend === "insightface") {
     log(
       `detector=insightface endpoint=${insightFaceEndpointBase} timeout_ms=${insightFaceTimeoutMs} ` +
-        `emotion_fallback=${enableEmotions ? "face-api" : "off"}`,
+        `emotion_fallback=${enableEmotions ? "face-api" : "off"} ` +
+        `emotion_tiny(input=${emotionTinyInputSize},score=${emotionTinyScoreThreshold.toFixed(3)})`,
     );
   } else {
     log(
