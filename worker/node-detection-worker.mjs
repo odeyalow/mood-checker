@@ -450,16 +450,16 @@ function parseEmotionFromExpressions(expressions, keys) {
     const safe = Number(vector[k] ?? 0);
     let effective = safe;
     if (k === "neutral") {
-      const neutralDiscount = Math.max(0.18, 0.42 - expressiveShare * 0.5);
+      const neutralDiscount = Math.max(0.06, 0.28 - expressiveShare * 0.55);
       effective *= neutralDiscount;
     }
-    if (k === "happy") effective *= 1.24;
-    if (k === "surprised") effective *= 1.2;
-    if (k === "sad") effective *= 1.14;
-    if (k === "angry") effective *= 1.14;
-    if (k === "disgusted") effective *= 1.12;
-    if (k === "fearful") effective *= 1.12;
-    if (k !== "neutral" && expressiveShare >= 0.05) effective *= 1.14;
+    if (k === "happy") effective *= 1.35;
+    if (k === "surprised") effective *= 1.30;
+    if (k === "sad") effective *= 1.24;
+    if (k === "angry") effective *= 1.24;
+    if (k === "disgusted") effective *= 1.20;
+    if (k === "fearful") effective *= 1.20;
+    if (k !== "neutral" && expressiveShare >= 0.01) effective *= 1.18;
     adjusted[k] = effective;
     if (effective > topVal) {
       topVal = effective;
@@ -482,8 +482,8 @@ function parseEmotionFromExpressions(expressions, keys) {
     const expressiveRaw = Number(vector[runnerUpKey] ?? 0);
     const expressiveAdjusted = Number(adjusted[runnerUpKey] ?? expressiveRaw);
     const neutralAdjusted = Number(adjusted.neutral ?? neutral);
-    const expressiveClose = expressiveAdjusted >= neutralAdjusted * Math.max(0.18, 0.42 - expressiveShare * 0.32);
-    const expressiveEnough = expressiveRaw >= Math.max(0.02, neutral * 0.04);
+    const expressiveClose = expressiveAdjusted >= neutralAdjusted * Math.max(0.05, 0.22 - expressiveShare * 0.32);
+    const expressiveEnough = expressiveRaw >= Math.max(0.005, neutral * 0.015);
     if (expressiveEnough && expressiveClose) {
       topKey = runnerUpKey;
       topVal = expressiveAdjusted;
@@ -493,7 +493,7 @@ function parseEmotionFromExpressions(expressions, keys) {
 
   // Keep neutral from dominating long-tail signals: promote the strongest
   // expressive class when non-neutral share is non-trivial.
-  if (topKey === "neutral" && runnerUpKey && runnerUpKey !== "neutral" && expressiveShare >= 0.04) {
+  if (topKey === "neutral" && runnerUpKey && runnerUpKey !== "neutral" && expressiveShare >= 0.005) {
     topKey = runnerUpKey;
     topVal = Number(adjusted[runnerUpKey] ?? vector[runnerUpKey] ?? 0);
   }
@@ -1722,17 +1722,17 @@ async function main() {
   );
   const emotionMinConfidence = Math.max(
     0,
-    Math.min(1, envFloat("WORKER_EMOTION_MIN_CONFIDENCE", 0.24)),
+    Math.min(1, envFloat("WORKER_EMOTION_MIN_CONFIDENCE", 0.04)),
   );
   const emotionLowConfidenceFloor = Math.max(
     0,
-    Math.min(1, envFloat("WORKER_EMOTION_LOW_CONFIDENCE_FLOOR", 0.08)),
+    Math.min(1, envFloat("WORKER_EMOTION_LOW_CONFIDENCE_FLOOR", 0.01)),
   );
   const emotionAllowLowConfidenceLabel = envBool(
     "WORKER_EMOTION_ALLOW_LOW_CONFIDENCE_LABEL",
     true,
   );
-  const emotionEmaAlpha = Math.max(0, Math.min(1, envFloat("WORKER_EMOTION_EMA_ALPHA", 0.58)));
+  const emotionEmaAlpha = Math.max(0, Math.min(1, envFloat("WORKER_EMOTION_EMA_ALPHA", 0.80)));
   const emotionEmaTtlMs = Math.max(2000, envInt("WORKER_EMOTION_EMA_TTL_MS", 12000));
   const emotionCarryoverMs = Math.max(1000, envInt("WORKER_EMOTION_CARRYOVER_MS", 10000));
   const dbEndpoint = (process.env.WORKER_DB_ENDPOINT || "http://127.0.0.1:3000/api/recognitions").trim();
