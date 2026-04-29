@@ -3902,6 +3902,15 @@ async function main() {
               if (!moodLabel && readyByRegistration && dbAllowMoodFallback) {
                 moodLabel = dbFallbackMood;
               }
+              // Keep recognition persistence robust: if session matured but
+              // emotion label is still missing, emit with fallback mood.
+              if (
+                !moodLabel &&
+                session.sampleCount >= camSessionMinSamples &&
+                sessionAgeMs >= camSessionResolveWaitMs
+              ) {
+                moodLabel = dbFallbackMood;
+              }
               if (!resolvedEmotionLabel && moodLabel) {
                 resolvedEmotionLabel = moodLabel;
               }
