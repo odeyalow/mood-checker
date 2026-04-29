@@ -3555,7 +3555,12 @@ async function main() {
                   identityScore,
                   faceSharpness,
                 );
-                const blockedBankMatch = readyForNewId
+                const softReadyForNewId =
+                  faceSide >= Math.max(12, camNewIdMinFaceSidePx - 4) &&
+                  identityScore >= Math.max(0.08, camNewIdMinScore - 0.03) &&
+                  faceSharpness >= Math.max(4, camNewIdMinSharpness * 0.6);
+                const canAttemptNewId = readyForNewId || softReadyForNewId;
+                const blockedBankMatch = canAttemptNewId
                   ? findClosestDescriptorInBank(blockedDescriptorBank, descriptor)
                   : null;
                 const blockedByPhantomBank = Boolean(
@@ -3586,7 +3591,7 @@ async function main() {
                   if (lockActive) {
                     name = cam.identityLockName;
                     distance = Number(cam.identityLockDistance) || 0;
-                  } else if (readyForNewId && !blockedByPhantomBank && !ambiguousNearMatch) {
+                  } else if (canAttemptNewId && !blockedByPhantomBank && !ambiguousNearMatch) {
                     const identifyReady = now - (cam.lastIdentifyAt || 0) >= camIdentifyMinIntervalMs;
                     const autoCreateCoolingDown =
                       cam.lastAutoCreatedAt > 0 &&
