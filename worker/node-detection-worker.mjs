@@ -450,16 +450,16 @@ function parseEmotionFromExpressions(expressions, keys) {
     const safe = Number(vector[k] ?? 0);
     let effective = safe;
     if (k === "neutral") {
-      const neutralDiscount = Math.max(0.03, 0.2 - expressiveShare * 0.6);
+      const neutralDiscount = Math.max(0.05, 0.24 - expressiveShare * 0.52);
       effective *= neutralDiscount;
     }
-    if (k === "happy") effective *= 1.42;
-    if (k === "surprised") effective *= 1.36;
-    if (k === "sad") effective *= 1.28;
-    if (k === "angry") effective *= 1.28;
-    if (k === "disgusted") effective *= 1.24;
-    if (k === "fearful") effective *= 1.24;
-    if (k !== "neutral" && expressiveShare >= 0.005) effective *= 1.22;
+    if (k === "happy") effective *= 1.34;
+    if (k === "surprised") effective *= 1.26;
+    if (k === "sad") effective *= 1.20;
+    if (k === "angry") effective *= 1.20;
+    if (k === "disgusted") effective *= 1.16;
+    if (k === "fearful") effective *= 1.16;
+    if (k !== "neutral" && expressiveShare >= 0.01) effective *= 1.16;
     adjusted[k] = effective;
     if (effective > topVal) {
       topVal = effective;
@@ -482,8 +482,8 @@ function parseEmotionFromExpressions(expressions, keys) {
     const expressiveRaw = Number(vector[runnerUpKey] ?? 0);
     const expressiveAdjusted = Number(adjusted[runnerUpKey] ?? expressiveRaw);
     const neutralAdjusted = Number(adjusted.neutral ?? neutral);
-    const expressiveClose = expressiveAdjusted >= neutralAdjusted * Math.max(0.03, 0.16 - expressiveShare * 0.34);
-    const expressiveEnough = expressiveRaw >= Math.max(0.002, neutral * 0.01);
+    const expressiveClose = expressiveAdjusted >= neutralAdjusted * Math.max(0.05, 0.2 - expressiveShare * 0.3);
+    const expressiveEnough = expressiveRaw >= Math.max(0.004, neutral * 0.012);
     if (expressiveEnough && expressiveClose) {
       topKey = runnerUpKey;
       topVal = expressiveAdjusted;
@@ -493,7 +493,7 @@ function parseEmotionFromExpressions(expressions, keys) {
 
   // Keep neutral from dominating long-tail signals: promote the strongest
   // expressive class when non-neutral share is non-trivial.
-  if (topKey === "neutral" && runnerUpKey && runnerUpKey !== "neutral" && expressiveShare >= 0.002) {
+  if (topKey === "neutral" && runnerUpKey && runnerUpKey !== "neutral" && expressiveShare >= 0.01) {
     topKey = runnerUpKey;
     topVal = Number(adjusted[runnerUpKey] ?? vector[runnerUpKey] ?? 0);
   }
