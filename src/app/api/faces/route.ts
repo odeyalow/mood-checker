@@ -31,6 +31,20 @@ function sanitizeShortId(shortId: string) {
   return shortId.replace(/[^A-Za-z0-9_-]/g, "").slice(0, 32);
 }
 
+function isUnknownIdentity(name: string) {
+  const normalized = String(name || "").trim().toLowerCase();
+  if (!normalized) return true;
+  return (
+    normalized === "unknown" ||
+    normalized === "unrecognized" ||
+    normalized === "not_recognized" ||
+    normalized === "undefined" ||
+    normalized === "null" ||
+    normalized === "none" ||
+    normalized === "n/a"
+  );
+}
+
 function snapshotPathToPublicFile(snapshotUrl: string) {
   const clean = String(snapshotUrl || "").split("?")[0];
   if (!clean.startsWith("/")) return "";
@@ -95,6 +109,31 @@ export async function GET(request: Request) {
     const url = new URL(request.url);
     const limit = parseLimit(url.searchParams.get("limit"), 120);
     const includeEmpty = parseBool(url.searchParams.get("includeEmpty"), false);
+
+    // Backfill identities for existing recognition names that may have been
+    // written when descriptor was missing.
+    const recentNames = await prisma.recognition.findMany({
+      orderBy: { detectedAt: "desc" },
+      take: Math.max(500, limit * 10),
+      select: { name: true },
+    });
+    const uniqueNames = Array.from(
+      new Set(
+        recentNames
+          .map((row) => String(row.name || "").trim())
+          .filter((name) => name && !isUnknownIdentity(name)),
+      ),
+    );
+    for (const shortId of uniqueNames) {
+      await prisma.faceIdentity
+        .upsert({
+          where: { shortId },
+          create: { shortId, descriptor: [] },
+          update: {},
+          select: { id: true },
+        })
+        .catch(() => null);
+    }
 
     const identities = await prisma.faceIdentity.findMany({
       orderBy: { updatedAt: "desc" },

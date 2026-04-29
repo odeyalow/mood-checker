@@ -57,6 +57,11 @@ function isUnknownIdentity(name: string) {
   );
 }
 
+function isPlaceholderDescriptor(value: unknown) {
+  if (!Array.isArray(value)) return true;
+  return value.length === 0;
+}
+
 function parseSnapshotBuffer(raw: unknown): Buffer | null {
   if (typeof raw !== "string") return null;
   const trimmed = raw.trim();
@@ -336,24 +341,44 @@ export async function POST(request: Request) {
     try {
       let identity = await prisma.faceIdentity.findUnique({
         where: { shortId: name },
-        select: { id: true },
+        select: { id: true, descriptor: true },
       });
-      if (!identity && descriptor) {
+
+      // Always keep a FaceIdentity row for recognized names, even when
+      // descriptor is temporarily unavailable.
+      if (!identity) {
         try {
           identity = await prisma.faceIdentity.create({
             data: {
               shortId: name,
-              descriptor,
+              descriptor: descriptor ?? [],
             },
-            select: { id: true },
+            select: { id: true, descriptor: true },
           });
         } catch {
           identity = await prisma.faceIdentity.findUnique({
             where: { shortId: name },
-            select: { id: true },
+            select: { id: true, descriptor: true },
           });
         }
       }
+
+      if (
+        identity &&
+        descriptor &&
+        (isPlaceholderDescriptor(identity.descriptor) || !normalizeDescriptor(identity.descriptor))
+      ) {
+        try {
+          identity = await prisma.faceIdentity.update({
+            where: { id: identity.id },
+            data: { descriptor },
+            select: { id: true, descriptor: true },
+          });
+        } catch {
+          // Best effort: keep recognition write path alive.
+        }
+      }
+
       faceIdentityId = identity?.id ?? null;
     } catch {
       faceIdentityId = null;

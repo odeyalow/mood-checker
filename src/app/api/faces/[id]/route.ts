@@ -125,7 +125,7 @@ export async function GET(
       return NextResponse.json({ error: "not_found" }, { status: 404 });
     }
 
-    const face = await prisma.faceIdentity.findUnique({
+    let face = await prisma.faceIdentity.findUnique({
       where: { shortId },
       select: {
         id: true,
@@ -134,6 +134,35 @@ export async function GET(
         updatedAt: true,
       },
     });
+
+    if (!face) {
+      const hasRecognition = await prisma.recognition.findFirst({
+        where: { name: shortId },
+        select: { id: true },
+      });
+      if (hasRecognition) {
+        try {
+          await prisma.faceIdentity.upsert({
+            where: { shortId },
+            create: { shortId, descriptor: [] },
+            update: {},
+            select: { id: true },
+          });
+        } catch {
+          // Best effort: continue to fallback lookup below.
+        }
+        face = await prisma.faceIdentity.findUnique({
+          where: { shortId },
+          select: {
+            id: true,
+            shortId: true,
+            createdAt: true,
+            updatedAt: true,
+          },
+        });
+      }
+    }
+
     if (!face) {
       return NextResponse.json({ error: "not_found" }, { status: 404 });
     }
