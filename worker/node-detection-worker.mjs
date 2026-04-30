@@ -1560,6 +1560,7 @@ function createState(cameraId, src) {
     lastEmotionLogAt: 0,
     lastErrLogAt: 0,
     lastBlockedMatchLogAt: 0,
+    lastAmbiguousLogAt: 0,
     lastIdentifyAt: 0,
     lastAutoCreatedAt: 0,
     newIdGateDescriptor: null,
@@ -1687,6 +1688,10 @@ async function main() {
   const enableMatching = envBool("WORKER_ENABLE_MATCHING", true);
   const matchThreshold = envFloat("WORKER_MATCH_THRESHOLD", 0.56);
   const matchMinMargin = Math.max(0, envFloat("WORKER_MATCH_MIN_MARGIN", 0.04));
+  const ambiguousMarginFloor = Math.max(
+    0,
+    Math.min(0.3, envFloat("WORKER_AMBIGUOUS_MARGIN_FLOOR", 0.08)),
+  );
   const matchMinFaceSidePx = Math.max(0, envInt("WORKER_MATCH_MIN_FACE_SIDE_PX", 16));
   const identityMinScore = Math.max(
     0,
@@ -2583,6 +2588,13 @@ async function main() {
         matchMinMargin,
       ),
     );
+    const camAmbiguousMarginFloor = Math.max(
+      0,
+      parseFiniteFloat(
+        getCameraSetting(cameraSettings, cam.cameraId, "ambiguousMarginFloor", ambiguousMarginFloor),
+        ambiguousMarginFloor,
+      ),
+    );
     const camMatchMinFaceSidePx = Math.max(
       0,
       parseFiniteInt(
@@ -3214,7 +3226,8 @@ async function main() {
           `min_confirm=${camMinConfirmScore.toFixed(3)} filter_min=${camFilterMinScore.toFixed(3)} ` +
           `person_min=${camPersonMinScore.toFixed(3)} person_side=${camPersonMinSidePx} ` +
           `person_streak=${camPersonMinStreak} match_th=${camMatchThreshold.toFixed(3)} ` +
-          `match_margin=${camMatchMinMargin.toFixed(3)} match_face_px=${camMatchMinFaceSidePx} ` +
+          `match_margin=${camMatchMinMargin.toFixed(3)} ambiguous_floor=${camAmbiguousMarginFloor.toFixed(3)} ` +
+          `match_face_px=${camMatchMinFaceSidePx} ` +
           `identity_min=${camIdentityMinScore.toFixed(3)} frontal=${camRequireFrontalFace ? "on" : "off"} ` +
           `new_id_frames=${camNewIdConfirmFrames} new_id_min=${camNewIdMinScore.toFixed(3)} ` +
           `new_id_side=${camNewIdMinFaceSidePx} new_id_empty_min=${camNewIdEmptyMinScore.toFixed(3)} ` +
@@ -3601,7 +3614,14 @@ async function main() {
                 const ambiguousNearMatch =
                   Boolean(bestCandidate) &&
                   bestCandidate.distance <= camMatchThreshold + 0.03 &&
-                  margin < Math.max(camMatchMinMargin, 0.12);
+                  margin < Math.max(camMatchMinMargin, camAmbiguousMarginFloor);
+                if (ambiguousNearMatch && now - cam.lastAmbiguousLogAt >= 2000) {
+                  log(
+                    `[${cam.cameraId}] ambiguous_block best=${Number(bestCandidate?.distance ?? 0).toFixed(3)} ` +
+                      `margin=${Number(margin).toFixed(3)} floor=${Math.max(camMatchMinMargin, camAmbiguousMarginFloor).toFixed(3)}`,
+                  );
+                  cam.lastAmbiguousLogAt = now;
+                }
                 const readyForNewId = confirmNewIdCandidate(
                   descriptor,
                   faceSide,
