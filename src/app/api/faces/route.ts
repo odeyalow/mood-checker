@@ -277,6 +277,76 @@ export async function GET(request: Request) {
       });
     }
 
+    // Fallback: when registry links are incomplete, derive cards directly
+    // from recognition names so Faces page is never empty while recognitions exist.
+    if (items.length < limit) {
+      const recognitionRows = await prisma.recognition.findMany({
+        orderBy: { detectedAt: "desc" },
+        take: Math.max(1000, limit * 20),
+        select: {
+          id: true,
+          name: true,
+          mood: true,
+          cameraId: true,
+          snapshotUrl: true,
+          detectedAt: true,
+        },
+      });
+
+      const existingShortIds = new Set(items.map((item) => item.shortId));
+      const countByName = new Map<string, number>();
+      const latestByName = new Map<
+        string,
+        {
+          id: string;
+          name: string;
+          mood: string;
+          cameraId: string;
+          snapshotUrl: string | null;
+          detectedAt: Date;
+        }
+      >();
+
+      for (const row of recognitionRows) {
+        const shortId = String(row.name ?? "").trim();
+        if (!shortId || isUnknownIdentity(shortId)) continue;
+        countByName.set(shortId, (countByName.get(shortId) ?? 0) + 1);
+        if (!latestByName.has(shortId)) {
+          latestByName.set(shortId, {
+            id: row.id,
+            name: shortId,
+            mood: String(row.mood ?? "").trim(),
+            cameraId: String(row.cameraId ?? "").trim(),
+            snapshotUrl: row.snapshotUrl,
+            detectedAt: row.detectedAt,
+          });
+        }
+      }
+
+      for (const [shortId, latest] of latestByName.entries()) {
+        if (items.length >= limit) break;
+        if (existingShortIds.has(shortId)) continue;
+        const recognitionCount = countByName.get(shortId) ?? 0;
+        if (!includeEmpty && recognitionCount <= 0) continue;
+
+        const latestSnapshotOk = await snapshotExists(latest.snapshotUrl);
+        const disk = await getLatestDiskSnapshot(shortId);
+        items.push({
+          id: `rec:${latest.id}`,
+          shortId,
+          recognitionCount,
+          snapshotUrl: latestSnapshotOk ? latest.snapshotUrl || "" : disk?.snapshotUrl || "",
+          lastDetectedAt: latestSnapshotOk
+            ? latest.detectedAt.toISOString()
+            : disk?.detectedAt || latest.detectedAt.toISOString(),
+          lastMood: latest.mood || "",
+          lastCameraId: latest.cameraId || "",
+          createdAt: latest.detectedAt.toISOString(),
+        });
+        existingShortIds.add(shortId);
+      }
+    }
+
     return NextResponse.json({ items });
   } catch (error) {
     console.error("[api/faces] GET failed", error);
