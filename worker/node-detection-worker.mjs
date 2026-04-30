@@ -1360,6 +1360,31 @@ function createDbQueueItem(payload, now) {
   };
 }
 
+function createJsonlQueueWriter(filePath) {
+  let chain = Promise.resolve();
+  let initialized = false;
+
+  return async function enqueue(payload) {
+    const safePayload = payload && typeof payload === "object" ? payload : {};
+    const line = `${JSON.stringify({
+      payload: safePayload,
+      attempts: 0,
+      nextAttemptAt: Date.now(),
+      enqueuedAt: new Date().toISOString(),
+    })}\n`;
+
+    chain = chain.then(async () => {
+      if (!initialized) {
+        await fsp.mkdir(path.dirname(filePath), { recursive: true });
+        initialized = true;
+      }
+      await fsp.appendFile(filePath, line, "utf-8");
+    });
+
+    return chain;
+  };
+}
+
 async function drainDbQueue({
   queue,
   now,
@@ -1743,6 +1768,10 @@ async function main() {
   const dbFallbackMoodRaw = (process.env.WORKER_DB_FALLBACK_MOOD || "neutral").trim().toLowerCase();
   const dbFallbackMood = dbFallbackMoodRaw || "neutral";
   const dbRequestTimeoutMs = Math.max(500, envInt("WORKER_DB_TIMEOUT_MS", 1500));
+  const dbWriterMode = String(process.env.WORKER_DB_WRITER_MODE || "inline").trim().toLowerCase();
+  const dbQueueFile = String(
+    process.env.WORKER_DB_QUEUE_FILE || path.join(rootDir, "worker", "recognition-queue.jsonl"),
+  ).trim();
   const dbQueueMaxSize = Math.max(10, envInt("WORKER_DB_QUEUE_MAX_SIZE", 300));
   const dbQueueBatchSize = Math.max(1, envInt("WORKER_DB_QUEUE_BATCH_SIZE", 6));
   const dbQueueMaxAttempts = Math.max(1, envInt("WORKER_DB_QUEUE_MAX_ATTEMPTS", 4));
@@ -2408,9 +2437,12 @@ async function main() {
 
   log(`started cameras=${states.length} frame_api=${frameApiBase}`);
   log(
-    `pipeline parallel_cameras=${parallelCameraLimit} db_queue_max=${dbQueueMaxSize} ` +
-      `db_batch=${dbQueueBatchSize} db_timeout_ms=${dbRequestTimeoutMs}`,
+    `pipeline parallel_cameras=${parallelCameraLimit} db_writer=${dbWriterMode} ` +
+      `db_queue_max=${dbQueueMaxSize} db_batch=${dbQueueBatchSize} db_timeout_ms=${dbRequestTimeoutMs}`,
   );
+  if (dbWriterMode === "external") {
+    log(`db external queue file=${dbQueueFile}`);
+  }
   log(
     `emotion min_confidence=${emotionMinConfidence} ema_alpha=${emotionEmaAlpha} ` +
       `ema_ttl_ms=${emotionEmaTtlMs} low_floor=${emotionLowConfidenceFloor} ` +
@@ -2450,6 +2482,7 @@ async function main() {
   let lastZoomReloadAt = 0;
   let workerZoomMap = {};
   const dbQueue = [];
+  const enqueueDbQueueFile = createJsonlQueueWriter(dbQueueFile);
   let lastDbQueueWarnAt = 0;
   let lastLoopErrLogAt = 0;
   const emotionKeys = ["neutral", "happy", "sad", "angry", "fearful", "disgusted", "surprised"];
@@ -3949,40 +3982,46 @@ async function main() {
                   : Number(person.emotionConfidence ?? 0),
               );
 
-              if (dbQueue.length >= dbQueueMaxSize) {
-                dbQueue.shift();
-                if (now - lastDbQueueWarnAt >= 3000) {
-                  log(`[db-queue] overflow: drop oldest, size=${dbQueue.length}`);
-                  lastDbQueueWarnAt = now;
-                }
-              }
+              const dbPayload = {
+                name: person.name,
+                mood: moodLabel,
+                detectedAt: new Date(now).toISOString(),
+                cameraId: cam.cameraId,
+                distance: Number.isFinite(session.bestDistance)
+                  ? Number(session.bestDistance)
+                  : Number(person.distance ?? 0),
+                emotionConfidence: Number(person.emotionConfidence ?? 0),
+                workerZoom: Number(cam.workerZoom.toFixed(2)),
+                frameWidth: cam.workerFrameWidth,
+                frameHeight: cam.workerFrameHeight,
+                faceScore: Number(person.faceScore ?? 0),
+                faceSide: Number(person.faceSide ?? 0),
+                faceSharpness: Number(person.faceSharpness ?? 0),
+                descriptor: descriptorByName.get(person.name) || undefined,
+                snapshotUrl:
+                  cam.lastFaceArchiveUrlByName.get(person.name) ||
+                  cam.snapshotUrl ||
+                  undefined,
+              };
 
-              dbQueue.push(
-                createDbQueueItem(
-                  {
-                    name: person.name,
-                    mood: moodLabel,
-                    detectedAt: new Date(now).toISOString(),
-                    cameraId: cam.cameraId,
-                    distance: Number.isFinite(session.bestDistance)
-                      ? Number(session.bestDistance)
-                      : Number(person.distance ?? 0),
-                    emotionConfidence: Number(person.emotionConfidence ?? 0),
-                    workerZoom: Number(cam.workerZoom.toFixed(2)),
-                    frameWidth: cam.workerFrameWidth,
-                    frameHeight: cam.workerFrameHeight,
-                    faceScore: Number(person.faceScore ?? 0),
-                    faceSide: Number(person.faceSide ?? 0),
-                    faceSharpness: Number(person.faceSharpness ?? 0),
-                    descriptor: descriptorByName.get(person.name) || undefined,
-                    snapshotUrl:
-                      cam.lastFaceArchiveUrlByName.get(person.name) ||
-                      cam.snapshotUrl ||
-                      undefined,
-                  },
-                  now,
-                ),
-              );
+              if (dbWriterMode === "external") {
+                void enqueueDbQueueFile(dbPayload).catch((err) => {
+                  if (now - lastDbQueueWarnAt >= 3000) {
+                    log(`[db-queue] external enqueue failed: ${String(err)}`);
+                    lastDbQueueWarnAt = now;
+                  }
+                });
+              } else {
+                if (dbQueue.length >= dbQueueMaxSize) {
+                  dbQueue.shift();
+                  if (now - lastDbQueueWarnAt >= 3000) {
+                    log(`[db-queue] overflow: drop oldest, size=${dbQueue.length}`);
+                    lastDbQueueWarnAt = now;
+                  }
+                }
+
+                dbQueue.push(createDbQueueItem(dbPayload, now));
+              }
             }
           }
 
@@ -4166,21 +4205,23 @@ async function main() {
       }
       await Promise.all(workers);
 
-      const dbResult = await drainDbQueue({
-        queue: dbQueue,
-        now,
-        maxBatchSize: dbQueueBatchSize,
-        dbEndpoint,
-        requestTimeoutMs: dbRequestTimeoutMs,
-        maxAttempts: dbQueueMaxAttempts,
-        retryBaseMs: dbQueueRetryBaseMs,
-        logPrefix: "db-queue",
-      });
-      if ((dbResult.failed || dbResult.delayed || dbQueue.length >= dbQueueWarnAt) && now - lastDbQueueWarnAt >= 3000) {
-        log(
-          `[db-queue] size=${dbQueue.length} sent=${dbResult.sent} delayed=${dbResult.delayed} dropped=${dbResult.failed}`,
-        );
-        lastDbQueueWarnAt = now;
+      if (dbWriterMode !== "external") {
+        const dbResult = await drainDbQueue({
+          queue: dbQueue,
+          now,
+          maxBatchSize: dbQueueBatchSize,
+          dbEndpoint,
+          requestTimeoutMs: dbRequestTimeoutMs,
+          maxAttempts: dbQueueMaxAttempts,
+          retryBaseMs: dbQueueRetryBaseMs,
+          logPrefix: "db-queue",
+        });
+        if ((dbResult.failed || dbResult.delayed || dbQueue.length >= dbQueueWarnAt) && now - lastDbQueueWarnAt >= 3000) {
+          log(
+            `[db-queue] size=${dbQueue.length} sent=${dbResult.sent} delayed=${dbResult.delayed} dropped=${dbResult.failed}`,
+          );
+          lastDbQueueWarnAt = now;
+        }
       }
 
       if (now - lastHeartbeatAt >= heartbeatSeconds * 1000) {
@@ -4301,7 +4342,7 @@ async function main() {
     }
   }
 
-  if (dbQueue.length) {
+  if (dbWriterMode !== "external" && dbQueue.length) {
     await drainDbQueue({
       queue: dbQueue,
       now: Date.now(),

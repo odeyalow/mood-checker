@@ -39,6 +39,24 @@ module.exports = {
       },
     },
     {
+      name: "mood-checker-recognition-consumer",
+      script: "node",
+      args: "worker/recognition-consumer.mjs",
+      cwd: __dirname,
+      exec_mode: "fork",
+      instances: 1,
+      autorestart: true,
+      max_restarts: 50,
+      restart_delay: 1500,
+      max_memory_restart: "350M",
+      env: {
+        NODE_ENV: "production",
+      },
+      env_production: {
+        NODE_ENV: "production",
+      },
+    },
+    {
       name: "go2rtc",
       script: "/opt/mood-checker/go2rtc_linux_amd64",
       args: "-config /opt/mood-checker/go2rtc.yaml",

@@ -25,6 +25,9 @@
 *.pem
 .venv-worker/
 .tmp/
+worker/recognition-queue.jsonl
+worker/recognition-queue.cursor
+worker/recognition-queue.cursor.tmp
 
 # debug
 npm-debug.log*
