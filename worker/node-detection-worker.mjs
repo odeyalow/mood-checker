@@ -3175,6 +3175,26 @@ async function main() {
       return true;
     };
 
+    // Relaxed gate for already matched identities: avoid losing DB events when
+    // frame quality fluctuates but identity is stable enough.
+    const isRecordablePersonRelaxed = (person) => {
+      if (!person || isUnknownIdentity(person.name)) return false;
+      if (person.lockOverridden) return false;
+      const faceScore = Number(person.faceScore ?? 0);
+      const faceSide = Number(person.faceSide ?? 0);
+      const faceSharpness = Number(person.faceSharpness ?? 0);
+      const distance = Number(person.distance ?? 0);
+      const minScore = Math.max(0.06, camRecordMinFaceScore - 0.04);
+      const minSide = Math.max(12, camRecordMinFaceSidePx - 6);
+      const minSharpness = Math.max(4, camRecordMinSharpness * 0.6);
+      const maxDistance = Math.min(1, camRecordMaxDistance + 0.12);
+      if (faceScore < minScore) return false;
+      if (faceSide < minSide) return false;
+      if (faceSharpness < minSharpness) return false;
+      if (Number.isFinite(distance) && distance > 0 && distance > maxDistance) return false;
+      return true;
+    };
+
     const frameUrl = buildFrameUrl(frameApiBase, cam.src, frameApiTimeoutMs);
     const zoomOverride = Number(workerZoomMap?.[cam.cameraId]);
     if (Number.isFinite(zoomOverride)) {
@@ -3878,13 +3898,35 @@ async function main() {
             for (const person of people) {
               if (isUnknownIdentity(person.name)) continue;
               if (blockedFaceIds.has(normalizeFaceShortId(person.name))) continue;
-              if (!isRecordablePerson(person)) continue;
               const sessionKey = person.name;
               let session = cam.presenceSessions.get(sessionKey);
               if (!session) {
                 session = createPresenceSession(now);
                 cam.presenceSessions.set(sessionKey, session);
               }
+
+              const strictRecordable = isRecordablePerson(person);
+              const relaxedRecordable = isRecordablePersonRelaxed(person);
+              const allowRelaxedRecord = Boolean(person.justRegistered) || (
+                session.sampleCount >= Math.max(2, camSessionMinSamples) &&
+                relaxedRecordable
+              );
+              if (!strictRecordable && !allowRelaxedRecord) {
+                const lastSkipLogAt = Number(cam.lastRecordSkipLogAt || 0);
+                if (now - lastSkipLogAt >= 2000) {
+                  log(
+                    `[${cam.cameraId}] record_skip name=${person.name} ` +
+                      `score=${Number(person.faceScore ?? 0).toFixed(3)} ` +
+                      `side=${Number(person.faceSide ?? 0).toFixed(1)} ` +
+                      `sharp=${Number(person.faceSharpness ?? 0).toFixed(2)} ` +
+                      `distance=${Number(person.distance ?? 0).toFixed(3)} ` +
+                      `samples=${session.sampleCount} just_registered=${person.justRegistered ? "1" : "0"}`,
+                  );
+                  cam.lastRecordSkipLogAt = now;
+                }
+                continue;
+              }
+
               session.lastSeenAt = now;
 
               const personDistance = Number(person.distance ?? 0);
