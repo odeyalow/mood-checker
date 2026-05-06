@@ -34,6 +34,7 @@
     "db:push": "prisma db push",
     "db:reset": "prisma migrate reset --force --skip-generate",
     "db:repair": "node scripts/db-repair.mjs",
+    "faces:rebuild": "node scripts/rebuild-face-identities.mjs",
     "create-user": "node scripts/create-user.mjs",
     "faces:clear": "node scripts/manage-faces.mjs clear",
     "faces:delete": "node scripts/manage-faces.mjs delete",

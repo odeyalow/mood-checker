@@ -110,11 +110,11 @@ export async function GET(request: Request) {
     const limit = parseLimit(url.searchParams.get("limit"), 120);
     const includeEmpty = parseBool(url.searchParams.get("includeEmpty"), false);
 
-    // Backfill identities for existing recognition names that may have been
-    // written when descriptor was missing.
+    // Backfill identities for all recognition names that may have been
+    // written when descriptor was missing. Using the full distinct name set
+    // prevents the Faces page from only restoring very recent identities.
     const recentNames = await prisma.recognition.findMany({
-      orderBy: { detectedAt: "desc" },
-      take: Math.max(500, limit * 10),
+      distinct: ["name"],
       select: { name: true },
     });
     const uniqueNames = Array.from(
