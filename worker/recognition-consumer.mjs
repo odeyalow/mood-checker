@@ -158,7 +158,6 @@ async function main() {
       const now = Date.now();
 
       for (const line of lines) {
-        if (processed >= batchSize) break;
         processed += 1;
 
         let item;
@@ -208,7 +207,10 @@ async function main() {
       }
 
       if (processed > 0) {
-        log(`batch processed=${processed} sent=${sent} skipped=${skipped} retried=${retried}`);
+        log(
+          `batch processed=${processed} sent=${sent} skipped=${skipped} retried=${retried} ` +
+            `batch_limit=${batchSize}`,
+        );
       }
 
       const after = await fsp.stat(queueFile).catch(() => null);

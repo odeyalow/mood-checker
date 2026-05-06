@@ -4026,9 +4026,6 @@ async function main() {
               const cooldownKey = `${cam.cameraId}:${person.name}`;
               const lastSent = cam.lastDbSentAt.get(cooldownKey) ?? 0;
               if (!isReentry && now - lastSent < dbCooldownMs) continue;
-              cam.lastDbSentAt.set(cooldownKey, now);
-              session.emittedAt = now;
-              session.lastMoodLabel = moodLabel;
 
               if (!person.emotion && resolvedEmotionLabel) {
                 person.emotion = resolvedEmotionLabel;
@@ -4067,12 +4064,15 @@ async function main() {
               };
 
               if (dbWriterMode === "external") {
-                void enqueueDbQueueFile(dbPayload).catch((err) => {
+                try {
+                  await enqueueDbQueueFile(dbPayload);
+                } catch (err) {
                   if (now - lastDbQueueWarnAt >= 3000) {
                     log(`[db-queue] external enqueue failed: ${String(err)}`);
                     lastDbQueueWarnAt = now;
                   }
-                });
+                  continue;
+                }
               } else {
                 if (dbQueue.length >= dbQueueMaxSize) {
                   dbQueue.shift();
@@ -4084,6 +4084,10 @@ async function main() {
 
                 dbQueue.push(createDbQueueItem(dbPayload, now));
               }
+
+              cam.lastDbSentAt.set(cooldownKey, now);
+              session.emittedAt = now;
+              session.lastMoodLabel = moodLabel;
             }
           }
 
