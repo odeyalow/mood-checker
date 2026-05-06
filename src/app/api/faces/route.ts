@@ -135,113 +135,62 @@ export async function GET(request: Request) {
         .catch(() => null);
     }
 
-    const identities = await prisma.faceIdentity.findMany({
-      orderBy: { updatedAt: "desc" },
-      take: limit,
-      include: {
-        _count: {
-          select: { recognitions: true },
-        },
+    const recognitionRows = await prisma.recognition.findMany({
+      orderBy: { detectedAt: "desc" },
+      take: Math.max(5000, limit * 50),
+      select: {
+        id: true,
+        name: true,
+        mood: true,
+        cameraId: true,
+        snapshotUrl: true,
+        detectedAt: true,
       },
     });
 
-    const ids: string[] = [];
-    const shortIds: string[] = [];
-    const idByShortId = new Map<string, string>();
-    for (const identity of identities) {
-      ids.push(identity.id);
-      shortIds.push(identity.shortId);
-      idByShortId.set(identity.shortId, identity.id);
+    const latestRecognitionByShortId = new Map<
+      string,
+      {
+        id: string;
+        shortId: string;
+        mood: string;
+        cameraId: string;
+        snapshotUrl: string | null;
+        detectedAt: Date;
+      }
+    >();
+    const recognitionCountByShortId = new Map<string, number>();
+    for (const row of recognitionRows) {
+      const shortId = String(row.name ?? "").trim();
+      if (!shortId || isUnknownIdentity(shortId)) continue;
+      recognitionCountByShortId.set(shortId, (recognitionCountByShortId.get(shortId) ?? 0) + 1);
+      if (!latestRecognitionByShortId.has(shortId)) {
+        latestRecognitionByShortId.set(shortId, {
+          id: row.id,
+          shortId,
+          mood: String(row.mood ?? "").trim(),
+          cameraId: String(row.cameraId ?? "").trim(),
+          snapshotUrl: row.snapshotUrl,
+          detectedAt: row.detectedAt,
+        });
+      }
     }
-    const latestRecognitionsRaw = ids.length
-      ? await prisma.recognition.findMany({
-          where: {
-            OR: [
-              { faceIdentityId: { in: ids } },
-              { name: { in: shortIds } },
-            ],
-          },
-          orderBy: { detectedAt: "desc" },
+
+    const recognizedShortIds = Array.from(latestRecognitionByShortId.keys());
+    const recognizedIdentities = recognizedShortIds.length
+      ? await prisma.faceIdentity.findMany({
+          where: { shortId: { in: recognizedShortIds } },
           select: {
-            faceIdentityId: true,
-            name: true,
-            mood: true,
-            cameraId: true,
-            snapshotUrl: true,
-            detectedAt: true,
+            id: true,
+            shortId: true,
+            createdAt: true,
+            _count: {
+              select: { recognitions: true },
+            },
           },
-          take: 5000,
         })
       : [];
-
-    const recognitionCountRows = ids.length
-      ? await prisma.recognition.findMany({
-          where: {
-            OR: [
-              { faceIdentityId: { in: ids } },
-              { name: { in: shortIds } },
-            ],
-          },
-          select: {
-            faceIdentityId: true,
-            name: true,
-          },
-        })
-      : [];
-
-    const recognitionCountByFaceId = new Map<string, number>();
-    for (const row of recognitionCountRows) {
-      const faceIdentityId =
-        String(row.faceIdentityId ?? "") || String(idByShortId.get(String(row.name ?? "")) ?? "");
-      if (!faceIdentityId) continue;
-      recognitionCountByFaceId.set(faceIdentityId, (recognitionCountByFaceId.get(faceIdentityId) ?? 0) + 1);
-    }
-
-    const latestRecognitions: LatestRecognitionMeta[] = [];
-    for (const item of latestRecognitionsRaw) {
-      latestRecognitions.push({
-        faceIdentityId:
-          String(item.faceIdentityId ?? "") || String(idByShortId.get(String(item.name ?? "")) ?? ""),
-        mood: String(item.mood ?? "").trim(),
-        cameraId: String(item.cameraId ?? "").trim(),
-        snapshotUrl: item.snapshotUrl,
-        detectedAt: item.detectedAt,
-      });
-    }
-
-    const latestByFaceId = new Map<
-      string,
-      LatestRecognitionMeta
-    >();
-    for (const item of latestRecognitions) {
-      const faceIdentityId = item.faceIdentityId;
-      if (!faceIdentityId || latestByFaceId.has(faceIdentityId)) continue;
-      latestByFaceId.set(faceIdentityId, item);
-    }
-
-    const latestSnapshotByFaceId = new Map<
-      string,
-      { snapshotUrl: string | null; detectedAt: Date }
-    >();
-    for (const item of latestRecognitions) {
-      if (!item.faceIdentityId || latestSnapshotByFaceId.has(item.faceIdentityId) || !item.snapshotUrl) continue;
-      latestSnapshotByFaceId.set(item.faceIdentityId, {
-        snapshotUrl: item.snapshotUrl,
-        detectedAt: item.detectedAt,
-      });
-    }
-
-    const diskSnapshots: Array<{ faceId: string; disk: Awaited<ReturnType<typeof getLatestDiskSnapshot>> }> = [];
-    for (const identity of identities) {
-      diskSnapshots.push({
-        faceId: identity.id,
-        disk: await getLatestDiskSnapshot(identity.shortId),
-      });
-    }
-    const diskByFaceId = new Map<string, Awaited<ReturnType<typeof getLatestDiskSnapshot>>>();
-    for (const item of diskSnapshots) {
-      diskByFaceId.set(item.faceId, item.disk);
-    }
+    const identityByShortId = new Map(recognizedIdentities.map((item) => [item.shortId, item]));
 
     const items: Array<{
       id: string;
@@ -253,97 +202,54 @@ export async function GET(request: Request) {
       lastCameraId: string;
       createdAt: string;
     }> = [];
-    for (const identity of identities) {
-      const latest = latestByFaceId.get(identity.id);
-      const latestSnapshot = latestSnapshotByFaceId.get(identity.id);
-      const disk = diskByFaceId.get(identity.id);
-      const latestSnapshotOk = await snapshotExists(latestSnapshot?.snapshotUrl);
-      const recognitionCount =
-        recognitionCountByFaceId.get(identity.id) ?? identity._count.recognitions ?? 0;
-      if (!includeEmpty && recognitionCount <= 0) {
-        continue;
-      }
+    for (const shortId of recognizedShortIds) {
+      if (items.length >= limit) break;
+      const latest = latestRecognitionByShortId.get(shortId);
+      if (!latest) continue;
+      const identity = identityByShortId.get(shortId);
+      const recognitionCount = recognitionCountByShortId.get(shortId) ?? identity?._count.recognitions ?? 0;
+      if (!includeEmpty && recognitionCount <= 0) continue;
+      const latestSnapshotOk = await snapshotExists(latest.snapshotUrl);
+      const disk = await getLatestDiskSnapshot(shortId);
       items.push({
-        id: identity.id,
-        shortId: identity.shortId,
+        id: identity?.id || `rec:${latest.id}`,
+        shortId,
         recognitionCount,
-        snapshotUrl: latestSnapshotOk ? latestSnapshot?.snapshotUrl || "" : disk?.snapshotUrl || "",
+        snapshotUrl: latestSnapshotOk ? latest.snapshotUrl || "" : disk?.snapshotUrl || "",
         lastDetectedAt: latestSnapshotOk
-          ? latestSnapshot?.detectedAt?.toISOString() || ""
-          : disk?.detectedAt || "",
-        lastMood: latest?.mood || "",
-        lastCameraId: latest?.cameraId || "",
-        createdAt: identity.createdAt.toISOString(),
+          ? latest.detectedAt.toISOString()
+          : disk?.detectedAt || latest.detectedAt.toISOString(),
+        lastMood: latest.mood || "",
+        lastCameraId: latest.cameraId || "",
+        createdAt: identity?.createdAt?.toISOString() || latest.detectedAt.toISOString(),
       });
     }
 
-    // Fallback: when registry links are incomplete, derive cards directly
-    // from recognition names so Faces page is never empty while recognitions exist.
-    if (items.length < limit) {
-      const recognitionRows = await prisma.recognition.findMany({
-        orderBy: { detectedAt: "desc" },
-        take: Math.max(1000, limit * 20),
-        select: {
-          id: true,
-          name: true,
-          mood: true,
-          cameraId: true,
-          snapshotUrl: true,
-          detectedAt: true,
+    if (includeEmpty && items.length < limit) {
+      const usedShortIds = new Set(items.map((item) => item.shortId));
+      const identities = await prisma.faceIdentity.findMany({
+        orderBy: { updatedAt: "desc" },
+        take: limit * 2,
+        include: {
+          _count: {
+            select: { recognitions: true },
+          },
         },
       });
-
-      const existingShortIds = new Set(items.map((item) => item.shortId));
-      const countByName = new Map<string, number>();
-      const latestByName = new Map<
-        string,
-        {
-          id: string;
-          name: string;
-          mood: string;
-          cameraId: string;
-          snapshotUrl: string | null;
-          detectedAt: Date;
-        }
-      >();
-
-      for (const row of recognitionRows) {
-        const shortId = String(row.name ?? "").trim();
-        if (!shortId || isUnknownIdentity(shortId)) continue;
-        countByName.set(shortId, (countByName.get(shortId) ?? 0) + 1);
-        if (!latestByName.has(shortId)) {
-          latestByName.set(shortId, {
-            id: row.id,
-            name: shortId,
-            mood: String(row.mood ?? "").trim(),
-            cameraId: String(row.cameraId ?? "").trim(),
-            snapshotUrl: row.snapshotUrl,
-            detectedAt: row.detectedAt,
-          });
-        }
-      }
-
-      for (const [shortId, latest] of latestByName.entries()) {
+      for (const identity of identities) {
         if (items.length >= limit) break;
-        if (existingShortIds.has(shortId)) continue;
-        const recognitionCount = countByName.get(shortId) ?? 0;
-        if (!includeEmpty && recognitionCount <= 0) continue;
-
-        const latestSnapshotOk = await snapshotExists(latest.snapshotUrl);
-        const disk = await getLatestDiskSnapshot(shortId);
+        if (usedShortIds.has(identity.shortId)) continue;
+        const disk = await getLatestDiskSnapshot(identity.shortId);
         items.push({
-          id: `rec:${latest.id}`,
-          shortId,
-          recognitionCount,
-          snapshotUrl: latestSnapshotOk ? latest.snapshotUrl || "" : disk?.snapshotUrl || "",
-          lastDetectedAt: latestSnapshotOk
-            ? latest.detectedAt.toISOString()
-            : disk?.detectedAt || latest.detectedAt.toISOString(),
-          lastMood: latest.mood || "",
-          lastCameraId: latest.cameraId || "",
-          createdAt: latest.detectedAt.toISOString(),
+          id: identity.id,
+          shortId: identity.shortId,
+          recognitionCount: identity._count.recognitions ?? 0,
+          snapshotUrl: disk?.snapshotUrl || "",
+          lastDetectedAt: disk?.detectedAt || "",
+          lastMood: "",
+          lastCameraId: "",
+          createdAt: identity.createdAt.toISOString(),
         });
-        existingShortIds.add(shortId);
       }
     }
 
