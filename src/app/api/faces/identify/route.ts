@@ -43,24 +43,35 @@ function parseDescriptorUpdateStrictDistance(raw: unknown, threshold: number) {
 }
 
 function parsePostCheckThreshold(raw: unknown, baseThreshold: number) {
-  const fallback = Math.min(1, Math.max(0.68, baseThreshold + 0.08));
+  const fallback = Math.min(1, Math.max(0.58, baseThreshold + 0.02));
   const value = Number(raw ?? process.env.FACE_IDENTITY_POSTCHECK_THRESHOLD ?? fallback);
   if (!Number.isFinite(value)) return fallback;
   return Math.max(0.2, Math.min(1, value));
 }
 
 function parsePostCheckRelaxedThreshold(raw: unknown, strictThreshold: number) {
-  const fallback = Math.min(1, Math.max(0.78, strictThreshold + 0.12));
+  const fallback = Math.min(1, Math.max(0.62, strictThreshold + 0.04));
   const value = Number(raw ?? process.env.FACE_IDENTITY_POSTCHECK_RELAXED_THRESHOLD ?? fallback);
   if (!Number.isFinite(value)) return fallback;
   return Math.max(0.2, Math.min(1, value));
 }
 
 function parsePostCheckWindowMs(raw: unknown) {
-  const fallback = 30 * 60 * 1000;
+  const fallback = 2 * 60 * 1000;
   const value = Number(raw ?? process.env.FACE_IDENTITY_POSTCHECK_WINDOW_MS ?? fallback);
   if (!Number.isFinite(value)) return fallback;
   return Math.max(10_000, Math.min(24 * 60 * 60 * 1000, Math.floor(value)));
+}
+
+function parseBoolean(raw: unknown, fallback = false) {
+  if (typeof raw === "boolean") return raw;
+  if (typeof raw === "number") return raw !== 0;
+  if (typeof raw !== "string") return fallback;
+  const value = raw.trim().toLowerCase();
+  if (!value) return fallback;
+  if (["1", "true", "yes", "on"].includes(value)) return true;
+  if (["0", "false", "no", "off"].includes(value)) return false;
+  return fallback;
 }
 
 function parseSnapshotBuffer(raw: unknown): Buffer | null {
@@ -226,6 +237,10 @@ export async function POST(request: Request) {
       postCheckThreshold,
     );
     const postCheckWindowMs = parsePostCheckWindowMs(body?.postCheckWindowMs);
+    const postCheckRelaxedEnabled = parseBoolean(
+      body?.postCheckRelaxedEnabled ?? process.env.FACE_IDENTITY_POSTCHECK_RELAXED_ENABLED,
+      false,
+    );
     const updateAlpha = Number(process.env.FACE_IDENTITY_DESCRIPTOR_ALPHA ?? 0.2);
     const idLength = normalizeFaceIdLength(
       process.env.FACE_IDENTITY_ID_LENGTH ? Number(process.env.FACE_IDENTITY_ID_LENGTH) : 6,
@@ -342,11 +357,11 @@ export async function POST(request: Request) {
         duplicateCandidate.distance <= postCheckThreshold &&
         duplicateCandidate.margin >= matchMinMargin,
     );
-    const mergeByRelaxed = Boolean(
+    const mergeByRelaxed = postCheckRelaxedEnabled && Boolean(
       duplicateCandidate &&
         createdAtDeltaMs <= postCheckWindowMs &&
         duplicateCandidate.distance <= postCheckRelaxedThreshold &&
-        duplicateCandidate.margin >= Math.max(0.06, matchMinMargin * 0.75),
+        duplicateCandidate.margin >= Math.max(0.14, matchMinMargin + 0.03),
     );
     const shouldMerge = mergeByStrict || mergeByRelaxed;
 
