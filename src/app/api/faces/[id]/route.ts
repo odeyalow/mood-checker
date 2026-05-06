@@ -114,19 +114,45 @@ async function removeFaceSnapshots(shortId: string) {
   await fs.rm(dir, { recursive: true, force: true }).catch(() => {});
 }
 
-export async function GET(
-  _request: Request,
-  { params }: { params: Promise<{ id: string }> },
-) {
-  try {
-    const { id } = await params;
-    const shortId = decodeURIComponent(id || "").trim();
-    if (!shortId) {
-      return NextResponse.json({ error: "not_found" }, { status: 404 });
-    }
+async function resolveFaceByAnyId(rawId: string) {
+  const candidate = decodeURIComponent(rawId || "").trim();
+  if (!candidate) return null;
 
-    let face = await prisma.faceIdentity.findUnique({
-      where: { shortId },
+  // Primary path: route param is shortId (current UI behavior).
+  let face = await prisma.faceIdentity.findUnique({
+    where: { shortId: candidate },
+    select: {
+      id: true,
+      shortId: true,
+      createdAt: true,
+      updatedAt: true,
+    },
+  });
+  if (face) return face;
+
+  // Fallback: route param is FaceIdentity.id.
+  face = await prisma.faceIdentity.findUnique({
+    where: { id: candidate },
+    select: {
+      id: true,
+      shortId: true,
+      createdAt: true,
+      updatedAt: true,
+    },
+  });
+  if (face) return face;
+
+  // Fallback: route param is Recognition.id.
+  const recognition = await prisma.recognition.findUnique({
+    where: { id: candidate },
+    select: {
+      faceIdentityId: true,
+      name: true,
+    },
+  });
+  if (recognition?.faceIdentityId) {
+    face = await prisma.faceIdentity.findUnique({
+      where: { id: recognition.faceIdentityId },
       select: {
         id: true,
         shortId: true,
@@ -134,34 +160,58 @@ export async function GET(
         updatedAt: true,
       },
     });
+    if (face) return face;
+  }
 
-    if (!face) {
-      const hasRecognition = await prisma.recognition.findFirst({
-        where: { name: shortId },
-        select: { id: true },
-      });
-      if (hasRecognition) {
-        try {
-          await prisma.faceIdentity.upsert({
-            where: { shortId },
-            create: { shortId, descriptor: [] },
-            update: {},
-            select: { id: true },
-          });
-        } catch {
-          // Best effort: continue to fallback lookup below.
-        }
-        face = await prisma.faceIdentity.findUnique({
-          where: { shortId },
-          select: {
-            id: true,
-            shortId: true,
-            createdAt: true,
-            updatedAt: true,
-          },
-        });
-      }
+  const recognizedShortId = String(recognition?.name || "").trim();
+  if (!recognizedShortId) return null;
+
+  face = await prisma.faceIdentity.findUnique({
+    where: { shortId: recognizedShortId },
+    select: {
+      id: true,
+      shortId: true,
+      createdAt: true,
+      updatedAt: true,
+    },
+  });
+  if (face) return face;
+
+  // Last resort: auto-create missing identity from recognition name.
+  try {
+    await prisma.faceIdentity.upsert({
+      where: { shortId: recognizedShortId },
+      create: { shortId: recognizedShortId, descriptor: [] },
+      update: {},
+      select: { id: true },
+    });
+  } catch {
+    // best effort
+  }
+
+  return prisma.faceIdentity.findUnique({
+    where: { shortId: recognizedShortId },
+    select: {
+      id: true,
+      shortId: true,
+      createdAt: true,
+      updatedAt: true,
+    },
+  });
+}
+
+export async function GET(
+  _request: Request,
+  { params }: { params: Promise<{ id: string }> },
+) {
+  try {
+    const { id } = await params;
+    const faceKey = decodeURIComponent(id || "").trim();
+    if (!faceKey) {
+      return NextResponse.json({ error: "not_found" }, { status: 404 });
     }
+
+    const face = await resolveFaceByAnyId(faceKey);
 
     if (!face) {
       return NextResponse.json({ error: "not_found" }, { status: 404 });
@@ -277,15 +327,18 @@ export async function DELETE(
 ) {
   try {
     const { id } = await params;
-    const shortId = decodeURIComponent(id || "").trim();
-    if (!shortId) {
+    const faceKey = decodeURIComponent(id || "").trim();
+    if (!faceKey) {
       return NextResponse.json({ error: "not_found" }, { status: 404 });
     }
 
-    const face = await prisma.faceIdentity.findUnique({
-      where: { shortId },
-      select: { id: true, shortId: true },
-    });
+    const resolvedFace = await resolveFaceByAnyId(faceKey);
+    const face = resolvedFace
+      ? {
+          id: resolvedFace.id,
+          shortId: resolvedFace.shortId,
+        }
+      : null;
     if (!face) {
       return NextResponse.json({ error: "not_found" }, { status: 404 });
     }
