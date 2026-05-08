@@ -71,6 +71,42 @@ export function hourStartUtc(date: Date) {
   return d;
 }
 
+export function chooseAdaptiveBucketMinutes(from: Date, to: Date) {
+  const spanMs = Math.max(0, new Date(to).getTime() - new Date(from).getTime());
+  const dayMs = 24 * 60 * 60 * 1000;
+
+  if (spanMs <= 14 * dayMs) return 60;
+  if (spanMs <= 90 * dayMs) return 24 * 60;
+  if (spanMs <= 365 * dayMs) return 7 * 24 * 60;
+  return 30 * 24 * 60;
+}
+
+export function buildTimeBuckets(from: Date, to: Date, minutes: number, maxBuckets = 2000) {
+  const safeMinutes = Math.max(1, Math.floor(minutes));
+  const start = bucketStartUtc(from, safeMinutes);
+  const end = bucketStartUtc(to, safeMinutes);
+  const out: string[] = [];
+  const cursor = new Date(start);
+
+  while (cursor <= end && out.length < maxBuckets) {
+    out.push(cursor.toISOString());
+    cursor.setUTCMinutes(cursor.getUTCMinutes() + safeMinutes);
+  }
+
+  if (!out.length) {
+    out.push(bucketStartUtc(new Date(), safeMinutes).toISOString());
+  }
+  return out;
+}
+
+export function buildAdaptiveBuckets(from: Date, to: Date, maxBuckets = 2000) {
+  const minutes = chooseAdaptiveBucketMinutes(from, to);
+  return {
+    bucketMinutes: minutes,
+    buckets: buildTimeBuckets(from, to, minutes, maxBuckets),
+  };
+}
+
 export function buildHourlyBuckets(from: Date, to: Date, maxBuckets = 24 * 14) {
   const start = hourStartUtc(from);
   const end = hourStartUtc(to);

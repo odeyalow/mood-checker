@@ -9,10 +9,7 @@ export async function GET(request: Request) {
   const url = new URL(request.url);
   const limit = Math.max(1, Math.min(100, Number(url.searchParams.get("limit") ?? 50)));
 
-  const now = new Date();
-  const since24h = new Date(now.getTime() - 24 * 60 * 60 * 1000);
   const items = await prisma.recognition.findMany({
-    where: { detectedAt: { gte: since24h } },
     select: { name: true, mood: true, detectedAt: true },
   });
 

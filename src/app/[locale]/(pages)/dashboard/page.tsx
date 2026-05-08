@@ -15,49 +15,46 @@ const L10N = {
     title: "Главный дэшборд",
     activeCameras: "Активные камеры",
     recognitions: "Распознаваний",
-    in24h: "За 24 часа",
+    in24h: "За все время",
     negative: "Негатив",
     riskZone: "Зона риска",
     emotionDynamics: "Динамика эмоций",
-    dynamicsHint: "Обновляется раз в минуту, окно 24 часа.",
+    dynamicsHint: "Обновляется раз в минуту, окно охватывает всю историю.",
     recentRecognitions: "Последние распознавания",
     noRecognitions: "Пока нет распознаваний",
     loadError: "Ошибка загрузки",
     connectionError: "Ошибка соединения",
-    noChange: "Без изменений к прошлому дню",
-    prevDay: "к прошлому дню",
+    allTimeShare: "Доля за все время",
   },
   kz: {
     title: "Басқару панелі",
     activeCameras: "Белсенді камералар",
     recognitions: "Тану саны",
-    in24h: "24 сағат ішінде",
+    in24h: "Барлық уақыт ішінде",
     negative: "Негатив",
     riskZone: "Тәуекел аймағы",
     emotionDynamics: "Эмоция динамикасы",
-    dynamicsHint: "Әр минут сайын жаңарады, терезе 24 сағат.",
+    dynamicsHint: "Әр минут сайын жаңарады, терезе бүкіл тарихты қамтиды.",
     recentRecognitions: "Соңғы танулар",
     noRecognitions: "Әзірге танулар жоқ",
     loadError: "Жүктеу қатесі",
     connectionError: "Байланыс қатесі",
-    noChange: "Өткен күнмен салыстырғанда өзгеріс жоқ",
-    prevDay: "өткен күнмен салыстырғанда",
+    allTimeShare: "Барлық уақыттағы үлес",
   },
   en: {
     title: "Main Dashboard",
     activeCameras: "Active Cameras",
     recognitions: "Recognitions",
-    in24h: "In 24 hours",
+    in24h: "All time",
     negative: "Negative",
     riskZone: "Risk Zone",
     emotionDynamics: "Emotion Dynamics",
-    dynamicsHint: "Updated every minute, window is 24 hours.",
+    dynamicsHint: "Updated every minute, the chart spans the full history.",
     recentRecognitions: "Recent Recognitions",
     noRecognitions: "No recognitions yet",
     loadError: "Load error",
     connectionError: "Connection error",
-    noChange: "No change vs previous day",
-    prevDay: "vs previous day",
+    allTimeShare: "All-time share",
   },
 } as const;
 
@@ -100,13 +97,6 @@ function moodColor(mood: string) {
   if (kind === "negative") return "red";
   if (kind === "positive") return "green";
   return "blue";
-}
-
-function deltaText(delta: number, locale: AppLocale) {
-  const t = L10N[locale];
-  if (delta > 0) return `+${delta}% ${t.prevDay}`;
-  if (delta < 0) return `${delta}% ${t.prevDay}`;
-  return t.noChange;
 }
 
 export default function DashboardPage({
@@ -210,7 +200,7 @@ export default function DashboardPage({
                   suffix="%"
                   styles={{ content: { color: "#dc2626" } }}
                 />
-                <Text type="secondary">{deltaText(stats?.negativeDeltaVsPrevDay ?? 0, safeLocale)}</Text>
+                <Text type="secondary">{t.allTimeShare}</Text>
               </Card>
             </Col>
             <Col xs={24} md={12} lg={6} style={{ display: "flex" }}>

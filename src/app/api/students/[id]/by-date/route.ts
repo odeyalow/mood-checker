@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
-import { addMoodCount, bucketStartUtc, buildHourlyBuckets, computeRiskStats } from "@/lib/stats";
+import { addMoodCount, bucketStartUtc, buildAdaptiveBuckets, computeRiskStats } from "@/lib/stats";
 
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
@@ -11,7 +11,6 @@ function parseRange(request: Request) {
   const fromParam = url.searchParams.get("from");
   const toParam = url.searchParams.get("to");
 
-  const now = new Date();
   if (fromParam && toParam) {
     const from = new Date(fromParam);
     const to = new Date(toParam);
@@ -20,10 +19,14 @@ function parseRange(request: Request) {
     }
   }
 
-  const days = daysParam ? Number(daysParam) : 2;
-  const safeDays = Number.isFinite(days) ? Math.max(1, Math.min(14, days)) : 2;
-  const from = new Date(now.getTime() - safeDays * 24 * 60 * 60 * 1000);
-  return { from, to: now };
+  if (!daysParam || String(daysParam).trim().toLowerCase() === "all") {
+    return null;
+  }
+
+  const now = new Date();
+  const days = Number(daysParam);
+  const safeDays = Number.isFinite(days) ? Math.max(1, Math.min(3650, days)) : 30;
+  return { from: new Date(now.getTime() - safeDays * 24 * 60 * 60 * 1000), to: now };
 }
 
 export async function GET(
@@ -36,19 +39,32 @@ export async function GET(
     return NextResponse.json({ error: "not_found" }, { status: 404 });
   }
 
-  const { from, to } = parseRange(request);
+  const explicitRange = parseRange(request);
+  let from = explicitRange?.from ?? null;
+  const to = explicitRange?.to ?? new Date();
+
+  if (!from) {
+    const firstRecognition = await prisma.recognition.findFirst({
+      where: { name: studentId },
+      orderBy: { detectedAt: "asc" },
+      select: { detectedAt: true },
+    });
+    from = firstRecognition?.detectedAt ? new Date(firstRecognition.detectedAt) : new Date();
+  }
+
   const items = await prisma.recognition.findMany({
     where: { name: studentId, detectedAt: { gte: from, lte: to } },
-    orderBy: { detectedAt: "desc" },
+    orderBy: { detectedAt: "asc" },
   });
 
   const counts = { positive: 0, neutral: 0, negative: 0 };
   for (const item of items) addMoodCount(counts, item.mood);
   const stats = computeRiskStats(counts);
 
+  const { bucketMinutes, buckets } = buildAdaptiveBuckets(from, to);
   const pointsMap = new Map();
   for (const item of items) {
-    const bucket = bucketStartUtc(new Date(item.detectedAt));
+    const bucket = bucketStartUtc(new Date(item.detectedAt), bucketMinutes);
     const key = bucket.toISOString();
     const entry = pointsMap.get(key) || {
       bucketStart: key,
@@ -60,7 +76,7 @@ export async function GET(
     pointsMap.set(key, entry);
   }
 
-  const points = buildHourlyBuckets(from, to).map((bucketStart) => {
+  const points = buckets.map((bucketStart) => {
     const p = pointsMap.get(bucketStart);
     if (!p) {
       return {
@@ -90,7 +106,7 @@ export async function GET(
       neutralCount: p.neutral,
       negativeCount: p.negative,
     })),
-    recent: items.slice(0, 30).map((item: { id: string; mood: string; detectedAt: Date }) => ({
+    recent: items.slice().reverse().slice(0, 30).map((item: { id: string; mood: string; detectedAt: Date }) => ({
       id: item.id,
       mood: item.mood,
       detectedAt: item.detectedAt.toISOString(),

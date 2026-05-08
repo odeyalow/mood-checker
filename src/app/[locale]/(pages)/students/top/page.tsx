@@ -12,7 +12,7 @@ type AppLocale = "ru" | "kz" | "en";
 const L10N = {
   ru: {
     title: "Топ негативных",
-    boardTitle: "Лидерборд по риску за 24 часа",
+    boardTitle: "Лидерборд по риску за все время",
     boardHint: "Риск = негативные эмоции + превышение нейтральных над позитивными.",
     rank: "Ранг",
     student: "Студент",
@@ -24,7 +24,7 @@ const L10N = {
   },
   kz: {
     title: "Негатив топ",
-    boardTitle: "24 сағаттағы тәуекел лидерборды",
+    boardTitle: "Барлық уақыттағы тәуекел лидерборды",
     boardHint: "Тәуекел = негатив эмоция + нейтралдың позитивтен артуы.",
     rank: "Орын",
     student: "Студент",
@@ -36,7 +36,7 @@ const L10N = {
   },
   en: {
     title: "Top Negative",
-    boardTitle: "Risk leaderboard for last 24 hours",
+    boardTitle: "Risk leaderboard for all time",
     boardHint: "Risk = negative emotions + neutral exceeding positive.",
     rank: "Rank",
     student: "Student",
@@ -116,13 +116,13 @@ export default function TopNegativePage({
       }
     }
 
-    loadData();
+    void loadData();
     const timer = setInterval(loadData, 60_000);
     return () => {
       active = false;
       clearInterval(timer);
     };
-  }, []);
+  }, [t.connectionError, t.loadError]);
 
   return (
     <MainLayout title={t.title} locale={safeLocale}>

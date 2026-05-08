@@ -8,34 +8,15 @@ export const revalidate = 0;
 
 export async function GET() {
   try {
-    const now = new Date();
-    const since24h = new Date(now.getTime() - 24 * 60 * 60 * 1000);
-    const prev24h = new Date(now.getTime() - 48 * 60 * 60 * 1000);
-
-    const [recent, previous] = await Promise.all([
-      prisma.recognition.findMany({
-        where: { detectedAt: { gte: since24h } },
-        select: { mood: true, name: true },
-      }),
-      prisma.recognition.findMany({
-        where: { detectedAt: { gte: prev24h, lt: since24h } },
-        select: { mood: true },
-      }),
-    ]);
+    const recent = await prisma.recognition.findMany({
+      select: { mood: true, name: true },
+    });
 
     const recentCounts: MoodCounts = { positive: 0, neutral: 0, negative: 0 };
     for (const item of recent) {
       addMoodCount(recentCounts, item.mood);
     }
     const recentStats = computeRiskStats(recentCounts);
-
-    const prevCounts: MoodCounts = { positive: 0, neutral: 0, negative: 0 };
-    for (const item of previous) {
-      addMoodCount(prevCounts, item.mood);
-    }
-    const prevStats = computeRiskStats(prevCounts);
-
-    const negativeDeltaVsPrevDay = recentStats.negativePercent - prevStats.negativePercent;
 
     const byName = new Map<string, MoodCounts>();
     for (const item of recent) {
@@ -53,7 +34,7 @@ export async function GET() {
       connectedCameras: CAMERA_CONFIGS.length,
       recognitionsLast24h: recent.length,
       negativePercent: recentStats.negativePercent,
-      negativeDeltaVsPrevDay,
+      negativeDeltaVsPrevDay: 0,
       riskZoneCount,
     });
   } catch (error) {

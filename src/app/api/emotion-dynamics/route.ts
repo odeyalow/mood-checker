@@ -1,23 +1,24 @@
 import { NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
-import { addMoodCount, bucketStartUtc, buildHourlyBuckets, toIso } from "@/lib/stats";
+import { addMoodCount, bucketStartUtc, buildAdaptiveBuckets, toIso } from "@/lib/stats";
 
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
 
 export async function GET() {
   try {
-    const now = new Date();
-    const since24h = new Date(now.getTime() - 24 * 60 * 60 * 1000);
-
     const items = await prisma.recognition.findMany({
-      where: { detectedAt: { gte: since24h } },
       select: { detectedAt: true, mood: true, name: true },
+      orderBy: { detectedAt: "asc" },
     });
+
+    const now = new Date();
+    const from = items[0]?.detectedAt ? new Date(items[0].detectedAt) : now;
+    const { bucketMinutes, buckets: keys } = buildAdaptiveBuckets(from, now);
 
     const buckets = new Map();
     for (const item of items) {
-      const bucket = bucketStartUtc(new Date(item.detectedAt));
+      const bucket = bucketStartUtc(new Date(item.detectedAt), bucketMinutes);
       const key = bucket.toISOString();
       let entry = buckets.get(key);
       if (!entry) {
@@ -34,7 +35,6 @@ export async function GET() {
       entry.students.add(item.name);
     }
 
-    const keys = buildHourlyBuckets(since24h, now);
     const points = keys.map((key) => {
       const bucket = buckets.get(key);
       if (!bucket) {

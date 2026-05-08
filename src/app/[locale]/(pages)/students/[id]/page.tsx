@@ -26,7 +26,7 @@ import { classifyMood } from "@/lib/mood";
 const { Title, Text } = Typography;
 const { RangePicker } = DatePicker;
 
-type Preset = "2" | "3" | "5" | "custom";
+type Preset = "all" | "30" | "90" | "custom";
 type AppLocale = "ru" | "kz" | "en";
 
 const L10N = {
@@ -36,25 +36,25 @@ const L10N = {
     loadError: "Ошибка загрузки",
     connectionError: "Ошибка соединения",
     noData: "Нет данных",
-    in24h: "Фиксаций за 24 часа",
+    allTimeRecognitions: "Фиксаций за все время",
     risk: "Риск",
     positive: "Позитив",
     neutral: "Нейтрально",
     negative: "Негатив",
     entries: "фиксаций",
-    dynamics24h: "Динамика эмоций (24 часа)",
+    allTimeDynamics: "Динамика эмоций за все время",
     recentRecognitions: "Последние фиксации",
     statsByDate: "Статистика по дате (этот студент)",
-    last2Days: "Последние 2 дня",
-    last3Days: "Последние 3 дня",
-    last5Days: "Последние 5 дней",
+    allTime: "Все время",
+    last30Days: "Последние 30 дней",
+    last90Days: "Последние 90 дней",
     custom: "Свой диапазон",
     loadStats: "Получить статистику",
     selectCustomRange: "Выберите даты для пользовательского диапазона.",
     statsLoadError: "Ошибка загрузки статистики",
     negativePercent: "Процент негатива",
     recognitionsInRange: "Распознаваний за период",
-    recentInRange: "Последние фиксации за выбранный период",
+    rangeHint: "По умолчанию показывается вся история студента. Можно выбрать любой диапазон дат.",
   },
   kz: {
     title: "Студент профилі",
@@ -62,25 +62,25 @@ const L10N = {
     loadError: "Жүктеу қатесі",
     connectionError: "Байланыс қатесі",
     noData: "Дерек жоқ",
-    in24h: "24 сағаттағы фиксациялар",
+    allTimeRecognitions: "Барлық уақыттағы фиксациялар",
     risk: "Тәуекел",
     positive: "Позитив",
     neutral: "Нейтрал",
     negative: "Негатив",
     entries: "фиксация",
-    dynamics24h: "Эмоция динамикасы (24 сағат)",
+    allTimeDynamics: "Барлық уақыттағы эмоция динамикасы",
     recentRecognitions: "Соңғы фиксациялар",
     statsByDate: "Күні бойынша статистика (осы студент)",
-    last2Days: "Соңғы 2 күн",
-    last3Days: "Соңғы 3 күн",
-    last5Days: "Соңғы 5 күн",
+    allTime: "Барлық уақыт",
+    last30Days: "Соңғы 30 күн",
+    last90Days: "Соңғы 90 күн",
     custom: "Өз аралығы",
     loadStats: "Статистиканы алу",
     selectCustomRange: "Қолданушы аралығы үшін күндерді таңдаңыз.",
     statsLoadError: "Статистика жүктеу қатесі",
     negativePercent: "Негатив пайызы",
     recognitionsInRange: "Кезең ішіндегі танулар",
-    recentInRange: "Таңдалған кезеңдегі соңғы фиксациялар",
+    rangeHint: "Әдепкіде студенттің бүкіл тарихы көрсетіледі. Кез келген күн аралығын таңдауға болады.",
   },
   en: {
     title: "Student Profile",
@@ -88,25 +88,25 @@ const L10N = {
     loadError: "Load error",
     connectionError: "Connection error",
     noData: "No data",
-    in24h: "Recognitions in 24h",
+    allTimeRecognitions: "All-time recognitions",
     risk: "Risk",
     positive: "Positive",
     neutral: "Neutral",
     negative: "Negative",
     entries: "entries",
-    dynamics24h: "Emotion dynamics (24h)",
+    allTimeDynamics: "All-time emotion dynamics",
     recentRecognitions: "Recent recognitions",
     statsByDate: "Stats by date (student)",
-    last2Days: "Last 2 days",
-    last3Days: "Last 3 days",
-    last5Days: "Last 5 days",
+    allTime: "All time",
+    last30Days: "Last 30 days",
+    last90Days: "Last 90 days",
     custom: "Custom range",
     loadStats: "Load stats",
     selectCustomRange: "Select dates for custom range.",
     statsLoadError: "Stats load error",
     negativePercent: "Negative percent",
     recognitionsInRange: "Recognitions in range",
-    recentInRange: "Recent recognitions in selected range",
+    rangeHint: "The full student history is shown by default. You can also select any custom date range.",
   },
 } as const;
 
@@ -194,7 +194,7 @@ export default function StudentPage({
   const t = L10N[safeLocale];
   const [data, setData] = useState<StudentPayload | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
-  const [preset, setPreset] = useState<Preset>("2");
+  const [preset, setPreset] = useState<Preset>("all");
   const [range, setRange] = useState<[Dayjs, Dayjs] | null>(null);
   const [dateStatsLoading, setDateStatsLoading] = useState(false);
   const [dateStatsError, setDateStatsError] = useState<string | null>(null);
@@ -269,7 +269,10 @@ export default function StudentPage({
   }
 
   useEffect(() => {
-    void loadDateStats();
+    const timer = setTimeout(() => {
+      void loadDateStats();
+    }, 0);
+    return () => clearTimeout(timer);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [id, t.connectionError, t.selectCustomRange, t.statsLoadError]);
 
@@ -293,7 +296,7 @@ export default function StudentPage({
                   </Title>
                   <Text type="secondary">ID: {data.student.id}</Text>
                 </div>
-                <Text type="secondary">{t.in24h}: {data.stats24h.totalRecognitions}</Text>
+                <Text type="secondary">{t.allTimeRecognitions}: {data.stats24h.totalRecognitions}</Text>
               </Space>
             </Card>
 
@@ -366,7 +369,7 @@ export default function StudentPage({
               </Col>
             </Row>
 
-            <Card title={t.dynamics24h} style={{ marginTop: 16 }} className="soft-card">
+            <Card title={t.allTimeDynamics} style={{ marginTop: 16 }} className="soft-card">
               <EmotionTimelineChart points={data.dynamicsPoints} locale={safeLocale} />
             </Card>
 
@@ -378,9 +381,9 @@ export default function StudentPage({
                     style={{ width: 220 }}
                     onChange={(value) => setPreset(value)}
                     options={[
-                      { value: "2", label: t.last2Days },
-                      { value: "3", label: t.last3Days },
-                      { value: "5", label: t.last5Days },
+                      { value: "all", label: t.allTime },
+                      { value: "30", label: t.last30Days },
+                      { value: "90", label: t.last90Days },
                       { value: "custom", label: t.custom },
                     ]}
                   />
@@ -398,6 +401,7 @@ export default function StudentPage({
                 </Space>
 
                 {dateStatsError ? <Text type="danger">{dateStatsError}</Text> : null}
+                {!dateStatsError ? <Text type="secondary">{t.rangeHint}</Text> : null}
 
                 <Row gutter={[16, 16]}>
                   <Col xs={24} md={8}>

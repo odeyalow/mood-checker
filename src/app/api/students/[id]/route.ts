@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
-import { addMoodCount, bucketStartUtc, buildHourlyBuckets, computeRiskStats } from "@/lib/stats";
+import { addMoodCount, bucketStartUtc, buildAdaptiveBuckets, computeRiskStats } from "@/lib/stats";
 
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
@@ -15,12 +15,9 @@ export async function GET(
     return NextResponse.json({ error: "not_found" }, { status: 404 });
   }
 
-  const now = new Date();
-  const since24h = new Date(now.getTime() - 24 * 60 * 60 * 1000);
-
   const items = await prisma.recognition.findMany({
-    where: { name: studentId, detectedAt: { gte: since24h } },
-    orderBy: { detectedAt: "desc" },
+    where: { name: studentId },
+    orderBy: { detectedAt: "asc" },
   });
 
   if (!items.length) {
@@ -31,9 +28,13 @@ export async function GET(
   for (const item of items) addMoodCount(counts, item.mood);
   const stats = computeRiskStats(counts);
 
+  const from = items[0]?.detectedAt ? new Date(items[0].detectedAt) : new Date();
+  const to = items[items.length - 1]?.detectedAt ? new Date(items[items.length - 1].detectedAt) : new Date();
+  const { bucketMinutes, buckets } = buildAdaptiveBuckets(from, to);
+
   const dynamicsPointsMap = new Map();
   for (const item of items) {
-    const bucket = bucketStartUtc(new Date(item.detectedAt));
+    const bucket = bucketStartUtc(new Date(item.detectedAt), bucketMinutes);
     const key = bucket.toISOString();
     const entry = dynamicsPointsMap.get(key) || {
       bucketStart: key,
@@ -45,7 +46,7 @@ export async function GET(
     dynamicsPointsMap.set(key, entry);
   }
 
-  const dynamicsPoints = buildHourlyBuckets(since24h, now).map((bucketStart) => {
+  const dynamicsPoints = buckets.map((bucketStart) => {
     const point = dynamicsPointsMap.get(bucketStart);
     if (!point) {
       return {
@@ -87,7 +88,7 @@ export async function GET(
       neutralCount: p.neutral,
       negativeCount: p.negative,
     })),
-    recent: items.slice(0, 20).map((item: { id: string; mood: string; detectedAt: Date }) => ({
+    recent: items.slice().reverse().slice(0, 20).map((item: { id: string; mood: string; detectedAt: Date }) => ({
       id: item.id,
       mood: item.mood,
       detectedAt: item.detectedAt.toISOString(),

@@ -11,7 +11,7 @@ const { Text } = Typography;
 const { RangePicker } = DatePicker;
 
 type AppLocale = "ru" | "kz" | "en";
-type Preset = "2" | "3" | "5" | "custom";
+type Preset = "all" | "30" | "90" | "custom";
 
 const L10N = {
   ru: {
@@ -25,15 +25,16 @@ const L10N = {
     recognitions: "Распознаваний за период",
     chartTitle: "График динамики эмоций",
     tableTitle: "Студенты с приоритетом негативных и нейтральных эмоций (топ 20)",
+    rangeHint: "По умолчанию показывается вся история. Можно выбрать любой диапазон дат.",
     student: "Студент",
     negative: "Негатив",
     neutral: "Нейтрально",
     positive: "Позитив",
     riskScore: "Риск-оценка",
     presets: {
-      d2: "Последние 2 дня",
-      d3: "Последние 3 дня",
-      d5: "Последние 5 дней",
+      all: "Все время",
+      d30: "Последние 30 дней",
+      d90: "Последние 90 дней",
       custom: "Свой диапазон",
     },
   },
@@ -48,15 +49,16 @@ const L10N = {
     recognitions: "Кезең ішіндегі танулар",
     chartTitle: "Эмоция динамикасының графигі",
     tableTitle: "Негатив және нейтрал эмоция басым студенттер (топ 20)",
+    rangeHint: "Әдепкіде бүкіл тарих көрсетіледі. Кез келген күн аралығын таңдауға болады.",
     student: "Студент",
     negative: "Негатив",
     neutral: "Нейтрал",
     positive: "Позитив",
     riskScore: "Тәуекел ұпайы",
     presets: {
-      d2: "Соңғы 2 күн",
-      d3: "Соңғы 3 күн",
-      d5: "Соңғы 5 күн",
+      all: "Барлық уақыт",
+      d30: "Соңғы 30 күн",
+      d90: "Соңғы 90 күн",
       custom: "Өз аралығы",
     },
   },
@@ -71,15 +73,16 @@ const L10N = {
     recognitions: "Recognitions in range",
     chartTitle: "Emotion Dynamics Chart",
     tableTitle: "Students with priority of negative and neutral emotions (top 20)",
+    rangeHint: "By default the full history is shown. You can also select any custom date range.",
     student: "Student",
     negative: "Negative",
     neutral: "Neutral",
     positive: "Positive",
     riskScore: "Risk score",
     presets: {
-      d2: "Last 2 days",
-      d3: "Last 3 days",
-      d5: "Last 5 days",
+      all: "All time",
+      d30: "Last 30 days",
+      d90: "Last 90 days",
       custom: "Custom range",
     },
   },
@@ -116,7 +119,7 @@ export default function ByDatePage({
   const safeLocale: AppLocale = locale === "kz" || locale === "en" ? locale : "ru";
   const t = L10N[safeLocale];
 
-  const [preset, setPreset] = useState<Preset>("2");
+  const [preset, setPreset] = useState<Preset>("all");
   const [range, setRange] = useState<[Dayjs, Dayjs] | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -155,7 +158,10 @@ export default function ByDatePage({
   }
 
   useEffect(() => {
-    void loadStats();
+    const timer = setTimeout(() => {
+      void loadStats();
+    }, 0);
+    return () => clearTimeout(timer);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -169,9 +175,9 @@ export default function ByDatePage({
               style={{ width: 220 }}
               onChange={(value) => setPreset(value)}
               options={[
-                { value: "2", label: t.presets.d2 },
-                { value: "3", label: t.presets.d3 },
-                { value: "5", label: t.presets.d5 },
+                { value: "all", label: t.presets.all },
+                { value: "30", label: t.presets.d30 },
+                { value: "90", label: t.presets.d90 },
                 { value: "custom", label: t.presets.custom },
               ]}
             />
@@ -190,6 +196,11 @@ export default function ByDatePage({
           {error ? (
             <div style={{ marginTop: 12 }}>
               <Text type="danger">{error}</Text>
+            </div>
+          ) : null}
+          {!error ? (
+            <div style={{ marginTop: 12 }}>
+              <Text type="secondary">{t.rangeHint}</Text>
             </div>
           ) : null}
         </Card>

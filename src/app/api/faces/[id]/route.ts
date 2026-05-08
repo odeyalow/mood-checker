@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import fs from "node:fs/promises";
 import path from "node:path";
+import { addMoodCount, bucketStartUtc, buildAdaptiveBuckets, computeRiskStats } from "@/lib/stats";
 
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
@@ -12,6 +13,13 @@ type FaceRecognitionMeta = {
   cameraId: string;
   detectedAt: string;
   snapshotUrl: string;
+};
+
+type RecognitionTimelineBucket = {
+  bucketStart: string;
+  positiveCount: number;
+  neutralCount: number;
+  negativeCount: number;
 };
 
 function sanitizeShortId(shortId: string) {
@@ -224,8 +232,7 @@ export async function GET(
           { name: face.shortId },
         ],
       },
-      orderBy: { detectedAt: "desc" },
-      take: 200,
+      orderBy: { detectedAt: "asc" },
       select: {
         id: true,
         mood: true,
@@ -234,7 +241,9 @@ export async function GET(
         snapshotUrl: true,
       },
     });
+    const counts = { positive: 0, neutral: 0, negative: 0 };
     const recognitionItems: FaceRecognitionMeta[] = [];
+    const historyItems: FaceRecognitionMeta[] = [];
     const images: Array<{
       id: string;
       mood: string;
@@ -243,17 +252,53 @@ export async function GET(
       snapshotUrl: string | null;
     }> = [];
     for (const recognition of recognitions) {
-      recognitionItems.push({
+      addMoodCount(counts, recognition.mood);
+      const normalizedRecognition = {
         id: recognition.id,
         snapshotUrl: recognition.snapshotUrl || "",
         mood: String(recognition.mood || "").trim(),
         cameraId: String(recognition.cameraId || "").trim(),
         detectedAt: recognition.detectedAt.toISOString(),
-      });
+      };
+      recognitionItems.push(normalizedRecognition);
+      historyItems.push(normalizedRecognition);
       if (recognition.snapshotUrl) {
         images.push(recognition);
       }
     }
+    const stats = computeRiskStats(counts);
+    const firstDetectedAt = recognitions[0]?.detectedAt ?? face.createdAt;
+    const lastDetectedAt = recognitions[recognitions.length - 1]?.detectedAt ?? face.updatedAt;
+    const { bucketMinutes, buckets } = buildAdaptiveBuckets(firstDetectedAt, lastDetectedAt);
+    const timelineMap = new Map<string, { bucketStart: string; positive: number; neutral: number; negative: number }>();
+    for (const recognition of recognitions) {
+      const bucketStart = bucketStartUtc(recognition.detectedAt, bucketMinutes).toISOString();
+      const entry = timelineMap.get(bucketStart) || {
+        bucketStart,
+        positive: 0,
+        neutral: 0,
+        negative: 0,
+      };
+      addMoodCount(entry, recognition.mood);
+      timelineMap.set(bucketStart, entry);
+    }
+    const timelinePoints: RecognitionTimelineBucket[] = buckets.map((bucketStart) => {
+      const entry = timelineMap.get(bucketStart);
+      if (!entry) {
+        return {
+          bucketStart,
+          positiveCount: 0,
+          neutralCount: 0,
+          negativeCount: 0,
+        };
+      }
+      return {
+        bucketStart: entry.bucketStart,
+        positiveCount: entry.positive,
+        neutralCount: entry.neutral,
+        negativeCount: entry.negative,
+      };
+    });
     const validImages = (
       await Promise.all(
         images.map(async (item) => ({
@@ -295,15 +340,10 @@ export async function GET(
         new Date(b.detectedAt).getTime() - new Date(a.detectedAt).getTime(),
     );
     const imagesOut = mergedImages.slice(0, 5);
-
-    const recognitionCount = await prisma.recognition.count({
-      where: {
-        OR: [
-          { faceIdentityId: face.id },
-          { name: face.shortId },
-        ],
-      },
-    });
+    const historyOut = historyItems
+      .slice()
+      .sort((a, b) => new Date(b.detectedAt).getTime() - new Date(a.detectedAt).getTime());
+    const recognitionCount = recognitions.length;
 
     return NextResponse.json({
       face: {
@@ -312,8 +352,19 @@ export async function GET(
         createdAt: face.createdAt.toISOString(),
         updatedAt: face.updatedAt.toISOString(),
         recognitionCount,
+        stats: {
+          positiveCount: stats.positiveCount,
+          neutralCount: stats.neutralCount,
+          negativeCount: stats.negativeCount,
+          positivePercent: stats.positivePercent,
+          neutralPercent: stats.neutralPercent,
+          negativePercent: stats.negativePercent,
+          riskPercent: stats.riskPercent,
+        },
       },
       images: imagesOut,
+      history: historyOut,
+      timelinePoints,
     });
   } catch (error) {
     console.error("[api/faces/[id]] GET failed", error);

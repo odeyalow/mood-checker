@@ -1,8 +1,9 @@
 "use client";
 
 import { use, useCallback, useEffect, useState } from "react";
-import { Card, Col, Empty, Row, Space, Tag, Typography } from "antd";
+import { Card, Col, Empty, Progress, Row, Space, Tag, Typography } from "antd";
 import MainLayout from "@/components/layouts/MainLayout";
+import EmotionTimelineChart from "@/components/dashboard/EmotionTimelineChart";
 
 const { Text, Title } = Typography;
 
@@ -10,30 +11,44 @@ type AppLocale = "ru" | "kz" | "en";
 
 const L10N = {
   ru: {
-    title: "\u041a\u0430\u0440\u0442\u043e\u0447\u043a\u0430 \u043b\u0438\u0446\u0430",
-    photos: "\u041f\u043e\u0441\u043b\u0435\u0434\u043d\u0438\u0435 5 \u0441\u043d\u0438\u043c\u043a\u043e\u0432",
-    notFound: "\u041b\u0438\u0446\u043e \u043d\u0435 \u043d\u0430\u0439\u0434\u0435\u043d\u043e",
-    loadError: "\u041e\u0448\u0438\u0431\u043a\u0430 \u0437\u0430\u0433\u0440\u0443\u0437\u043a\u0438",
-    camera: "\u041a\u0430\u043c\u0435\u0440\u0430",
-    mood: "\u042d\u043c\u043e\u0446\u0438\u044f",
-    recognizedAt: "\u0420\u0430\u0441\u043f\u043e\u0437\u043d\u0430\u043d\u043e",
-    total: "\u0412\u0441\u0435\u0433\u043e",
-    noImage: "\u041d\u0435\u0442 \u0441\u043d\u0438\u043c\u043a\u0430",
+    title: "Карточка лица",
+    photos: "Последние 5 снимков",
+    history: "История эмоций за все время",
+    chart: "График эмоций за все время",
+    notFound: "Лицо не найдено",
+    loadError: "Ошибка загрузки",
+    camera: "Камера",
+    mood: "Эмоция",
+    recognizedAt: "Распознано",
+    total: "Всего",
+    noImage: "Нет снимка",
+    positive: "Позитив",
+    neutral: "Нейтрально",
+    negative: "Негатив",
+    risk: "Риск",
   },
   kz: {
-    title: "\u0422\u04b1\u043b\u0493\u0430 \u043a\u0430\u0440\u0442\u0430\u0441\u044b",
-    photos: "\u0421\u043e\u04a3\u0493\u044b 5 \u0441\u0443\u0440\u0435\u0442",
-    notFound: "\u0422\u04b1\u043b\u0493\u0430 \u0442\u0430\u0431\u044b\u043b\u043c\u0430\u0434\u044b",
-    loadError: "\u0416\u04af\u043a\u0442\u0435\u0443 \u049b\u0430\u0442\u0435\u0441\u0456",
-    camera: "\u041a\u0430\u043c\u0435\u0440\u0430",
-    mood: "\u042d\u043c\u043e\u0446\u0438\u044f",
-    recognizedAt: "\u0422\u0430\u043d\u044b\u043b\u0493\u0430\u043d \u0443\u0430\u049b\u044b\u0442\u044b",
-    total: "\u0411\u0430\u0440\u043b\u044b\u0493\u044b",
-    noImage: "\u0421\u0443\u0440\u0435\u0442 \u0436\u043e\u049b",
+    title: "Тұлға картасы",
+    photos: "Соңғы 5 сурет",
+    history: "Барлық уақыттағы эмоция тарихы",
+    chart: "Барлық уақыттағы эмоция графигі",
+    notFound: "Тұлға табылмады",
+    loadError: "Жүктеу қатесі",
+    camera: "Камера",
+    mood: "Эмоция",
+    recognizedAt: "Танылған уақыты",
+    total: "Барлығы",
+    noImage: "Сурет жоқ",
+    positive: "Позитив",
+    neutral: "Нейтрал",
+    negative: "Негатив",
+    risk: "Тәуекел",
   },
   en: {
     title: "Face Card",
     photos: "Last 5 images",
+    history: "All-time emotion history",
+    chart: "All-time emotion chart",
     notFound: "Face not found",
     loadError: "Load error",
     camera: "Camera",
@@ -41,6 +56,10 @@ const L10N = {
     recognizedAt: "Recognized at",
     total: "Total",
     noImage: "No image",
+    positive: "Positive",
+    neutral: "Neutral",
+    negative: "Negative",
+    risk: "Risk",
   },
 } as const;
 
@@ -59,8 +78,24 @@ type FacePayload = {
     recognitionCount: number;
     createdAt: string;
     updatedAt: string;
+    stats: {
+      positiveCount: number;
+      neutralCount: number;
+      negativeCount: number;
+      positivePercent: number;
+      neutralPercent: number;
+      negativePercent: number;
+      riskPercent: number;
+    };
   };
   images: FaceImage[];
+  history: FaceImage[];
+  timelinePoints: Array<{
+    bucketStart: string;
+    positiveCount: number;
+    neutralCount: number;
+    negativeCount: number;
+  }>;
 };
 
 function formatDateTime(value: string, locale: AppLocale) {
@@ -134,8 +169,41 @@ export default function FaceDetailPage({
               <Title level={4} style={{ marginBottom: 4 }}>
                 {data.face.shortId}
               </Title>
-              <Tag>{`${t.total}: ${data.face.recognitionCount}`}</Tag>
+              <Space wrap>
+                <Tag>{`${t.total}: ${data.face.recognitionCount}`}</Tag>
+                <Tag color="green">{`${t.positive}: ${data.face.stats.positiveCount}`}</Tag>
+                <Tag color="blue">{`${t.neutral}: ${data.face.stats.neutralCount}`}</Tag>
+                <Tag color="red">{`${t.negative}: ${data.face.stats.negativeCount}`}</Tag>
+                <Tag color="orange">{`${t.risk}: ${data.face.stats.riskPercent}%`}</Tag>
+              </Space>
             </div>
+
+            <Card size="small">
+              <Row gutter={[16, 16]}>
+                <Col xs={24} md={12}>
+                  <Title level={5} style={{ marginTop: 0 }}>
+                    {t.chart}
+                  </Title>
+                  <EmotionTimelineChart points={data.timelinePoints ?? []} locale={safeLocale} />
+                </Col>
+                <Col xs={24} md={12}>
+                  <Space direction="vertical" size={12} style={{ width: "100%" }}>
+                    <div>
+                      <Text>{`${t.positive}: ${data.face.stats.positivePercent}%`}</Text>
+                      <Progress percent={data.face.stats.positivePercent} showInfo={false} strokeColor="#22c55e" />
+                    </div>
+                    <div>
+                      <Text>{`${t.neutral}: ${data.face.stats.neutralPercent}%`}</Text>
+                      <Progress percent={data.face.stats.neutralPercent} showInfo={false} strokeColor="#3b82f6" />
+                    </div>
+                    <div>
+                      <Text>{`${t.negative}: ${data.face.stats.negativePercent}%`}</Text>
+                      <Progress percent={data.face.stats.negativePercent} showInfo={false} strokeColor="#ef4444" />
+                    </div>
+                  </Space>
+                </Col>
+              </Row>
+            </Card>
 
             <Title level={5} style={{ margin: 0 }}>
               {t.photos}
@@ -161,6 +229,54 @@ export default function FaceDetailPage({
                             style={{
                               width: "100%",
                               height: 220,
+                              display: "flex",
+                              alignItems: "center",
+                              justifyContent: "center",
+                              background: "#f5f5f5",
+                            }}
+                          >
+                            <Text type="secondary">{t.noImage}</Text>
+                          </div>
+                        )
+                      }
+                    >
+                      <Space direction="vertical" size={4}>
+                        <Text type="secondary">{`${t.camera}: ${image.cameraId || "-"}`}</Text>
+                        <Text type="secondary">{`${t.mood}: ${image.mood || "-"}`}</Text>
+                        <Text type="secondary">
+                          {`${t.recognizedAt}: ${formatDateTime(image.detectedAt, safeLocale)}`}
+                        </Text>
+                      </Space>
+                    </Card>
+                  </Col>
+                ))}
+              </Row>
+            )}
+
+            <Title level={5} style={{ margin: 0 }}>
+              {t.history}
+            </Title>
+
+            {!data.history?.length ? (
+              <Empty description={t.notFound} />
+            ) : (
+              <Row gutter={[16, 16]}>
+                {data.history.map((image) => (
+                  <Col xs={24} sm={12} md={8} lg={6} key={`history-${image.id}`}>
+                    <Card
+                      size="small"
+                      cover={
+                        image.snapshotUrl ? (
+                          <img
+                            src={image.snapshotUrl}
+                            alt={data.face.shortId}
+                            style={{ width: "100%", height: 180, objectFit: "cover" }}
+                          />
+                        ) : (
+                          <div
+                            style={{
+                              width: "100%",
+                              height: 180,
                               display: "flex",
                               alignItems: "center",
                               justifyContent: "center",
