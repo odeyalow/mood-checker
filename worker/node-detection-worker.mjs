@@ -3337,6 +3337,8 @@ async function main() {
 
       const rgba = ctx.getImageData(0, 0, workerWidth, workerHeight).data;
       const rgb = rgbaToRgbTensorData(rgba);
+      let frameTensorNumBefore = 0;
+      try { frameTensorNumBefore = faceapi.tf.memory().numTensors; } catch (_) {}
       const frameTensor = faceapi.tf.tensor3d(rgb, [workerHeight, workerWidth, 3], "int32");
 
       let detections = [];
@@ -3371,6 +3373,15 @@ async function main() {
         const downsampled = await resized.data();
         resized.dispose();
         frameTensor.dispose();
+
+        // Clean up any tensors that leaked during detection
+        try {
+          const numAfter = faceapi.tf.memory().numTensors;
+          if (numAfter - frameTensorNumBefore > 20) {
+            faceapi.tf.engine().startScope();
+            faceapi.tf.engine().endScope();
+          }
+        } catch (_) {}
 
         const nextLuma = computeLumaBufferFromRgb(downsampled);
         cam.motion = computeMotionScore(cam.prevLuma, nextLuma);
@@ -4235,9 +4246,18 @@ async function main() {
     }
   };
 
+  let lastTfCleanupAt = Date.now();
   while (!stopping) {
     const now = Date.now();
     let confirmedTotal = 0;
+    // Periodically clean up leaked TensorFlow.js tensors to prevent memory growth
+    if (now - lastTfCleanupAt >= 10000) {
+      try {
+        faceapi.tf.engine().startScope();
+        faceapi.tf.engine().endScope();
+      } catch (_) {}
+      lastTfCleanupAt = now;
+    }
     try {
       if (now - lastZoomReloadAt >= workerZoomReloadMs) {
         workerZoomMap = await readWorkerZoomState(workerZoomStateFile);
