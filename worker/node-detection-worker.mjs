@@ -3196,9 +3196,9 @@ async function main() {
       const faceSide = Number(person.faceSide ?? 0);
       const faceSharpness = Number(person.faceSharpness ?? 0);
       const distance = Number(person.distance ?? 0);
-      const minScore = Math.max(0.06, camRecordMinFaceScore - 0.04);
-      const minSide = Math.max(12, camRecordMinFaceSidePx - 6);
-      const minSharpness = Math.max(4, camRecordMinSharpness * 0.6);
+      const minScore = Math.max(0.05, camRecordMinFaceScore - 0.06);
+      const minSide = Math.max(10, camRecordMinFaceSidePx - 8);
+      const minSharpness = Math.max(2.5, camRecordMinSharpness * 0.35);
       const maxDistance = Math.min(1, camRecordMaxDistance + 0.12);
       if (faceScore < minScore) return false;
       if (faceSide < minSide) return false;
@@ -3955,7 +3955,7 @@ async function main() {
               const strictRecordable = isRecordablePerson(person);
               const relaxedRecordable = isRecordablePersonRelaxed(person);
               const allowRelaxedRecord = Boolean(person.justRegistered) || (
-                session.sampleCount >= Math.max(2, camSessionMinSamples) &&
+                session.sampleCount >= Math.max(1, camSessionMinSamples) &&
                 relaxedRecordable
               );
               if (!strictRecordable && !allowRelaxedRecord) {
