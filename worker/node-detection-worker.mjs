@@ -3961,13 +3961,25 @@ async function main() {
                 session.sampleCount >= Math.max(1, camSessionMinSamples) &&
                 relaxedRecordable
               );
-              if (!strictRecordable && !allowRelaxedRecord) {
+              const personDistance = Number(person.distance ?? 0);
+              const strongIdentityMatch =
+                Number.isFinite(personDistance) &&
+                personDistance > 0 &&
+                personDistance <= Math.max(0.28, camMatchThreshold - 0.1) &&
+                Number(person.faceScore ?? 0) >= Math.max(0.08, camRecordMinFaceScore - 0.1) &&
+                Number(person.faceSide ?? 0) >= Math.max(10, camRecordMinFaceSidePx - 10);
+              const allowStrongMatchFallback =
+                !person.lockOverridden &&
+                session.sampleCount >= 1 &&
+                strongIdentityMatch;
+
+              if (!strictRecordable && !allowRelaxedRecord && !allowStrongMatchFallback) {
                 const lastSkipLogAt = Number(cam.lastRecordSkipLogAt || 0);
                 if (now - lastSkipLogAt >= 2000) {
                   const faceScore = Number(person.faceScore ?? 0);
                   const faceSide = Number(person.faceSide ?? 0);
                   const faceSharpness = Number(person.faceSharpness ?? 0);
-                  const distance = Number(person.distance ?? 0);
+                  const distance = personDistance;
                   const strictReasons = [];
                   if (faceScore < camRecordMinFaceScore) strictReasons.push("score");
                   if (faceSide < camRecordMinFaceSidePx) strictReasons.push("side");
@@ -3994,14 +4006,14 @@ async function main() {
                       `distance=${Number(person.distance ?? 0).toFixed(3)} ` +
                       `samples=${session.sampleCount} just_registered=${person.justRegistered ? "1" : "0"} ` +
                       `strict_fail=${strictReasons.join("+") || "none"} ` +
-                      `relaxed_fail=${relaxedReasons.join("+") || "none"}`,
+                      `relaxed_fail=${relaxedReasons.join("+") || "none"} ` +
+                      `strong_match=${strongIdentityMatch ? "1" : "0"}`,
                   );
                   cam.lastRecordSkipLogAt = now;
                 }
                 continue;
               }
 
-              const personDistance = Number(person.distance ?? 0);
               if (Number.isFinite(personDistance) && personDistance > 0) {
                 session.bestDistance = Math.min(
                   Number(session.bestDistance ?? Number.POSITIVE_INFINITY),
@@ -4056,6 +4068,12 @@ async function main() {
               }
               if (!resolvedEmotionLabel && moodLabel) {
                 resolvedEmotionLabel = moodLabel;
+              }
+
+              // DB API requires non-empty mood; keep persistence resilient even
+              // when mood inference is missing for a short session.
+              if (!moodLabel) {
+                moodLabel = dbFallbackMood;
               }
 
               const readyBySession = canResolveFromSamples && Boolean(moodLabel);
