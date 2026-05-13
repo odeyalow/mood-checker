@@ -3189,6 +3189,11 @@ async function main() {
 
     // Relaxed gate for already matched identities: avoid losing DB events when
     // frame quality fluctuates but identity is stable enough.
+    const relaxedRecordMinScore = Math.max(0.05, camRecordMinFaceScore - 0.06);
+    const relaxedRecordMinSide = Math.max(10, camRecordMinFaceSidePx - 8);
+    const relaxedRecordMinSharpness = Math.max(2.5, camRecordMinSharpness * 0.35);
+    const relaxedRecordMaxDistance = Math.min(1, camRecordMaxDistance + 0.12);
+    const strongDistanceMatchThreshold = Math.max(0.26, camMatchThreshold - 0.12);
     const isRecordablePersonRelaxed = (person) => {
       if (!person || isUnknownIdentity(person.name)) return false;
       if (person.lockOverridden) return false;
@@ -3196,14 +3201,12 @@ async function main() {
       const faceSide = Number(person.faceSide ?? 0);
       const faceSharpness = Number(person.faceSharpness ?? 0);
       const distance = Number(person.distance ?? 0);
-      const minScore = Math.max(0.05, camRecordMinFaceScore - 0.06);
-      const minSide = Math.max(10, camRecordMinFaceSidePx - 8);
-      const minSharpness = Math.max(2.5, camRecordMinSharpness * 0.35);
-      const maxDistance = Math.min(1, camRecordMaxDistance + 0.12);
-      if (faceScore < minScore) return false;
-      if (faceSide < minSide) return false;
-      if (faceSharpness < minSharpness) return false;
-      if (Number.isFinite(distance) && distance > 0 && distance > maxDistance) return false;
+      const strongDistanceMatch =
+        Number.isFinite(distance) && distance > 0 && distance <= strongDistanceMatchThreshold;
+      if (faceScore < relaxedRecordMinScore) return false;
+      if (faceSide < relaxedRecordMinSide) return false;
+      if (!strongDistanceMatch && faceSharpness < relaxedRecordMinSharpness) return false;
+      if (Number.isFinite(distance) && distance > 0 && distance > relaxedRecordMaxDistance) return false;
       return true;
     };
 
@@ -3961,13 +3964,37 @@ async function main() {
               if (!strictRecordable && !allowRelaxedRecord) {
                 const lastSkipLogAt = Number(cam.lastRecordSkipLogAt || 0);
                 if (now - lastSkipLogAt >= 2000) {
+                  const faceScore = Number(person.faceScore ?? 0);
+                  const faceSide = Number(person.faceSide ?? 0);
+                  const faceSharpness = Number(person.faceSharpness ?? 0);
+                  const distance = Number(person.distance ?? 0);
+                  const strictReasons = [];
+                  if (faceScore < camRecordMinFaceScore) strictReasons.push("score");
+                  if (faceSide < camRecordMinFaceSidePx) strictReasons.push("side");
+                  if (faceSharpness < camRecordMinSharpness) strictReasons.push("sharp");
+                  if (Number.isFinite(distance) && distance > 0 && distance > camRecordMaxDistance) {
+                    strictReasons.push("distance");
+                  }
+                  const relaxedReasons = [];
+                  const strongDistanceMatch =
+                    Number.isFinite(distance) && distance > 0 && distance <= strongDistanceMatchThreshold;
+                  if (faceScore < relaxedRecordMinScore) relaxedReasons.push("score");
+                  if (faceSide < relaxedRecordMinSide) relaxedReasons.push("side");
+                  if (!strongDistanceMatch && faceSharpness < relaxedRecordMinSharpness) {
+                    relaxedReasons.push("sharp");
+                  }
+                  if (Number.isFinite(distance) && distance > 0 && distance > relaxedRecordMaxDistance) {
+                    relaxedReasons.push("distance");
+                  }
                   log(
                     `[${cam.cameraId}] record_skip name=${person.name} ` +
                       `score=${Number(person.faceScore ?? 0).toFixed(3)} ` +
                       `side=${Number(person.faceSide ?? 0).toFixed(1)} ` +
                       `sharp=${Number(person.faceSharpness ?? 0).toFixed(2)} ` +
                       `distance=${Number(person.distance ?? 0).toFixed(3)} ` +
-                      `samples=${session.sampleCount} just_registered=${person.justRegistered ? "1" : "0"}`,
+                      `samples=${session.sampleCount} just_registered=${person.justRegistered ? "1" : "0"} ` +
+                      `strict_fail=${strictReasons.join("+") || "none"} ` +
+                      `relaxed_fail=${relaxedReasons.join("+") || "none"}`,
                   );
                   cam.lastRecordSkipLogAt = now;
                 }
