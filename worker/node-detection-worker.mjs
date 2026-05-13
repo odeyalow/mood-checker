@@ -1702,8 +1702,8 @@ async function main() {
     0,
     envFloat("WORKER_IDENTITY_LOCK_SWITCH_MARGIN", 0.02),
   );
-  const identifyMinIntervalMs = Math.max(350, envInt("WORKER_IDENTIFY_MIN_INTERVAL_MS", 900));
-  const autoCreateCooldownMs = Math.max(0, envInt("WORKER_AUTO_CREATE_COOLDOWN_MS", 2200));
+  const identifyMinIntervalMs = Math.max(300, envInt("WORKER_IDENTIFY_MIN_INTERVAL_MS", 600));
+  const autoCreateCooldownMs = Math.max(0, envInt("WORKER_AUTO_CREATE_COOLDOWN_MS", 1200));
   const requireFrontalFace = envBool("WORKER_REQUIRE_FRONTAL_FACE", true);
   const frontalMinEyeDistanceRatio = Math.max(
     0.05,
@@ -2049,6 +2049,7 @@ async function main() {
   };
 
   let lastIdentifyErrLogAt = 0;
+  let lastIdentifySlowLogAt = 0;
   const identifyFaceDescriptor = async (
     descriptor,
     threshold,
@@ -2058,6 +2059,7 @@ async function main() {
     const safeDescriptor = normalizeDescriptor(descriptor);
     if (!safeDescriptor) return null;
     try {
+      const startedAt = Date.now();
       const payloadBody = {
         descriptor: safeDescriptor,
         threshold,
@@ -2071,6 +2073,11 @@ async function main() {
       const shortId = String(payload?.shortId ?? "").trim();
       const mergedDescriptor = normalizeDescriptor(payload?.descriptor) || safeDescriptor;
       if (!shortId || !mergedDescriptor) return null;
+      const elapsedMs = Date.now() - startedAt;
+      if (elapsedMs >= 650 && Date.now() - lastIdentifySlowLogAt >= 3000) {
+        log(`[faces] identify slow elapsed_ms=${elapsedMs}`);
+        lastIdentifySlowLogAt = Date.now();
+      }
       upsertKnownDescriptor(knownLabeledDescriptors, shortId, mergedDescriptor);
       return {
         shortId,
@@ -3413,7 +3420,10 @@ async function main() {
         );
       }
       if (camRequireFrontalFace && detections.length) {
-        detections = detections.filter((det) => isIdentityVisibleDetection(det));
+        const frontalDetections = detections.filter((det) => isIdentityVisibleDetection(det));
+        if (frontalDetections.length) {
+          detections = frontalDetections;
+        }
       }
       cam.candidate = detections.length;
 
@@ -3586,7 +3596,10 @@ async function main() {
             results = await enrichDetectionsWithEmotionFallback(rgb, workerWidth, workerHeight, results);
           }
           if (camRequireFrontalFace && results.length) {
-            results = results.filter((det) => isIdentityVisibleDetection(det));
+            const frontalResults = results.filter((det) => isIdentityVisibleDetection(det));
+            if (frontalResults.length) {
+              results = frontalResults;
+            }
           }
 
           const snapshotBase64 = jpg.toString("base64");
@@ -3643,9 +3656,9 @@ async function main() {
                   faceSharpness,
                 );
                 const softReadyForNewId =
-                  faceSide >= Math.max(12, camNewIdMinFaceSidePx - 4) &&
-                  identityScore >= Math.max(0.08, camNewIdMinScore - 0.03) &&
-                  faceSharpness >= Math.max(4, camNewIdMinSharpness * 0.6);
+                  faceSide >= Math.max(10, camNewIdMinFaceSidePx - 8) &&
+                  identityScore >= Math.max(0.07, camNewIdMinScore - 0.05) &&
+                  faceSharpness >= Math.max(2.5, camNewIdMinSharpness * 0.35);
                 const canAttemptNewId = readyForNewId || softReadyForNewId;
                 const blockedBankMatch = canAttemptNewId
                   ? findClosestDescriptorInBank(blockedDescriptorBank, descriptor)
