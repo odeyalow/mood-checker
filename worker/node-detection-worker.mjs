@@ -3843,6 +3843,13 @@ async function main() {
           }
 
 
+          cam.people = people;
+          cam.matchedNames = people.map((p) => p.name);
+          cam.matchDistance = people.length ? Number(bestDistance || 0) : 0;
+          const matchedNamesNow = new Set(
+            people.map((p) => p.name).filter((name) => !isUnknownIdentity(name)),
+          );
+
           for (const [savedName, seenAt] of cam.emotionSeenAtByName.entries()) {
             if (now - seenAt > emotionEmaTtlMs) {
               if (matchedNamesNow.has(savedName)) continue;
@@ -3859,9 +3866,7 @@ async function main() {
           cam.people = people;
           cam.matchedNames = people.map((p) => p.name);
           cam.matchDistance = people.length ? Number(bestDistance || 0) : 0;
-          const matchedNamesNow = new Set(
-            people.map((p) => p.name).filter((name) => !isUnknownIdentity(name)),
-          );
+
           for (const matchedName of matchedNamesNow) {
             cam.lastSeenMatchedAt.set(matchedName, now);
           }
