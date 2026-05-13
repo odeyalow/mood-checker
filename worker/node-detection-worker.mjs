@@ -3941,6 +3941,17 @@ async function main() {
                 cam.presenceSessions.set(sessionKey, session);
               }
 
+              session.lastSeenAt = now;
+
+              const shouldTakeSessionSample =
+                session.sampleCount === 0 ||
+                now - session.lastSampleAt >= camSessionSnapshotIntervalMs;
+              if (shouldTakeSessionSample) {
+                session.lastSampleAt = now;
+                session.sampleCount += 1;
+                addSessionEmotionSample(session, person.emotionKey, person.emotionConfidence);
+              }
+
               const strictRecordable = isRecordablePerson(person);
               const relaxedRecordable = isRecordablePersonRelaxed(person);
               const allowRelaxedRecord = Boolean(person.justRegistered) || (
@@ -3963,23 +3974,12 @@ async function main() {
                 continue;
               }
 
-              session.lastSeenAt = now;
-
               const personDistance = Number(person.distance ?? 0);
               if (Number.isFinite(personDistance) && personDistance > 0) {
                 session.bestDistance = Math.min(
                   Number(session.bestDistance ?? Number.POSITIVE_INFINITY),
                   personDistance,
                 );
-              }
-
-              const shouldTakeSessionSample =
-                session.sampleCount === 0 ||
-                now - session.lastSampleAt >= camSessionSnapshotIntervalMs;
-              if (shouldTakeSessionSample) {
-                session.lastSampleAt = now;
-                session.sampleCount += 1;
-                addSessionEmotionSample(session, person.emotionKey, person.emotionConfidence);
               }
 
               const directMoodLabel = String(person.emotion || "").split(" ")[0];
