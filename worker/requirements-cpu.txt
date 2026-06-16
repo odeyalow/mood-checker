@@ -3,4 +3,4 @@ onnxruntime==1.17.3
 insightface==0.7.3
 opencv-python-headless==4.10.0.84
 requests==2.32.5
-hsemotion-onnx==0.3.0
+hsemotion-onnx==0.3.1
