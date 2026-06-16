@@ -151,6 +151,79 @@ def landmarks_from_face(face: Any) -> dict[str, list[dict[str, float]]]:
     }
 
 
+# HSEmotion (enet_b0_8) class order -> face-api compatible keys used by the worker.
+# Contempt (idx 1) has no face-api equivalent; folded into "disgusted".
+HSEMOTION_IDX_TO_FACEAPI = [
+    "angry",      # 0 Anger
+    "disgusted",  # 1 Contempt
+    "disgusted",  # 2 Disgust
+    "fearful",    # 3 Fear
+    "happy",      # 4 Happiness
+    "neutral",    # 5 Neutral
+    "sad",        # 6 Sadness
+    "surprised",  # 7 Surprise
+]
+
+
+def crop_face_rgb(frame_bgr: np.ndarray, box: dict[str, float], pad_ratio: float = 0.2) -> np.ndarray | None:
+    height, width = frame_bgr.shape[:2]
+    bx = float(box.get("x", 0.0))
+    by = float(box.get("y", 0.0))
+    bw = float(box.get("width", 0.0))
+    bh = float(box.get("height", 0.0))
+    pad_x = bw * pad_ratio
+    pad_y = bh * pad_ratio
+    x0 = max(0, int(bx - pad_x))
+    y0 = max(0, int(by - pad_y))
+    x1 = min(width, int(bx + bw + pad_x))
+    y1 = min(height, int(by + bh + pad_y))
+    if x1 - x0 < 8 or y1 - y0 < 8:
+        return None
+    crop_bgr = frame_bgr[y0:y1, x0:x1]
+    if crop_bgr.size == 0:
+        return None
+    return cv2.cvtColor(crop_bgr, cv2.COLOR_BGR2RGB)
+
+
+class EmotionEngine:
+    def __init__(self) -> None:
+        from hsemotion_onnx.facial_emotions import HSEmotionRecognizer  # type: ignore
+
+        model_name = env_str("WORKER_HSEMOTION_MODEL", "enet_b0_8_best_afew")
+        self._fer = HSEmotionRecognizer(model_name=model_name)
+        self._model_name = model_name
+        self._lock = threading.Lock()
+
+    @property
+    def model_name(self) -> str:
+        return self._model_name
+
+    def predict(self, face_rgb: np.ndarray) -> dict[str, float] | None:
+        with self._lock:
+            _, scores = self._fer.predict_emotions(face_rgb, logits=False)
+        arr = np.asarray(scores, dtype=np.float32).reshape(-1)
+        if arr.size < len(HSEMOTION_IDX_TO_FACEAPI):
+            return None
+        out: dict[str, float] = {}
+        for idx, key in enumerate(HSEMOTION_IDX_TO_FACEAPI):
+            out[key] = out.get(key, 0.0) + float(arr[idx])
+        return out
+
+
+def load_emotion_engine() -> "EmotionEngine | None":
+    backend = env_str("WORKER_EMOTION_BACKEND", "hsemotion").lower()
+    if backend in {"", "none", "off", "0", "false", "faceapi"}:
+        log("emotion backend disabled in service (WORKER_EMOTION_BACKEND); worker uses face-api fallback")
+        return None
+    try:
+        engine = EmotionEngine()
+        log(f"emotion engine loaded backend=hsemotion model={engine.model_name}")
+        return engine
+    except Exception as exc:  # noqa: BLE001 - degrade gracefully to face-api path
+        log(f"emotion engine unavailable (fallback to face-api) err={exc}")
+        return None
+
+
 class InsightFaceEngine:
     def __init__(self) -> None:
         from insightface.app import FaceAnalysis  # type: ignore
@@ -192,6 +265,7 @@ class InsightFaceEngine:
         frame_bgr: np.ndarray,
         *,
         include_descriptor: bool,
+        include_emotion: bool,
         max_faces: int,
         min_score: float,
     ) -> list[dict[str, Any]]:
@@ -223,6 +297,16 @@ class InsightFaceEngine:
         rows.sort(key=lambda item: float(item.get("score", 0.0)), reverse=True)
         if max_faces > 0:
             rows = rows[:max_faces]
+
+        # Emotion inference runs only on the kept faces, after truncation, to save compute.
+        if include_emotion and EMOTION_ENGINE is not None:
+            for row in rows:
+                try:
+                    face_rgb = crop_face_rgb(frame_bgr, row["box"])
+                    row["expressions"] = EMOTION_ENGINE.predict(face_rgb) if face_rgb is not None else None
+                except Exception:  # noqa: BLE001 - never let emotion failure break detection
+                    row["expressions"] = None
+
         return rows
 
 
@@ -231,6 +315,7 @@ load_env_file(ROOT_DIR / ".env.worker")
 load_env_file(ROOT_DIR / ".env")
 
 ENGINE = InsightFaceEngine()
+EMOTION_ENGINE = load_emotion_engine()
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -250,7 +335,12 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self) -> None:
         if self.path.startswith("/health"):
-            self._json(200, {"ok": True, **ENGINE.info})
+            emotion_info = (
+                {"backend": "hsemotion", "model": EMOTION_ENGINE.model_name}
+                if EMOTION_ENGINE is not None
+                else {"backend": "faceapi"}
+            )
+            self._json(200, {"ok": True, **ENGINE.info, "emotion": emotion_info})
             return
         self._json(404, {"error": "not_found"})
 
@@ -289,6 +379,7 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         include_descriptor = bool(payload.get("includeDescriptor", False))
+        include_emotion = bool(payload.get("includeEmotion", False))
         max_faces = max(1, min(20, int(payload.get("maxFaces", 10) or 10)))
         min_score = max(0.0, min(1.0, float(payload.get("minScore", 0.0) or 0.0)))
 
@@ -296,6 +387,7 @@ class Handler(BaseHTTPRequestHandler):
             faces = ENGINE.analyze(
                 frame_bgr,
                 include_descriptor=include_descriptor,
+                include_emotion=include_emotion,
                 max_faces=max_faces,
                 min_score=min_score,
             )

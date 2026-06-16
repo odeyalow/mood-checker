@@ -41,8 +41,19 @@ model FaceIdentity {
   createdAt  DateTime      @default(now())
   updatedAt  DateTime      @updatedAt
   recognitions Recognition[]
+  samples      FaceDescriptor[]
 
   @@index([createdAt])
+}
+
+model FaceDescriptor {
+  id             String       @id @default(cuid())
+  faceIdentityId String
+  faceIdentity   FaceIdentity @relation(fields: [faceIdentityId], references: [id], onDelete: Cascade)
+  descriptor     Json
+  createdAt      DateTime     @default(now())
+
+  @@index([faceIdentityId])
 }
 
 model FaceDedupLog {

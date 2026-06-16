@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import fs from "node:fs/promises";
 import path from "node:path";
-import { normalizeDescriptor } from "@/lib/faces";
+import { descriptorDistance, normalizeDescriptor } from "@/lib/faces";
 
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
@@ -134,6 +134,33 @@ async function publicSnapshotExists(publicUrl: string) {
     return stat.isFile();
   } catch {
     return false;
+  }
+}
+
+// Appends a descriptor to an identity's gallery for more robust matching.
+// Fail-safe: any error (table/client missing before migration) is swallowed by
+// the caller, so matching keeps working on the single centroid descriptor.
+async function appendGallerySample(faceIdentityId: string, descriptor: number[]) {
+  const cap = Math.max(1, Math.min(20, parseEnvInt("FACE_GALLERY_MAX_SAMPLES", 6)));
+  const minDistance = Math.max(0, parseEnvFloat("FACE_GALLERY_MIN_DISTANCE", 0.12));
+  const existing = await prisma.faceDescriptor.findMany({
+    where: { faceIdentityId },
+    orderBy: { createdAt: "desc" },
+    select: { id: true, descriptor: true },
+  });
+  // Skip near-duplicate samples to keep the gallery diverse (pose/light variety).
+  for (const row of existing) {
+    const known = normalizeDescriptor(row.descriptor);
+    if (!known) continue;
+    if (descriptorDistance(descriptor, known) < minDistance) return;
+  }
+  await prisma.faceDescriptor.create({ data: { faceIdentityId, descriptor } });
+  // Keep only the newest `cap` samples.
+  if (existing.length + 1 > cap) {
+    const stale = existing.slice(cap - 1).map((row) => row.id);
+    if (stale.length) {
+      await prisma.faceDescriptor.deleteMany({ where: { id: { in: stale } } });
+    }
   }
 }
 
@@ -382,6 +409,11 @@ export async function POST(request: Request) {
       faceIdentityId = identity?.id ?? null;
     } catch {
       faceIdentityId = null;
+    }
+
+    if (faceIdentityId && descriptor) {
+      // Best-effort: never let gallery maintenance fail the recognition write.
+      await appendGallerySample(faceIdentityId, descriptor).catch(() => {});
     }
 
     const detectedAt = Number.isNaN(detectedAtRaw.getTime()) ? new Date() : detectedAtRaw;

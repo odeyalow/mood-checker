@@ -1131,14 +1131,22 @@ function computeMatchCandidates(labeledDescriptors, descriptor) {
   return ranked;
 }
 
-function upsertKnownDescriptor(labeledDescriptors, label, descriptor) {
+function upsertKnownDescriptor(labeledDescriptors, label, descriptor, maxSamples = 6) {
   const safeLabel = String(label ?? "").trim();
   const safeDescriptor = normalizeDescriptor(descriptor);
   if (!safeLabel || !safeDescriptor) return false;
 
   const index = labeledDescriptors.findIndex((item) => String(item?.label ?? "") === safeLabel);
   if (index >= 0) {
-    labeledDescriptors[index] = { label: safeLabel, descriptors: [safeDescriptor] };
+    const existing = Array.isArray(labeledDescriptors[index]?.descriptors)
+      ? labeledDescriptors[index].descriptors
+      : [];
+    // Keep a small diverse gallery: skip near-duplicates, cap to newest maxSamples.
+    const tooSimilar = existing.some(
+      (d) => Number(euclideanDistance(safeDescriptor, d)) < 0.12,
+    );
+    const next = tooSimilar ? existing : [safeDescriptor, ...existing].slice(0, Math.max(1, maxSamples));
+    labeledDescriptors[index] = { label: safeLabel, descriptors: next };
     return false;
   }
 
@@ -2025,9 +2033,15 @@ async function main() {
       const nextDescriptors = [];
       for (const item of items) {
         const label = String(item?.shortId ?? "").trim();
-        const descriptor = normalizeDescriptor(item?.descriptor);
-        if (!label || !descriptor) continue;
-        nextDescriptors.push({ label, descriptors: [descriptor] });
+        const centroid = normalizeDescriptor(item?.descriptor);
+        // Prefer the multi-sample gallery when the registry provides it; fall back
+        // to the single centroid descriptor for older API responses.
+        const gallery = Array.isArray(item?.descriptors)
+          ? item.descriptors.map((d) => normalizeDescriptor(d)).filter(Boolean)
+          : [];
+        const descriptors = gallery.length ? gallery : centroid ? [centroid] : [];
+        if (!label || !descriptors.length) continue;
+        nextDescriptors.push({ label, descriptors });
       }
       knownLabeledDescriptors = nextDescriptors;
       blockedDescriptorBank = buildDescriptorBankFromBlockedIds(
@@ -2104,7 +2118,7 @@ async function main() {
       width,
       height,
     },
-    { includeDescriptor = false, maxFaces = 10, minScore = 0 } = {},
+    { includeDescriptor = false, includeEmotion = false, maxFaces = 10, minScore = 0 } = {},
   ) => {
     if (inferenceBackend !== "insightface") return null;
     if (!(rgb instanceof Uint8Array) || !rgb.length || !width || !height) return [];
@@ -2117,6 +2131,7 @@ async function main() {
           width,
           height,
           includeDescriptor,
+          includeEmotion,
           maxFaces,
           minScore,
         },
@@ -2157,6 +2172,8 @@ async function main() {
     if (!enableEmotions || !Array.isArray(detections) || !detections.length) return detections;
     try {
       for (const det of detections) {
+        // Skip faces that already carry emotions from the detector (e.g. hsemotion via InsightFace).
+        if (det?.expressions && Object.keys(det.expressions).length) continue;
         const detBox = getBox(det);
         if (!detBox) continue;
         // Crop the face region from the full rgb frame and run face-api on the crop.
@@ -2431,7 +2448,7 @@ async function main() {
       cameraId: cam.cameraId,
       action: "auto_quarantine_blocked",
       reason:
-        `РђРІС‚РѕР±Р»РѕРєРёСЂРѕРІРєР° ID: РїРѕРґРѕР·СЂРµРЅРёРµ РЅР° С„Р°РЅС‚РѕРј (ratio=${ratio.toFixed(2)}, ` +
+        `Автоблокировка ID: подозрение на фантом (ratio=${ratio.toFixed(2)}, ` +
         `samples=${stat.samples}, score=${Number(person?.faceScore ?? 0).toFixed(3)}, ` +
         `side=${Number(person?.faceSide ?? 0).toFixed(1)}, sharp=${Number(person?.faceSharpness ?? 0).toFixed(1)}).`,
       sourceSnapshotUrl,
@@ -3548,6 +3565,7 @@ async function main() {
                 height: workerHeight,
               }, {
                 includeDescriptor: enableMatching,
+                includeEmotion: needExpressionsForSnapshot,
                 maxFaces: 12,
                 minScore: 0.05,
               });

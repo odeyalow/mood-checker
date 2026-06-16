@@ -54,3 +54,15 @@ dev.db
 dev.db-journal
 *.db
 *.db-journal
+
+# python
+__pycache__/
+*.pyc
+.venv/
+.venv-worker/
+
+# misc artifacts
+*.zip
+
+# accidental nested clone of the project (removed from tracking)
+/src/components/mood-checker/
