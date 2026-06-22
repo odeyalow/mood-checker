@@ -51,6 +51,19 @@ type LogItem = {
 
 type Stage = "frame_error" | "idle" | "matching" | "registering" | "matched";
 
+// Forward-only ordering of pipeline stages within a single face appearance.
+const STAGE_RANK: Record<Stage, number> = {
+  frame_error: -1,
+  idle: 0,
+  matching: 1,
+  registering: 2,
+  matched: 3,
+};
+
+// Tolerate brief detector dropouts (face flickers out for a poll or two) so the
+// log does not cycle "face found -> matching -> face found ...".
+const FACE_PRESENCE_GRACE_MS = 2500;
+
 function getMatchedNames(status: WorkerStatus | null | undefined) {
   const names = new Set<string>();
   if (Array.isArray(status?.matchedNames)) {
@@ -99,6 +112,8 @@ export default function CameraPipelineLogPanel({
   const lastStatusRef = useRef<Record<string, WorkerStatus | null>>({});
   const lastByKeyRef = useRef<Record<string, number>>({});
   const seenDedupIdsRef = useRef<Set<string>>(new Set());
+  const presenceRef = useRef<Record<string, { active: boolean; lastSeenAt: number }>>({});
+  const sessionRankRef = useRef<Record<string, number>>({});
 
   const cameraNameById = useMemo(
     () => Object.fromEntries(CAMERA_CONFIGS.map((camera) => [camera.id, camera.name || camera.id])),
@@ -137,23 +152,47 @@ export default function CameraPipelineLogPanel({
           const prev = lastStatusRef.current[cameraId] || null;
           if (!current) continue;
 
+          const now = Date.now();
           const frameOk = current.frameOk !== false;
           const prevFrameOk = prev ? prev.frameOk !== false : true;
-          const faceInFrame = Boolean(current.faceInFrame);
           const confirmed = Number(current.confirmed || 0) > 0;
           const names = getMatchedNames(current);
           const prevNames = getMatchedNames(prev);
           const hasMatch = names.length > 0;
+          const faceSignal = Boolean(current.faceInFrame) || confirmed || hasMatch;
+
+          // Debounce face presence: a face flickering in/out of detection on
+          // consecutive polls must not restart the pipeline log cycle.
+          const presence = presenceRef.current[cameraId] || { active: false, lastSeenAt: 0 };
+          if (faceSignal) presence.lastSeenAt = now;
+          const faceActive =
+            frameOk &&
+            (faceSignal || (presence.active && now - presence.lastSeenAt < FACE_PRESENCE_GRACE_MS));
+          const wasActive = presence.active;
+          presence.active = faceActive;
+          presenceRef.current[cameraId] = presence;
 
           let stage: Stage;
           if (!frameOk) stage = "frame_error";
-          else if (!faceInFrame) stage = "idle";
+          else if (!faceActive) stage = "idle";
           else if (hasMatch) stage = "matched";
           else if (confirmed) stage = "registering";
           else stage = "matching";
 
+          // New face appearance (debounced rising edge): log once, reset progression.
+          if (faceActive && !wasActive) {
+            sessionRankRef.current[cameraId] = 0;
+            push(cameraId, labels.faceFound, "face_found", FACE_PRESENCE_GRACE_MS);
+          }
+
           const prevStage = stageRef.current[cameraId];
-          if (stage !== prevStage) {
+          const sessionMaxRank = Number(sessionRankRef.current[cameraId] || 0);
+          const rank = STAGE_RANK[stage];
+          const isReset = stage === "idle" || stage === "frame_error";
+          // Within one appearance the log only moves forward (matching -> registering
+          // -> matched); backward flicker (matched -> matching) is ignored.
+          const advanced = stage !== prevStage && (isReset || rank > sessionMaxRank);
+          if (advanced) {
             if (stage === "frame_error") {
               const frameError = String(current.frameError || "").trim();
               push(
@@ -167,7 +206,7 @@ export default function CameraPipelineLogPanel({
             } else if (stage === "matching") {
               push(cameraId, labels.matchingPending, "stage_matching", 1000);
             } else if (stage === "registering") {
-              if (prevStage !== "matching") {
+              if (sessionMaxRank < STAGE_RANK.matching) {
                 push(cameraId, labels.matchingPending, "stage_matching_before_register", 1000);
               }
               push(cameraId, labels.registrationAttempt, "stage_registering", 1400);
@@ -175,16 +214,11 @@ export default function CameraPipelineLogPanel({
               const namesLabel = names.join(", ");
               push(cameraId, `${labels.matchingSuccess}: ${namesLabel}`, `stage_matched:${namesLabel}`, 1000);
             }
+            sessionRankRef.current[cameraId] = isReset ? 0 : Math.max(sessionMaxRank, rank);
           }
 
           if (frameOk && !prevFrameOk) {
             push(cameraId, labels.frameRestored, "frame_restored", 1200);
-          }
-          if (faceInFrame && !Boolean(prev?.faceInFrame)) {
-            push(cameraId, labels.faceFound, "face_found", 900);
-            if (!hasMatch) {
-              push(cameraId, labels.matchingPending, "face_found_matching", 900);
-            }
           }
           if (hasMatch && !sameNames(names, prevNames)) {
             const namesLabel = names.join(", ");
