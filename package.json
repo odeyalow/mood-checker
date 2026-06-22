@@ -38,6 +38,8 @@
     "create-user": "node scripts/create-user.mjs",
     "faces:clear": "node scripts/manage-faces.mjs clear",
     "faces:delete": "node scripts/manage-faces.mjs delete",
+    "faces:dedup": "node scripts/dedup-faces.mjs",
+    "faces:dedup:apply": "node scripts/dedup-faces.mjs --apply",
     "faces:block": "node scripts/face-block.mjs block",
     "faces:unblock": "node scripts/face-block.mjs unblock",
     "faces:block:list": "node scripts/face-block.mjs list",
