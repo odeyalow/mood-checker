@@ -758,6 +758,8 @@ function createLandmarksAdapter(landmarks) {
   const leftEye = Array.isArray(safe.leftEye) ? safe.leftEye : [];
   const rightEye = Array.isArray(safe.rightEye) ? safe.rightEye : [];
   const nose = Array.isArray(safe.nose) ? safe.nose : [];
+  const leftMouth = Array.isArray(safe.leftMouth) ? safe.leftMouth : [];
+  const rightMouth = Array.isArray(safe.rightMouth) ? safe.rightMouth : [];
   return {
     getLeftEye() {
       return leftEye;
@@ -767,6 +769,9 @@ function createLandmarksAdapter(landmarks) {
     },
     getNose() {
       return nose;
+    },
+    getMouth() {
+      return [...leftMouth, ...rightMouth];
     },
   };
 }
@@ -813,6 +818,8 @@ function isLikelyFrontalFace(
     maxEyeLineYRatio = 0.55,
     minNoseDropRatio = 0.04,
     maxNoseYRatio = 0.72,
+    minMouthBelowNoseRatio = 0.03,
+    maxMouthYRatio = 0.99,
   } = {},
 ) {
   if (!enabled) return true;
@@ -860,6 +867,20 @@ function isLikelyFrontalFace(
   const noseDropRatio = (nose.y - eyeLineY) / Math.max(1, box.height);
   if (noseDropRatio < minNoseDropRatio) return false;
   if (noseYRatio > maxNoseYRatio) return false;
+
+  // Mouth-based pitch/yaw check (5-point landmarks). Fail-open if mouth missing.
+  // Strongly rejects top-down ("сверху") views where the mouth no longer sits
+  // clearly below the nose, and extreme side turns where it shifts off-center.
+  const mouth =
+    typeof landmarks.getMouth === "function" ? getLandmarkCenter(landmarks.getMouth()) : null;
+  if (mouth) {
+    const mouthBelowNoseRatio = (mouth.y - nose.y) / Math.max(1, box.height);
+    if (mouthBelowNoseRatio < minMouthBelowNoseRatio) return false;
+    const mouthYRatio = (mouth.y - box.y) / Math.max(1, box.height);
+    if (mouthYRatio > maxMouthYRatio) return false;
+    const mouthBetweenEyes = (mouth.x - eyeLeftX) / Math.max(1e-6, eyeRightX - eyeLeftX);
+    if (mouthBetweenEyes < 0.12 || mouthBetweenEyes > 0.88) return false;
+  }
 
   return true;
 }
@@ -1722,6 +1743,10 @@ async function main() {
     0.05,
     envFloat("WORKER_FRONTAL_NOSE_CENTER_TOLERANCE", 0.18),
   );
+  // Independent of WORKER_REQUIRE_FRONTAL_FACE (which gates live display): when on,
+  // only well-posed frontal faces are written to the DB (recognitions + new IDs +
+  // gallery), so side/top/occluded faces are not saved even if display frontal is off.
+  const recordRequireFrontal = envBool("WORKER_RECORD_REQUIRE_FRONTAL", true);
   const matchIntervalMs = Math.max(120, envInt("WORKER_MATCH_INTERVAL_MS", 140));
   const matchLogCooldownMs = Math.max(300, envInt("WORKER_MATCH_LOG_COOLDOWN_MS", 1000));
   const enableEmotions = envBool("WORKER_ENABLE_EMOTIONS", true);
@@ -2665,6 +2690,16 @@ async function main() {
       typeof camRequireFrontalFaceRaw === "boolean"
         ? camRequireFrontalFaceRaw
         : requireFrontalFace;
+    const camRecordRequireFrontalRaw = getCameraSetting(
+      cameraSettings,
+      cam.cameraId,
+      "recordRequireFrontal",
+      recordRequireFrontal,
+    );
+    const camRecordRequireFrontal =
+      typeof camRecordRequireFrontalRaw === "boolean"
+        ? camRecordRequireFrontalRaw
+        : recordRequireFrontal;
     const camFrontalMinEyeDistanceRatio = Math.max(
       0.05,
       parseFiniteFloat(
@@ -3632,6 +3667,7 @@ async function main() {
             let faceScore = 0;
             let faceSharpness = 0;
             let lockOverridden = false;
+            let poseOk = true;
             const descriptor = descriptorToArray(det?.descriptor);
             if (enableMatching && descriptor) {
               faceSide = getFaceSide(det);
@@ -3639,6 +3675,16 @@ async function main() {
               faceSharpness = estimateFaceSharpness(rgb, workerWidth, workerHeight, det);
               const identityScore = faceScore;
               const isFrontalFace = isIdentityVisibleDetection(det);
+              // Pose quality for DB writes (independent of the display frontal flag):
+              // rejects side/top/occluded faces from being recorded or registered.
+              poseOk =
+                !camRecordRequireFrontal ||
+                isLikelyFrontalFace(det, {
+                  enabled: true,
+                  minEyeDistanceRatio: camFrontalMinEyeDistanceRatio,
+                  maxEyeSlope: camFrontalMaxEyeSlope,
+                  noseCenterTolerance: camFrontalNoseCenterTolerance,
+                });
               if (
                 faceSide >= camMatchMinFaceSidePx &&
                 identityScore >= camIdentityMinScore &&
@@ -3709,7 +3755,7 @@ async function main() {
                   if (lockActive) {
                     name = cam.identityLockName;
                     distance = Number(cam.identityLockDistance) || 0;
-                  } else if (canAttemptNewId && !blockedByPhantomBank && !ambiguousNearMatch) {
+                  } else if (canAttemptNewId && poseOk && !blockedByPhantomBank && !ambiguousNearMatch) {
                     const identifyReady = now - (cam.lastIdentifyAt || 0) >= camIdentifyMinIntervalMs;
                     const autoCreateCoolingDown =
                       cam.lastAutoCreatedAt > 0 &&
@@ -3834,6 +3880,7 @@ async function main() {
                 faceSharpness: Number(faceSharpness.toFixed(2)),
                 lockOverridden,
                 justRegistered,
+                poseOk,
               });
             }
           }
@@ -3984,6 +4031,16 @@ async function main() {
                 session.lastSampleAt = now;
                 session.sampleCount += 1;
                 addSessionEmotionSample(session, person.emotionKey, person.emotionConfidence);
+              }
+
+              // Pose gate for the database: skip side/top/occluded faces regardless of
+              // strict/relaxed/strong record paths, so only well-posed faces are saved.
+              if (camRecordRequireFrontal && person.poseOk === false) {
+                if (now - Number(cam.lastRecordSkipLogAt || 0) >= 2000) {
+                  log(`[${cam.cameraId}] record_skip name=${person.name} reason=pose`);
+                  cam.lastRecordSkipLogAt = now;
+                }
+                continue;
               }
 
               const strictRecordable = isRecordablePerson(person);
