@@ -806,6 +806,38 @@ function normalizeInsightFaceResult(payload) {
   return faces.map((face) => createDetectionFromInsightFace(face)).filter(Boolean);
 }
 
+// Lenient pose check for DB writes: rejects only clearly unusable poses
+// (near-profile / strongly turned / upside-down) while allowing the moderate
+// head angles that still recognise fine. maxYawOffset = how far the nose may
+// drift from the eye-span centre (0.5) before the face counts as a profile.
+function isRecordablePose(det, { enabled = true, maxYawOffset = 0.42 } = {}) {
+  if (!enabled) return true;
+  const box = getBox(det);
+  if (!box) return true;
+  const landmarks = det?.landmarks;
+  if (!landmarks?.getLeftEye || !landmarks?.getRightEye || !landmarks?.getNose) return true;
+  const leftEye = getLandmarkCenter(landmarks.getLeftEye());
+  const rightEye = getLandmarkCenter(landmarks.getRightEye());
+  const nose = getLandmarkCenter(landmarks.getNose());
+  if (!leftEye || !rightEye || !nose) return true;
+
+  const eyeLeftX = Math.min(leftEye.x, rightEye.x);
+  const eyeRightX = Math.max(leftEye.x, rightEye.x);
+  const span = Math.max(1e-6, eyeRightX - eyeLeftX);
+  // Yaw: nose position within the eye span (~0.5 = frontal). Reject only profiles.
+  const noseBetween = (nose.x - eyeLeftX) / span;
+  const yaw = Math.max(0.05, Math.min(0.49, maxYawOffset));
+  if (noseBetween < 0.5 - yaw || noseBetween > 0.5 + yaw) return false;
+
+  // Pitch: reject only when the mouth is no longer below the nose (upside-down /
+  // extreme top-down). Fail-open if the mouth landmark is missing.
+  const mouth =
+    typeof landmarks.getMouth === "function" ? getLandmarkCenter(landmarks.getMouth()) : null;
+  if (mouth && (mouth.y - nose.y) / Math.max(1, box.height) < -0.04) return false;
+
+  return true;
+}
+
 function isLikelyFrontalFace(
   det,
   {
@@ -1747,6 +1779,9 @@ async function main() {
   // only well-posed frontal faces are written to the DB (recognitions + new IDs +
   // gallery), so side/top/occluded faces are not saved even if display frontal is off.
   const recordRequireFrontal = envBool("WORKER_RECORD_REQUIRE_FRONTAL", true);
+  // Lenient pose gate tolerance: higher = accepts more head turn before rejecting.
+  // 0.42 lets clearly-angled-but-recognisable faces save; only profiles are blocked.
+  const recordPoseMaxYaw = Math.max(0.1, Math.min(0.49, envFloat("WORKER_RECORD_POSE_MAX_YAW", 0.42)));
   const matchIntervalMs = Math.max(120, envInt("WORKER_MATCH_INTERVAL_MS", 140));
   const matchLogCooldownMs = Math.max(300, envInt("WORKER_MATCH_LOG_COOLDOWN_MS", 1000));
   const enableEmotions = envBool("WORKER_ENABLE_EMOTIONS", true);
@@ -2700,6 +2735,16 @@ async function main() {
       typeof camRecordRequireFrontalRaw === "boolean"
         ? camRecordRequireFrontalRaw
         : recordRequireFrontal;
+    const camRecordPoseMaxYaw = Math.max(
+      0.1,
+      Math.min(
+        0.49,
+        parseFiniteFloat(
+          getCameraSetting(cameraSettings, cam.cameraId, "recordPoseMaxYaw", recordPoseMaxYaw),
+          recordPoseMaxYaw,
+        ),
+      ),
+    );
     const camFrontalMinEyeDistanceRatio = Math.max(
       0.05,
       parseFiniteFloat(
@@ -3675,16 +3720,12 @@ async function main() {
               faceSharpness = estimateFaceSharpness(rgb, workerWidth, workerHeight, det);
               const identityScore = faceScore;
               const isFrontalFace = isIdentityVisibleDetection(det);
-              // Pose quality for DB writes (independent of the display frontal flag):
-              // rejects side/top/occluded faces from being recorded or registered.
+              // Lenient pose quality for DB writes (independent of the display frontal
+              // flag): rejects only clear profiles / upside-down faces, but lets normal
+              // angled faces save so recognition is not over-filtered.
               poseOk =
                 !camRecordRequireFrontal ||
-                isLikelyFrontalFace(det, {
-                  enabled: true,
-                  minEyeDistanceRatio: camFrontalMinEyeDistanceRatio,
-                  maxEyeSlope: camFrontalMaxEyeSlope,
-                  noseCenterTolerance: camFrontalNoseCenterTolerance,
-                });
+                isRecordablePose(det, { enabled: true, maxYawOffset: camRecordPoseMaxYaw });
               if (
                 faceSide >= camMatchMinFaceSidePx &&
                 identityScore >= camIdentityMinScore &&
