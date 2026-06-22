@@ -1,6 +1,11 @@
+# numpy MUST stay <2: insightface/onnxruntime are built against numpy 1.x.
 numpy==1.26.4
 onnxruntime==1.17.3
 insightface==0.7.3
 opencv-python-headless==4.10.0.84
+# hsemotion-onnx depends on opencv-python (full); without this pin pip pulls
+# opencv-python 4.13 which forces numpy>=2 and breaks insightface. 4.10.0.84 is
+# numpy-1.x compatible.
+opencv-python==4.10.0.84
 requests==2.32.5
 hsemotion-onnx==0.3.1
