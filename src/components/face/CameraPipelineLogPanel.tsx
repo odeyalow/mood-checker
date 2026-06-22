@@ -62,7 +62,7 @@ const STAGE_RANK: Record<Stage, number> = {
 
 // Tolerate brief detector dropouts (face flickers out for a poll or two) so the
 // log does not cycle "face found -> matching -> face found ...".
-const FACE_PRESENCE_GRACE_MS = 2500;
+const FACE_PRESENCE_GRACE_MS = 3500;
 
 function getMatchedNames(status: WorkerStatus | null | undefined) {
   const names = new Set<string>();
@@ -79,14 +79,6 @@ function getMatchedNames(status: WorkerStatus | null | undefined) {
     }
   }
   return Array.from(names).sort();
-}
-
-function sameNames(left: string[], right: string[]) {
-  if (left.length !== right.length) return false;
-  for (let i = 0; i < left.length; i += 1) {
-    if (left[i] !== right[i]) return false;
-  }
-  return true;
 }
 
 function formatTime(ts: number, locale: AppLocale) {
@@ -114,6 +106,8 @@ export default function CameraPipelineLogPanel({
   const seenDedupIdsRef = useRef<Set<string>>(new Set());
   const presenceRef = useRef<Record<string, { active: boolean; lastSeenAt: number }>>({});
   const sessionRankRef = useRef<Record<string, number>>({});
+  // Keys already logged during the current face appearance (reset on each new one).
+  const sessionLogRef = useRef<Record<string, Set<string>>>({});
 
   const cameraNameById = useMemo(
     () => Object.fromEntries(CAMERA_CONFIGS.map((camera) => [camera.id, camera.name || camera.id])),
@@ -157,7 +151,6 @@ export default function CameraPipelineLogPanel({
           const prevFrameOk = prev ? prev.frameOk !== false : true;
           const confirmed = Number(current.confirmed || 0) > 0;
           const names = getMatchedNames(current);
-          const prevNames = getMatchedNames(prev);
           const hasMatch = names.length > 0;
           const faceSignal = Boolean(current.faceInFrame) || confirmed || hasMatch;
 
@@ -179,9 +172,28 @@ export default function CameraPipelineLogPanel({
           else if (confirmed) stage = "registering";
           else stage = "matching";
 
-          // New face appearance (debounced rising edge): log once, reset progression.
+          // Fresh face appearance (debounced rising edge): reset the per-appearance
+          // log set and stage progression so the next person logs cleanly.
           if (faceActive && !wasActive) {
             sessionRankRef.current[cameraId] = 0;
+            sessionLogRef.current[cameraId] = new Set();
+          }
+          const sessionLog =
+            sessionLogRef.current[cameraId] || (sessionLogRef.current[cameraId] = new Set());
+
+          // Announce each matched identity at most once per appearance, so match
+          // flicker (who=ID -> unknown -> ID, common for people passing at an angle)
+          // can never spam the log.
+          const announceMatch = () => {
+            if (!names.length) return;
+            const fresh = names.some((n) => !sessionLog.has(`m:${n}`));
+            if (!fresh) return;
+            for (const n of names) sessionLog.add(`m:${n}`);
+            push(cameraId, `${labels.matchingSuccess}: ${names.join(", ")}`, `matched:${names.join(",")}`, 900);
+          };
+
+          if (faceActive && !sessionLog.has("face_found")) {
+            sessionLog.add("face_found");
             push(cameraId, labels.faceFound, "face_found", FACE_PRESENCE_GRACE_MS);
           }
 
@@ -211,8 +223,7 @@ export default function CameraPipelineLogPanel({
               }
               push(cameraId, labels.registrationAttempt, "stage_registering", 1400);
             } else if (stage === "matched") {
-              const namesLabel = names.join(", ");
-              push(cameraId, `${labels.matchingSuccess}: ${namesLabel}`, `stage_matched:${namesLabel}`, 1000);
+              announceMatch();
             }
             sessionRankRef.current[cameraId] = isReset ? 0 : Math.max(sessionMaxRank, rank);
           }
@@ -220,9 +231,8 @@ export default function CameraPipelineLogPanel({
           if (frameOk && !prevFrameOk) {
             push(cameraId, labels.frameRestored, "frame_restored", 1200);
           }
-          if (hasMatch && !sameNames(names, prevNames)) {
-            const namesLabel = names.join(", ");
-            push(cameraId, `${labels.matchingSuccess}: ${namesLabel}`, `matched_names:${namesLabel}`, 900);
+          if (hasMatch) {
+            announceMatch();
           }
           if (current.lastRecognitionAt && current.lastRecognitionAt !== prev?.lastRecognitionAt) {
             push(cameraId, labels.dbAdded, "db_added", 700);
