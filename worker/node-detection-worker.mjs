@@ -421,13 +421,32 @@ function normalizeEmotionExpressions(expressions) {
   return Object.keys(normalized).length ? normalized : undefined;
 }
 
-function parseEmotionFromExpressions(expressions, keys) {
+function parseEmotionFromExpressions(expressions, keys, trustModel = false) {
   if (!expressions) {
     return {
       key: "",
       confidence: 0,
       vector: {},
     };
+  }
+
+  if (trustModel) {
+    // Trust a calibrated model (hsemotion): take the argmax of the raw softmax
+    // directly, without the face-api-era re-weighting (neutral discount +
+    // per-emotion multipliers) that distorts good predictions.
+    const vector = {};
+    let topKey = "";
+    let topVal = -1;
+    for (const k of keys) {
+      const raw = Number(expressions[k] ?? 0);
+      const safe = Number.isFinite(raw) ? Math.max(0, raw) : 0;
+      vector[k] = safe;
+      if (safe > topVal) {
+        topVal = safe;
+        topKey = k;
+      }
+    }
+    return { key: topKey, confidence: topVal > 0 ? Math.min(0.99, topVal) : 0, vector };
   }
 
   const vector = {};
@@ -673,6 +692,7 @@ function resolveSessionEmotionLabel({
   allowLowConfidenceLabel,
   allowFallbackMood,
   fallbackMood,
+  trustModel = false,
 }) {
   const vector = {};
   for (const [key, stats] of session.emotionStats.entries()) {
@@ -686,7 +706,7 @@ function resolveSessionEmotionLabel({
     vector[key] = (avg * 0.75 + safePeak * 0.25) * supportBoost;
   }
 
-  const parsed = parseEmotionFromExpressions(vector, emotionKeys || Object.keys(vector));
+  const parsed = parseEmotionFromExpressions(vector, emotionKeys || Object.keys(vector), trustModel);
   if (parsed.key) {
     const aggregatedConfidence = Number(parsed.confidence ?? 0);
     if (aggregatedConfidence >= minConfidence) {
@@ -1831,6 +1851,9 @@ async function main() {
     true,
   );
   const emotionEmaAlpha = Math.max(0, Math.min(1, envFloat("WORKER_EMOTION_EMA_ALPHA", 0.9)));
+  // Trust the calibrated emotion model (hsemotion): use its argmax directly instead
+  // of the face-api-era re-weighting heuristic that mislabels neutral/expressive faces.
+  const emotionTrustModel = envBool("WORKER_EMOTION_TRUST_MODEL", true);
   const emotionEmaTtlMs = Math.max(2000, envInt("WORKER_EMOTION_EMA_TTL_MS", 12000));
   const emotionCarryoverMs = Math.max(1000, envInt("WORKER_EMOTION_CARRYOVER_MS", 10000));
   const dbEndpoint = (process.env.WORKER_DB_ENDPOINT || "http://127.0.0.1:3000/api/recognitions").trim();
@@ -3851,7 +3874,7 @@ async function main() {
               }
             }
 
-            const parsedEmotion = parseEmotionFromExpressions(det?.expressions, emotionKeys);
+            const parsedEmotion = parseEmotionFromExpressions(det?.expressions, emotionKeys, emotionTrustModel);
             if (det?.expressions && process.env.WORKER_EMOTION_DEBUG === "1") {
               const exprStr = Object.entries(det.expressions)
                 .map(([k, v]) => `${k}=${Number(v).toFixed(3)}`).join(" ");
@@ -3878,7 +3901,7 @@ async function main() {
                   : currentVal;
               }
 
-              const parsedSmoothed = parseEmotionFromExpressions(smoothed, emotionKeys);
+              const parsedSmoothed = parseEmotionFromExpressions(smoothed, emotionKeys, emotionTrustModel);
               emotionKey = parsedSmoothed.key;
               emotionConfidence = parsedSmoothed.confidence;
               cam.emotionEmaByName.set(name, smoothed);
@@ -4173,6 +4196,7 @@ async function main() {
                   allowLowConfidenceLabel: camEmotionAllowLowConfidenceLabel,
                   allowFallbackMood: dbAllowMoodFallback,
                   fallbackMood: dbFallbackMood,
+                  trustModel: emotionTrustModel,
                 });
                 moodLabel = resolved.moodLabel || moodLabel;
                 if (resolved.emotionLabel) {
