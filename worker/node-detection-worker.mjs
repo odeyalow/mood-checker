@@ -857,6 +857,33 @@ function isRecordablePose(
   return true;
 }
 
+// Diagnostic: returns the raw pose metrics for a detection so thresholds can be
+// tuned from real numbers (enabled via WORKER_POSE_DEBUG=1).
+function computeFacePoseMetrics(det) {
+  const box = getBox(det);
+  if (!box) return null;
+  const landmarks = det?.landmarks;
+  if (!landmarks?.getLeftEye || !landmarks?.getRightEye || !landmarks?.getNose) return null;
+  const leftEye = getLandmarkCenter(landmarks.getLeftEye());
+  const rightEye = getLandmarkCenter(landmarks.getRightEye());
+  const nose = getLandmarkCenter(landmarks.getNose());
+  if (!leftEye || !rightEye || !nose) return null;
+  const eyeLeftX = Math.min(leftEye.x, rightEye.x);
+  const eyeRightX = Math.max(leftEye.x, rightEye.x);
+  const span = Math.max(1e-6, eyeRightX - eyeLeftX);
+  const eyeLineY = (leftEye.y + rightEye.y) / 2;
+  const mouth =
+    typeof landmarks.getMouth === "function" ? getLandmarkCenter(landmarks.getMouth()) : null;
+  const mouthDrop = mouth ? (mouth.y - nose.y) / Math.max(1, box.height) : null;
+  return {
+    yawOff: Number(Math.abs((nose.x - eyeLeftX) / span - 0.5).toFixed(3)),
+    mouthDrop: mouthDrop === null ? null : Number(mouthDrop.toFixed(3)),
+    eyeLineYRatio: Number(((eyeLineY - box.y) / Math.max(1, box.height)).toFixed(3)),
+    noseDropRatio: Number(((nose.y - eyeLineY) / Math.max(1, box.height)).toFixed(3)),
+    hasMouth: Boolean(mouth),
+  };
+}
+
 function isLikelyFrontalFace(
   det,
   {
@@ -3733,6 +3760,17 @@ async function main() {
                   minMouthBelowNoseRatio: camRecordPoseMinMouthDrop,
                 });
               const isFrontalFace = isIdentityVisibleDetection(det) && recordPoseOk;
+              if (process.env.WORKER_POSE_DEBUG === "1" && now - Number(cam.lastPoseDebugAt || 0) >= 600) {
+                const pm = computeFacePoseMetrics(det);
+                if (pm) {
+                  log(
+                    `[${cam.cameraId}] pose mouthDrop=${pm.mouthDrop} yawOff=${pm.yawOff} ` +
+                      `eyeLineY=${pm.eyeLineYRatio} noseDrop=${pm.noseDropRatio} mouth=${pm.hasMouth ? 1 : 0} ` +
+                      `side=${faceSide.toFixed(0)} poseOk=${recordPoseOk ? 1 : 0}`,
+                  );
+                  cam.lastPoseDebugAt = now;
+                }
+              }
               if (
                 faceSide >= camMatchMinFaceSidePx &&
                 identityScore >= camIdentityMinScore &&
