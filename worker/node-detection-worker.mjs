@@ -768,6 +768,8 @@ function createLandmarksAdapter(landmarks) {
   const leftEye = Array.isArray(safe.leftEye) ? safe.leftEye : [];
   const rightEye = Array.isArray(safe.rightEye) ? safe.rightEye : [];
   const nose = Array.isArray(safe.nose) ? safe.nose : [];
+  const leftMouth = Array.isArray(safe.leftMouth) ? safe.leftMouth : [];
+  const rightMouth = Array.isArray(safe.rightMouth) ? safe.rightMouth : [];
   return {
     getLeftEye() {
       return leftEye;
@@ -777,6 +779,9 @@ function createLandmarksAdapter(landmarks) {
     },
     getNose() {
       return nose;
+    },
+    getMouth() {
+      return [...leftMouth, ...rightMouth];
     },
   };
 }
@@ -809,6 +814,47 @@ function createDetectionFromInsightFace(face) {
 function normalizeInsightFaceResult(payload) {
   const faces = Array.isArray(payload?.faces) ? payload.faces : [];
   return faces.map((face) => createDetectionFromInsightFace(face)).filter(Boolean);
+}
+
+// Moderate pose gate for DB writes (recognition + new IDs): rejects only clearly
+// unusable poses — strong profile (nose far from the eye-span centre) and strong
+// top-down (mouth no longer clearly below the nose) — while allowing normal angles.
+function isRecordablePose(
+  det,
+  { enabled = true, maxYawOffset = 0.36, minMouthBelowNoseRatio = 0.05 } = {},
+) {
+  if (!enabled) return true;
+  const box = getBox(det);
+  if (!box) return true;
+  const landmarks = det?.landmarks;
+  if (!landmarks?.getLeftEye || !landmarks?.getRightEye || !landmarks?.getNose) return true;
+  const leftEye = getLandmarkCenter(landmarks.getLeftEye());
+  const rightEye = getLandmarkCenter(landmarks.getRightEye());
+  const nose = getLandmarkCenter(landmarks.getNose());
+  if (!leftEye || !rightEye || !nose) return true;
+
+  const eyeLeftX = Math.min(leftEye.x, rightEye.x);
+  const eyeRightX = Math.max(leftEye.x, rightEye.x);
+  const span = Math.max(1e-6, eyeRightX - eyeLeftX);
+  // Yaw: nose horizontal position within the eye span (~0.5 = frontal).
+  const noseBetween = (nose.x - eyeLeftX) / span;
+  const yaw = Math.max(0.05, Math.min(0.49, maxYawOffset));
+  if (noseBetween < 0.5 - yaw || noseBetween > 0.5 + yaw) return false;
+
+  // Pitch (top-down): the mouth must sit clearly below the nose. Under a strong
+  // downward view the mouth rises toward/above the nose -> reject. Falls back to the
+  // nose-below-eyes drop when the mouth landmark is unavailable.
+  const mouth =
+    typeof landmarks.getMouth === "function" ? getLandmarkCenter(landmarks.getMouth()) : null;
+  if (mouth) {
+    const mouthBelowNose = (mouth.y - nose.y) / Math.max(1, box.height);
+    if (mouthBelowNose < minMouthBelowNoseRatio) return false;
+  } else {
+    const eyeLineY = (leftEye.y + rightEye.y) / 2;
+    const noseDrop = (nose.y - eyeLineY) / Math.max(1, box.height);
+    if (noseDrop < 0.03) return false;
+  }
+  return true;
 }
 
 function isLikelyFrontalFace(
@@ -1723,6 +1769,15 @@ async function main() {
   const frontalNoseCenterTolerance = Math.max(
     0.05,
     envFloat("WORKER_FRONTAL_NOSE_CENTER_TOLERANCE", 0.18),
+  );
+  // Moderate pose gate for DB writes (recognition + new IDs), independent of the
+  // display flag WORKER_REQUIRE_FRONTAL_FACE. Rejects strong profile / top-down so
+  // unusable faces are neither matched nor registered (prevents duplicate IDs).
+  const recordRequireFrontal = envBool("WORKER_RECORD_REQUIRE_FRONTAL", true);
+  const recordPoseMaxYaw = Math.max(0.1, Math.min(0.49, envFloat("WORKER_RECORD_POSE_MAX_YAW", 0.36)));
+  const recordPoseMinMouthDrop = Math.max(
+    0,
+    Math.min(0.4, envFloat("WORKER_RECORD_POSE_MIN_MOUTH_DROP", 0.05)),
   );
   const matchIntervalMs = Math.max(120, envInt("WORKER_MATCH_INTERVAL_MS", 140));
   const matchLogCooldownMs = Math.max(300, envInt("WORKER_MATCH_LOG_COOLDOWN_MS", 1000));
@@ -2660,6 +2715,41 @@ async function main() {
       typeof camRequireFrontalFaceRaw === "boolean"
         ? camRequireFrontalFaceRaw
         : requireFrontalFace;
+    const camRecordRequireFrontalRaw = getCameraSetting(
+      cameraSettings,
+      cam.cameraId,
+      "recordRequireFrontal",
+      recordRequireFrontal,
+    );
+    const camRecordRequireFrontal =
+      typeof camRecordRequireFrontalRaw === "boolean"
+        ? camRecordRequireFrontalRaw
+        : recordRequireFrontal;
+    const camRecordPoseMaxYaw = Math.max(
+      0.1,
+      Math.min(
+        0.49,
+        parseFiniteFloat(
+          getCameraSetting(cameraSettings, cam.cameraId, "recordPoseMaxYaw", recordPoseMaxYaw),
+          recordPoseMaxYaw,
+        ),
+      ),
+    );
+    const camRecordPoseMinMouthDrop = Math.max(
+      0,
+      Math.min(
+        0.4,
+        parseFiniteFloat(
+          getCameraSetting(
+            cameraSettings,
+            cam.cameraId,
+            "recordPoseMinMouthDrop",
+            recordPoseMinMouthDrop,
+          ),
+          recordPoseMinMouthDrop,
+        ),
+      ),
+    );
     const camFrontalMinEyeDistanceRatio = Math.max(
       0.05,
       parseFiniteFloat(
@@ -3632,7 +3722,17 @@ async function main() {
               faceScore = getScore(det);
               faceSharpness = estimateFaceSharpness(rgb, workerWidth, workerHeight, det);
               const identityScore = faceScore;
-              const isFrontalFace = isIdentityVisibleDetection(det);
+              // Gate matching + new-ID creation by the moderate pose check (so a
+              // strongly top-down / profile face is neither recognised nor registered
+              // as a new ID — prevents duplicates), in addition to the display flag.
+              const recordPoseOk =
+                !camRecordRequireFrontal ||
+                isRecordablePose(det, {
+                  enabled: true,
+                  maxYawOffset: camRecordPoseMaxYaw,
+                  minMouthBelowNoseRatio: camRecordPoseMinMouthDrop,
+                });
+              const isFrontalFace = isIdentityVisibleDetection(det) && recordPoseOk;
               if (
                 faceSide >= camMatchMinFaceSidePx &&
                 identityScore >= camIdentityMinScore &&

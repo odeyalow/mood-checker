@@ -131,23 +131,27 @@ def box_from_face(face: Any) -> dict[str, float] | None:
 
 
 def landmarks_from_face(face: Any) -> dict[str, list[dict[str, float]]]:
+    empty = {"leftEye": [], "rightEye": [], "nose": [], "leftMouth": [], "rightMouth": []}
     kps = getattr(face, "kps", None)
     if kps is None:
-        return {"leftEye": [], "rightEye": [], "nose": []}
+        return empty
 
     arr = np.asarray(kps, dtype=np.float32)
     if arr.ndim != 2 or arr.shape[0] < 3 or arr.shape[1] < 2:
-        return {"leftEye": [], "rightEye": [], "nose": []}
+        return empty
 
     def point(index: int) -> list[dict[str, float]]:
         if index >= arr.shape[0]:
             return []
         return [{"x": float(arr[index][0]), "y": float(arr[index][1])}]
 
+    # InsightFace kps order: 0 left eye, 1 right eye, 2 nose, 3 left mouth, 4 right mouth.
     return {
         "leftEye": point(0),
         "rightEye": point(1),
         "nose": point(2),
+        "leftMouth": point(3),
+        "rightMouth": point(4),
     }
 
 
