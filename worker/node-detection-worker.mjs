@@ -421,7 +421,7 @@ function normalizeEmotionExpressions(expressions) {
   return Object.keys(normalized).length ? normalized : undefined;
 }
 
-function parseEmotionFromExpressions(expressions, keys) {
+function parseEmotionFromExpressions(expressions, keys, strictness = 0) {
   if (!expressions) {
     return {
       key: "",
@@ -429,6 +429,11 @@ function parseEmotionFromExpressions(expressions, keys) {
       vector: {},
     };
   }
+
+  // strictness 0 = lenient/expressive (legacy), 1 = strict (favours neutral, needs
+  // a strong signal to label an expressive emotion). Reduces unrealistic emotions.
+  const s = Math.max(0, Math.min(1, Number(strictness) || 0));
+  const damp = (mult) => 1 + (mult - 1) * (1 - s);
 
   const vector = {};
   const adjusted = {};
@@ -450,16 +455,18 @@ function parseEmotionFromExpressions(expressions, keys) {
     const safe = Number(vector[k] ?? 0);
     let effective = safe;
     if (k === "neutral") {
-      const neutralDiscount = Math.max(0.05, 0.24 - expressiveShare * 0.52);
+      // Less discount as strictness grows, so neutral stays neutral.
+      const baseDiscount = Math.max(0.05, 0.24 - expressiveShare * 0.52);
+      const neutralDiscount = baseDiscount + (1 - baseDiscount) * s;
       effective *= neutralDiscount;
     }
-    if (k === "happy") effective *= 1.34;
-    if (k === "surprised") effective *= 1.26;
-    if (k === "sad") effective *= 1.20;
-    if (k === "angry") effective *= 1.20;
-    if (k === "disgusted") effective *= 1.16;
-    if (k === "fearful") effective *= 1.16;
-    if (k !== "neutral" && expressiveShare >= 0.01) effective *= 1.16;
+    if (k === "happy") effective *= damp(1.34);
+    if (k === "surprised") effective *= damp(1.26);
+    if (k === "sad") effective *= damp(1.20);
+    if (k === "angry") effective *= damp(1.20);
+    if (k === "disgusted") effective *= damp(1.16);
+    if (k === "fearful") effective *= damp(1.16);
+    if (k !== "neutral" && expressiveShare >= 0.01) effective *= damp(1.16);
     adjusted[k] = effective;
     if (effective > topVal) {
       topVal = effective;
@@ -478,24 +485,26 @@ function parseEmotionFromExpressions(expressions, keys) {
     }
   }
 
-  if (topKey === "neutral" && runnerUpKey && runnerUpKey !== "neutral") {
+  // Promote a non-neutral runner-up over neutral only when the expressive signal
+  // is substantial. Strictness raises the bar so neutral is kept when in doubt.
+  const promoteShareFloor = 0.01 + s * 0.3;
+  if (
+    topKey === "neutral" &&
+    runnerUpKey &&
+    runnerUpKey !== "neutral" &&
+    expressiveShare >= promoteShareFloor
+  ) {
     const expressiveRaw = Number(vector[runnerUpKey] ?? 0);
     const expressiveAdjusted = Number(adjusted[runnerUpKey] ?? expressiveRaw);
     const neutralAdjusted = Number(adjusted.neutral ?? neutral);
-    const expressiveClose = expressiveAdjusted >= neutralAdjusted * Math.max(0.05, 0.2 - expressiveShare * 0.3);
-    const expressiveEnough = expressiveRaw >= Math.max(0.004, neutral * 0.012);
+    const closeFactor = Math.max(0.05, 0.2 - expressiveShare * 0.3) + s * 0.6;
+    const expressiveClose = expressiveAdjusted >= neutralAdjusted * closeFactor;
+    const expressiveEnough = expressiveRaw >= Math.max(0.004, neutral * (0.012 + s * 0.1));
     if (expressiveEnough && expressiveClose) {
       topKey = runnerUpKey;
       topVal = expressiveAdjusted;
       runnerUpAdjusted = neutralAdjusted;
     }
-  }
-
-  // Keep neutral from dominating long-tail signals: promote the strongest
-  // expressive class when non-neutral share is non-trivial.
-  if (topKey === "neutral" && runnerUpKey && runnerUpKey !== "neutral" && expressiveShare >= 0.01) {
-    topKey = runnerUpKey;
-    topVal = Number(adjusted[runnerUpKey] ?? vector[runnerUpKey] ?? 0);
   }
 
   const rawConfidence = Number(vector[topKey] ?? 0);
@@ -673,6 +682,7 @@ function resolveSessionEmotionLabel({
   allowLowConfidenceLabel,
   allowFallbackMood,
   fallbackMood,
+  strictness = 0,
 }) {
   const vector = {};
   for (const [key, stats] of session.emotionStats.entries()) {
@@ -686,7 +696,7 @@ function resolveSessionEmotionLabel({
     vector[key] = (avg * 0.75 + safePeak * 0.25) * supportBoost;
   }
 
-  const parsed = parseEmotionFromExpressions(vector, emotionKeys || Object.keys(vector));
+  const parsed = parseEmotionFromExpressions(vector, emotionKeys || Object.keys(vector), strictness);
   if (parsed.key) {
     const aggregatedConfidence = Number(parsed.confidence ?? 0);
     if (aggregatedConfidence >= minConfidence) {
@@ -1762,6 +1772,8 @@ async function main() {
     "WORKER_EMOTION_ALLOW_LOW_CONFIDENCE_LABEL",
     true,
   );
+  // 0 = legacy expressive bias, 1 = strict (favours neutral, fewer unrealistic emotions).
+  const emotionStrictness = Math.max(0, Math.min(1, envFloat("WORKER_EMOTION_STRICTNESS", 0.5)));
   const emotionEmaAlpha = Math.max(0, Math.min(1, envFloat("WORKER_EMOTION_EMA_ALPHA", 0.9)));
   const emotionEmaTtlMs = Math.max(2000, envInt("WORKER_EMOTION_EMA_TTL_MS", 12000));
   const emotionCarryoverMs = Math.max(1000, envInt("WORKER_EMOTION_CARRYOVER_MS", 10000));
@@ -3746,7 +3758,7 @@ async function main() {
               }
             }
 
-            const parsedEmotion = parseEmotionFromExpressions(det?.expressions, emotionKeys);
+            const parsedEmotion = parseEmotionFromExpressions(det?.expressions, emotionKeys, emotionStrictness);
             if (det?.expressions && process.env.WORKER_EMOTION_DEBUG === "1") {
               const exprStr = Object.entries(det.expressions)
                 .map(([k, v]) => `${k}=${Number(v).toFixed(3)}`).join(" ");
@@ -3773,7 +3785,7 @@ async function main() {
                   : currentVal;
               }
 
-              const parsedSmoothed = parseEmotionFromExpressions(smoothed, emotionKeys);
+              const parsedSmoothed = parseEmotionFromExpressions(smoothed, emotionKeys, emotionStrictness);
               emotionKey = parsedSmoothed.key;
               emotionConfidence = parsedSmoothed.confidence;
               cam.emotionEmaByName.set(name, smoothed);
@@ -4057,6 +4069,7 @@ async function main() {
                   allowLowConfidenceLabel: camEmotionAllowLowConfidenceLabel,
                   allowFallbackMood: dbAllowMoodFallback,
                   fallbackMood: dbFallbackMood,
+                  strictness: emotionStrictness,
                 });
                 moodLabel = resolved.moodLabel || moodLabel;
                 if (resolved.emotionLabel) {

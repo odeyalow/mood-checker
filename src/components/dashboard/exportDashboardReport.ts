@@ -175,14 +175,20 @@ function buildChartSvg(points: ReportEmotionPoint[], locale: ReportLocale): stri
   return `
     <svg viewBox="0 0 ${width} ${height}" width="100%" height="${height}" preserveAspectRatio="none" role="img">
       <line x1="0" y1="${height}" x2="${width}" y2="${height}" stroke="${COLORS.border}" stroke-width="1" />
-      <polyline fill="none" stroke="${COLORS.positive}" stroke-width="2" points="${buildPolyline(positive, maxValue, width, height)}" />
-      <polyline fill="none" stroke="${COLORS.neutral}" stroke-width="2" points="${buildPolyline(neutral, maxValue, width, height)}" />
-      <polyline fill="none" stroke="${COLORS.negative}" stroke-width="2" points="${buildPolyline(negative, maxValue, width, height)}" />
+      <polyline fill="none" stroke="${COLORS.positive}" stroke-width="3" points="${buildPolyline(positive, maxValue, width, height)}" />
+      <polyline fill="none" stroke="${COLORS.neutral}" stroke-width="3" points="${buildPolyline(neutral, maxValue, width, height)}" />
+      <polyline fill="none" stroke="${COLORS.negative}" stroke-width="3" points="${buildPolyline(negative, maxValue, width, height)}" />
     </svg>
-    <div class="axis"><span>${escapeHtml(startLabel)}</span><span>${escapeHtml(endLabel)}</span></div>`;
+    <div class="axis"><span>${escapeHtml(startLabel)}</span><span>${escapeHtml(endLabel)}</span></div>
+    <div class="legend">
+      <span><i style="background:${COLORS.positive}"></i>${escapeHtml(REPORT_L10N[locale].positive)}</span>
+      <span><i style="background:${COLORS.neutral}"></i>${escapeHtml(REPORT_L10N[locale].neutral)}</span>
+      <span><i style="background:${COLORS.negative}"></i>${escapeHtml(REPORT_L10N[locale].negativeLegend)}</span>
+    </div>`;
 }
 
-export function exportDashboardReport({ stats, emotionPoints, recentEvents, locale }: ReportData): void {
+function buildReportDocument(data: ReportData, forPrint: boolean): string {
+  const { stats, emotionPoints, recentEvents, locale } = data;
   const t = REPORT_L10N[locale] ?? REPORT_L10N.ru;
   const generatedAt = new Date().toLocaleString(localeTag(locale));
 
@@ -206,7 +212,7 @@ export function exportDashboardReport({ stats, emotionPoints, recentEvents, loca
         <tr>
           <td>${escapeHtml(item.name || "Unknown")}</td>
           <td>${formatTime(item.detectedAt, locale)}</td>
-          <td><span class="mood" style="background:${moodAccent(item.mood)}1a;color:${moodAccent(item.mood)}">${escapeHtml(item.mood)}</span></td>
+          <td><span class="mood" style="background:${moodAccent(item.mood)}22;color:${moodAccent(item.mood)}">${escapeHtml(item.mood)}</span></td>
         </tr>`,
         )
         .join("")
@@ -226,16 +232,20 @@ export function exportDashboardReport({ stats, emotionPoints, recentEvents, loca
       </div>`
     : `<div class="empty">—</div>`;
 
-  const html = `<!doctype html>
+  const printExtras = forPrint
+    ? `<button class="print-btn" onclick="window.print()">${escapeHtml(t.print)}</button>
+       <script>window.addEventListener("load",function(){setTimeout(function(){try{window.focus();window.print();}catch(e){}},250);});</script>`
+    : "";
+
+  return `<!doctype html>
 <html lang="${locale}">
 <head>
 <meta charset="utf-8" />
-<meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>${escapeHtml(t.brand)} — ${escapeHtml(t.reportTitle)}</title>
 <style>
   @page { size: A4; margin: 14mm; }
   * { box-sizing: border-box; }
-  body { font-family: -apple-system, "Segoe UI", Roboto, Arial, sans-serif; color: ${COLORS.text}; margin: 0; padding: 24px; }
+  body { font-family: -apple-system, "Segoe UI", Roboto, Arial, sans-serif; color: ${COLORS.text}; margin: 0; padding: 24px; background: #ffffff; width: 794px; }
   .header { display: flex; justify-content: space-between; align-items: flex-end; border-bottom: 3px solid ${COLORS.brand}; padding-bottom: 12px; }
   .brand { font-size: 22px; font-weight: 700; color: ${COLORS.brand}; }
   .subtitle { font-size: 13px; color: ${COLORS.muted}; }
@@ -244,8 +254,8 @@ export function exportDashboardReport({ stats, emotionPoints, recentEvents, loca
     border-radius: 10px; color: ${COLORS.warnText}; font-size: 14px; font-weight: 600; display: flex; gap: 10px; align-items: flex-start; }
   .disclaimer .icon { font-size: 18px; line-height: 1.2; }
   .section-title { font-size: 15px; font-weight: 700; margin: 22px 0 10px; }
-  .stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; }
-  .stat { background: ${COLORS.cardBg}; border: 1px solid ${COLORS.border}; border-radius: 10px; padding: 14px; }
+  .stats { display: flex; gap: 12px; }
+  .stat { flex: 1; background: ${COLORS.cardBg}; border: 1px solid ${COLORS.border}; border-radius: 10px; padding: 14px; }
   .stat-label { font-size: 12px; color: ${COLORS.muted}; }
   .stat-value { font-size: 26px; font-weight: 700; margin-top: 4px; }
   .stat-sub { font-size: 11px; color: ${COLORS.muted}; margin-top: 2px; }
@@ -267,8 +277,7 @@ export function exportDashboardReport({ stats, emotionPoints, recentEvents, loca
 </style>
 </head>
 <body>
-  <button class="print-btn" onclick="window.print()">${escapeHtml(t.print)}</button>
-
+  ${printExtras}
   <div class="header">
     <div>
       <div class="brand">${escapeHtml(t.brand)}</div>
@@ -302,18 +311,13 @@ export function exportDashboardReport({ stats, emotionPoints, recentEvents, loca
       <tbody>${recentRows}</tbody>
     </table>
   </div>
-
-  <script>
-    window.addEventListener("load", function () {
-      setTimeout(function () { try { window.focus(); window.print(); } catch (e) {} }, 250);
-    });
-  </script>
 </body>
 </html>`;
+}
 
+function printFallback(html: string, locale: ReportLocale): void {
   const win = window.open("", "_blank");
   if (!win) {
-    // Popup blocked — surface a hint instead of failing silently.
     window.alert(
       locale === "kz"
         ? "Терезе бұғатталды. PDF экспорты үшін қалқымалы терезелерге рұқсат беріңіз."
@@ -326,4 +330,71 @@ export function exportDashboardReport({ stats, emotionPoints, recentEvents, loca
   win.document.open();
   win.document.write(html);
   win.document.close();
+}
+
+// Builds the report and downloads it as a PDF file. Renders into an isolated
+// off-screen iframe (so the app's CSS can't interfere with html2canvas), captures
+// it, and saves a PDF. Falls back to a printable window if capture fails.
+export async function exportDashboardReport(data: ReportData): Promise<void> {
+  const { locale } = data;
+  const iframe = document.createElement("iframe");
+  iframe.setAttribute("aria-hidden", "true");
+  iframe.style.position = "fixed";
+  iframe.style.left = "-10000px";
+  iframe.style.top = "0";
+  iframe.style.width = "794px";
+  iframe.style.height = "10px";
+  iframe.style.border = "0";
+  iframe.style.background = "#ffffff";
+  document.body.appendChild(iframe);
+
+  try {
+    const idoc = iframe.contentDocument || iframe.contentWindow?.document;
+    if (!idoc) throw new Error("iframe document unavailable");
+    idoc.open();
+    idoc.write(buildReportDocument(data, false));
+    idoc.close();
+
+    await new Promise((resolve) => setTimeout(resolve, 350));
+    const body = idoc.body;
+    const contentHeight = Math.max(body.scrollHeight, body.offsetHeight, 600);
+    iframe.style.height = `${contentHeight}px`;
+
+    const { default: html2canvas } = await import("html2canvas");
+    const canvas = await html2canvas(body, {
+      scale: 2,
+      backgroundColor: "#ffffff",
+      width: 794,
+      windowWidth: 794,
+      height: contentHeight,
+      windowHeight: contentHeight,
+    });
+
+    const { jsPDF } = await import("jspdf");
+    const pdf = new jsPDF({ unit: "mm", format: "a4", orientation: "portrait" });
+    const pageW = pdf.internal.pageSize.getWidth();
+    const pageH = pdf.internal.pageSize.getHeight();
+    const imgW = pageW;
+    const imgH = (canvas.height * imgW) / canvas.width;
+    const imgData = canvas.toDataURL("image/png");
+
+    let heightLeft = imgH;
+    let position = 0;
+    pdf.addImage(imgData, "PNG", 0, position, imgW, imgH);
+    heightLeft -= pageH;
+    while (heightLeft > 0) {
+      position -= pageH;
+      pdf.addPage();
+      pdf.addImage(imgData, "PNG", 0, position, imgW, imgH);
+      heightLeft -= pageH;
+    }
+
+    const stamp = new Date().toISOString().slice(0, 10);
+    pdf.save(`mood-checker-${stamp}.pdf`);
+  } catch {
+    // Capture failed for any reason — fall back to the always-works print path.
+    printFallback(buildReportDocument(data, true), locale);
+  } finally {
+    iframe.remove();
+  }
 }

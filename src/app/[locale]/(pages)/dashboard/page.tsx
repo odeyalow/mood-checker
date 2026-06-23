@@ -117,6 +117,7 @@ export default function DashboardPage({
   const [stats, setStats] = useState<DashboardStats | null>(null);
   const [emotionPoints, setEmotionPoints] = useState<EmotionPoint[]>([]);
   const [loadError, setLoadError] = useState<string | null>(null);
+  const [exporting, setExporting] = useState(false);
 
   useEffect(() => {
     let active = true;
@@ -169,19 +170,19 @@ export default function DashboardPage({
     };
   }, [t.connectionError, t.loadError]);
 
-  const handleExport = () => {
-    exportDashboardReport({
-      stats,
-      emotionPoints,
-      recentEvents,
-      locale: safeLocale,
-    });
+  const handleExport = async () => {
+    setExporting(true);
+    try {
+      await exportDashboardReport({ stats, emotionPoints, recentEvents, locale: safeLocale });
+    } finally {
+      setExporting(false);
+    }
   };
 
   return (
     <MainLayout title={t.title} locale={safeLocale}>
       <div style={{ display: "flex", justifyContent: "flex-end", marginBottom: 16 }}>
-        <Button type="primary" icon={<DownloadOutlined />} onClick={handleExport}>
+        <Button type="primary" icon={<DownloadOutlined />} loading={exporting} onClick={handleExport}>
           {t.exportData}
         </Button>
       </div>

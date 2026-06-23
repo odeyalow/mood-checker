@@ -48,19 +48,21 @@
     "worker:diagnose": "bash scripts/diagnose-worker.sh"
   },
   "dependencies": {
-    "@vladmandic/face-api": "^1.7.15",
-    "@napi-rs/canvas": "^0.1.80",
     "@ant-design/icons": "^6.1.0",
+    "@napi-rs/canvas": "^0.1.80",
     "@prisma/client": "^6.16.1",
     "@tensorflow/tfjs-node": "^4.22.0",
+    "@vladmandic/face-api": "^1.7.15",
     "antd": "^6.2.2",
     "bcryptjs": "^3.0.2",
     "express": "^5.2.1",
+    "html2canvas": "^1.4.1",
     "jose": "^6.1.0",
+    "jspdf": "^2.5.2",
     "next": "^16.1.4",
+    "playwright": "^1.55.0",
     "react": "^19.2.3",
-    "react-dom": "^19.2.3",
-    "playwright": "^1.55.0"
+    "react-dom": "^19.2.3"
   },
   "devDependencies": {
     "@tailwindcss/postcss": "^4",
