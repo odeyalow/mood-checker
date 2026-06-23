@@ -1,9 +1,11 @@
 "use client";
 
 import { use, useEffect, useState } from "react";
-import { Card, Col, Row, Space, Statistic, Tag, Typography, Avatar } from "antd";
+import { Button, Card, Col, Row, Space, Statistic, Tag, Typography, Avatar } from "antd";
+import { DownloadOutlined } from "@ant-design/icons";
 import MainLayout from "@/components/layouts/MainLayout";
 import EmotionTimelineChart from "@/components/dashboard/EmotionTimelineChart";
+import { exportDashboardReport } from "@/components/dashboard/exportDashboardReport";
 import { classifyMood } from "@/lib/mood";
 
 const { Text } = Typography;
@@ -25,6 +27,7 @@ const L10N = {
     loadError: "Ошибка загрузки",
     connectionError: "Ошибка соединения",
     allTimeShare: "Доля за все время",
+    exportData: "Экспорт данных",
   },
   kz: {
     title: "Басқару панелі",
@@ -40,6 +43,7 @@ const L10N = {
     loadError: "Жүктеу қатесі",
     connectionError: "Байланыс қатесі",
     allTimeShare: "Барлық уақыттағы үлес",
+    exportData: "Деректерді экспорттау",
   },
   en: {
     title: "Main Dashboard",
@@ -55,6 +59,7 @@ const L10N = {
     loadError: "Load error",
     connectionError: "Connection error",
     allTimeShare: "All-time share",
+    exportData: "Export data",
   },
 } as const;
 
@@ -164,8 +169,22 @@ export default function DashboardPage({
     };
   }, [t.connectionError, t.loadError]);
 
+  const handleExport = () => {
+    exportDashboardReport({
+      stats,
+      emotionPoints,
+      recentEvents,
+      locale: safeLocale,
+    });
+  };
+
   return (
     <MainLayout title={t.title} locale={safeLocale}>
+      <div style={{ display: "flex", justifyContent: "flex-end", marginBottom: 16 }}>
+        <Button type="primary" icon={<DownloadOutlined />} onClick={handleExport}>
+          {t.exportData}
+        </Button>
+      </div>
       <Row gutter={[16, 16]}>
         <Col xs={24} lg={16}>
           <Row gutter={[16, 16]}>
