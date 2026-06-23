@@ -53,12 +53,16 @@ export function computeRiskStats(counts: MoodCounts): RiskStats {
 }
 
 export function bucketStartUtc(date: Date, minutes = 60) {
-  const d = new Date(date);
-  d.setUTCSeconds(0, 0);
-  const mins = d.getUTCMinutes();
-  const bucketMins = Math.floor(mins / minutes) * minutes;
-  d.setUTCMinutes(bucketMins);
-  return d;
+  // Align to a fixed grid from the Unix epoch so any bucket size works correctly
+  // (hourly, daily, weekly, monthly). The previous version only floored minutes
+  // within the hour, so day/week buckets kept the original hour and never matched
+  // the generated bucket keys — which left every chart point at zero once the data
+  // span crossed 14 days and switched to daily buckets.
+  const safeMinutes = Math.max(1, Math.floor(minutes));
+  const bucketMs = safeMinutes * 60 * 1000;
+  const ms = new Date(date).getTime();
+  if (!Number.isFinite(ms)) return new Date(0);
+  return new Date(Math.floor(ms / bucketMs) * bucketMs);
 }
 
 export function toIso(date: Date) {
