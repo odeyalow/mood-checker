@@ -821,7 +821,13 @@ function normalizeInsightFaceResult(payload) {
 // top-down (mouth no longer clearly below the nose) — while allowing normal angles.
 function isRecordablePose(
   det,
-  { enabled = true, maxYawOffset = 0.36, minMouthBelowNoseRatio = 0.05 } = {},
+  {
+    enabled = true,
+    minEyeDistanceRatio = 0.18,
+    maxYawOffset = 0.36,
+    minMouthBelowNoseRatio = 0.05,
+    maxEyeLineRatio = 1,
+  } = {},
 ) {
   if (!enabled) return true;
   const box = getBox(det);
@@ -833,6 +839,12 @@ function isRecordablePose(
   const nose = getLandmarkCenter(landmarks.getNose());
   if (!leftEye || !rightEye || !nose) return true;
 
+  // Profile ("чисто справа/слева"): a turned face projects the two eyes close
+  // together. Reject when eye separation relative to face width is too small.
+  const eyeDistRatio =
+    Math.hypot(rightEye.x - leftEye.x, rightEye.y - leftEye.y) / Math.max(1, box.width);
+  if (eyeDistRatio < minEyeDistanceRatio) return false;
+
   const eyeLeftX = Math.min(leftEye.x, rightEye.x);
   const eyeRightX = Math.max(leftEye.x, rightEye.x);
   const span = Math.max(1e-6, eyeRightX - eyeLeftX);
@@ -840,6 +852,13 @@ function isRecordablePose(
   const noseBetween = (nose.x - eyeLeftX) / span;
   const yaw = Math.max(0.05, Math.min(0.49, maxYawOffset));
   if (noseBetween < 0.5 - yaw || noseBetween > 0.5 + yaw) return false;
+
+  // Pitch via eye-line height (top-down): under a strong downward camera view the
+  // eyes sit lower within the face box. Reject when the eye line drops below
+  // maxEyeLineRatio. Disabled by default (1 = never triggers); tune via
+  // WORKER_RECORD_POSE_MAX_EYELINE once the debug numbers are known.
+  const eyeLineRatio = ((leftEye.y + rightEye.y) / 2 - box.y) / Math.max(1, box.height);
+  if (eyeLineRatio > maxEyeLineRatio) return false;
 
   // Pitch (top-down): the mouth must sit clearly below the nose. Under a strong
   // downward view the mouth rises toward/above the nose -> reject. Falls back to the
@@ -876,6 +895,9 @@ function computeFacePoseMetrics(det) {
     typeof landmarks.getMouth === "function" ? getLandmarkCenter(landmarks.getMouth()) : null;
   const mouthDrop = mouth ? (mouth.y - nose.y) / Math.max(1, box.height) : null;
   return {
+    eyeDist: Number(
+      (Math.hypot(rightEye.x - leftEye.x, rightEye.y - leftEye.y) / Math.max(1, box.width)).toFixed(3),
+    ),
     yawOff: Number(Math.abs((nose.x - eyeLeftX) / span - 0.5).toFixed(3)),
     mouthDrop: mouthDrop === null ? null : Number(mouthDrop.toFixed(3)),
     eyeLineYRatio: Number(((eyeLineY - box.y) / Math.max(1, box.height)).toFixed(3)),
@@ -1806,6 +1828,12 @@ async function main() {
     0,
     Math.min(0.4, envFloat("WORKER_RECORD_POSE_MIN_MOUTH_DROP", 0.05)),
   );
+  // Top-down gate by eye-line height. 1 = disabled (default). Lower (e.g. 0.5) rejects
+  // faces whose eyes sit too low in the box (strong downward camera view).
+  const recordPoseMaxEyeline = Math.max(0.2, Math.min(1, envFloat("WORKER_RECORD_POSE_MAX_EYELINE", 1)));
+  // Profile gate: min eye separation as a share of face width (higher = stricter).
+  // Catches side/profile faces; robust to camera distance and height.
+  const recordPoseMinEyeDist = Math.max(0, Math.min(0.45, envFloat("WORKER_RECORD_POSE_MIN_EYE_DIST", 0.18)));
   const matchIntervalMs = Math.max(120, envInt("WORKER_MATCH_INTERVAL_MS", 140));
   const matchLogCooldownMs = Math.max(300, envInt("WORKER_MATCH_LOG_COOLDOWN_MS", 1000));
   const enableEmotions = envBool("WORKER_ENABLE_EMOTIONS", true);
@@ -2774,6 +2802,26 @@ async function main() {
             recordPoseMinMouthDrop,
           ),
           recordPoseMinMouthDrop,
+        ),
+      ),
+    );
+    const camRecordPoseMaxEyeline = Math.max(
+      0.2,
+      Math.min(
+        1,
+        parseFiniteFloat(
+          getCameraSetting(cameraSettings, cam.cameraId, "recordPoseMaxEyeline", recordPoseMaxEyeline),
+          recordPoseMaxEyeline,
+        ),
+      ),
+    );
+    const camRecordPoseMinEyeDist = Math.max(
+      0,
+      Math.min(
+        0.45,
+        parseFiniteFloat(
+          getCameraSetting(cameraSettings, cam.cameraId, "recordPoseMinEyeDist", recordPoseMinEyeDist),
+          recordPoseMinEyeDist,
         ),
       ),
     );
@@ -3756,15 +3804,17 @@ async function main() {
                 !camRecordRequireFrontal ||
                 isRecordablePose(det, {
                   enabled: true,
+                  minEyeDistanceRatio: camRecordPoseMinEyeDist,
                   maxYawOffset: camRecordPoseMaxYaw,
                   minMouthBelowNoseRatio: camRecordPoseMinMouthDrop,
+                  maxEyeLineRatio: camRecordPoseMaxEyeline,
                 });
               const isFrontalFace = isIdentityVisibleDetection(det) && recordPoseOk;
               if (process.env.WORKER_POSE_DEBUG === "1" && now - Number(cam.lastPoseDebugAt || 0) >= 600) {
                 const pm = computeFacePoseMetrics(det);
                 if (pm) {
                   log(
-                    `[${cam.cameraId}] pose mouthDrop=${pm.mouthDrop} yawOff=${pm.yawOff} ` +
+                    `[${cam.cameraId}] pose eyeDist=${pm.eyeDist} mouthDrop=${pm.mouthDrop} yawOff=${pm.yawOff} ` +
                       `eyeLineY=${pm.eyeLineYRatio} noseDrop=${pm.noseDropRatio} mouth=${pm.hasMouth ? 1 : 0} ` +
                       `side=${faceSide.toFixed(0)} poseOk=${recordPoseOk ? 1 : 0}`,
                   );
