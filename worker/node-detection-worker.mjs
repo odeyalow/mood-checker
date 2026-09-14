@@ -1819,10 +1819,12 @@ async function main() {
     0.05,
     envFloat("WORKER_FRONTAL_NOSE_CENTER_TOLERANCE", 0.18),
   );
-  // Moderate pose gate for DB writes (recognition + new IDs), independent of the
-  // display flag WORKER_REQUIRE_FRONTAL_FACE. Rejects strong profile / top-down so
-  // unusable faces are neither matched nor registered (prevents duplicate IDs).
-  const recordRequireFrontal = envBool("WORKER_RECORD_REQUIRE_FRONTAL", true);
+  // Optional pose gate for DB writes (recognition + new IDs), independent of the
+  // display flag WORKER_REQUIRE_FRONTAL_FACE. OFF by default: on high-mounted /
+  // distant cameras the landmarks on small faces are too noisy, so enabling it
+  // blindly rejects normal faces too (nothing gets matched -> pipeline log cycles).
+  // Turn on only after reading real numbers via WORKER_POSE_DEBUG=1.
+  const recordRequireFrontal = envBool("WORKER_RECORD_REQUIRE_FRONTAL", false);
   const recordPoseMaxYaw = Math.max(0.1, Math.min(0.49, envFloat("WORKER_RECORD_POSE_MAX_YAW", 0.36)));
   const recordPoseMinMouthDrop = Math.max(
     0,
