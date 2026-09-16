@@ -148,11 +148,17 @@ console.log("\n4. Worker process");
 const statusFile =
   (process.env.WORKER_STATUS_FILE || "").trim() || "/tmp/mood-checker-worker-status.json";
 if (!fs.existsSync(statusFile)) {
-  bad(`no status file at ${statusFile} — the worker has probably never run`, "npm run dev:all");
+  bad(
+    `no status file at ${statusFile} — the worker has probably never run`,
+    "pm2 start ecosystem.config.cjs --env production   (locally: npm run dev:all)",
+  );
 } else {
   const ageMs = Date.now() - fs.statSync(statusFile).mtimeMs;
   if (ageMs > 15000) {
-    bad(`status file is ${(ageMs / 1000).toFixed(0)} s old — the worker is not running now`, "npm run dev:all");
+    bad(
+      `status file is ${(ageMs / 1000).toFixed(0)} s old — the worker is not running now`,
+      "pm2 logs mood-checker-worker --lines 60   (locally: npm run dev:all)",
+    );
   } else {
     ok(`worker is alive (status written ${(ageMs / 1000).toFixed(1)} s ago)`);
     try {
@@ -175,7 +181,11 @@ console.log("\n5. InsightFace service");
 const endpoint = (process.env.WORKER_INSIGHTFACE_ENDPOINT || "http://127.0.0.1:8765").replace(/\/+$/, "");
 const health = await get(`${endpoint}/health`, 4000);
 if (health.status === 0) {
-  bad(`no answer from ${endpoint}`, "the worker starts it; check the worker log for [insightface] errors");
+  bad(
+    `no answer from ${endpoint}`,
+    "the worker starts it — check the worker log for [insightface]; on a first run the " +
+      "model download can outlast WORKER_INSIGHTFACE_STARTUP_TIMEOUT_MS",
+  );
 } else if (health.status !== 200) {
   bad(`/health returned HTTP ${health.status}`);
 } else {

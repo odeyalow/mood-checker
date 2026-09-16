@@ -2233,7 +2233,11 @@ async function main() {
   const insightFaceTimeoutMs = Math.max(500, envInt("WORKER_INSIGHTFACE_TIMEOUT_MS", 2500));
   const insightFaceStartupTimeoutMs = Math.max(
     2000,
-    envInt("WORKER_INSIGHTFACE_STARTUP_TIMEOUT_MS", 30000),
+    // Generous on purpose: on a fresh install InsightFace downloads the model
+    // pack (~280 MB) before it can answer /health. With the old 30 s the worker
+    // killed a perfectly healthy service mid-download, fell through to a python
+    // without the dependencies, and ended up on the face-api fallback.
+    envInt("WORKER_INSIGHTFACE_STARTUP_TIMEOUT_MS", 300000),
   );
   const cameraProcessTimeoutMs = Math.max(
     1000,
