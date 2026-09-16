@@ -14,6 +14,8 @@
  *   node scripts/registry-report.mjs --top=20        # show N largest duplicate clusters
  */
 
+// Must come first: PrismaClient needs DATABASE_URL from .env.
+import "./load-env.mjs";
 import { PrismaClient } from "@prisma/client";
 
 const prisma = new PrismaClient();

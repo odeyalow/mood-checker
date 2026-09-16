@@ -1,5 +1,7 @@
 #!/usr/bin/env node
 
+// Must come first: PrismaClient needs DATABASE_URL from .env.
+import "./load-env.mjs";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { PrismaClient } from "@prisma/client";

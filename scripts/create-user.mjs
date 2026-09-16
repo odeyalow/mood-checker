@@ -1,3 +1,5 @@
+// Must come first: PrismaClient needs DATABASE_URL from .env.
+import "./load-env.mjs";
 import { PrismaClient } from "@prisma/client";
 import bcrypt from "bcryptjs";
 
