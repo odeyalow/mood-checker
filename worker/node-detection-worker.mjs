@@ -8,9 +8,30 @@ import path from "node:path";
 import process from "node:process";
 import { setTimeout as sleep } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
-import "@tensorflow/tfjs-node";
-import * as faceapi from "@vladmandic/face-api";
 import { createCanvas, loadImage } from "@napi-rs/canvas";
+
+// face-api and tfjs-node are loaded lazily. With the InsightFace backend and the
+// HSEmotion model inside the service they are never used on the working path, and
+// tfjs-node is a native addon that must be compiled per platform. Keeping the
+// import optional lets a machine without that build still run the whole pipeline.
+let faceapi = null;
+let faceApiLoadError = "";
+
+async function loadFaceApi() {
+  if (faceapi) return faceapi;
+  try {
+    await import("@tensorflow/tfjs-node");
+    const mod = await import("@vladmandic/face-api");
+    // CJS interop: named exports may sit on the namespace or only on default.
+    faceapi = mod?.nets ? mod : mod?.default;
+    if (!faceapi?.nets) throw new Error("face-api module has no nets export");
+    return faceapi;
+  } catch (err) {
+    faceApiLoadError = String(err?.message ?? err).split(/\r?\n/)[0];
+    faceapi = null;
+    return null;
+  }
+}
 
 const rootDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const SUPPORTED_DESCRIPTOR_LENGTHS = new Set([128, 512]);
@@ -657,21 +678,92 @@ function createPresenceSession(now) {
     emotionSampleCount: 0,
     bestDistance: Number.POSITIVE_INFINITY,
     emittedAt: 0,
+    // Recent per-frame emotion readings, pruned to WORKER_EMOTION_WINDOW_MS.
+    // A rolling window is what makes the label both steady and responsive: one
+    // misread frame is outvoted by its neighbours, while a real change takes over
+    // as soon as it fills most of the window.
+    emotionSamples: [],
+    emittedMoodLabel: "",
+    pendingMoodLabel: "",
+    pendingMoodSince: 0,
     lastMoodLabel: "",
-    emotionStats: new Map(),
   };
 }
 
-function addSessionEmotionSample(session, emotionKey, emotionConfidence) {
+// Emotions that can genuinely sit close together on one face. A near-tie between
+// these is worth reporting as a pair; a tie between, say, happy and angry is not a
+// blend but a bad read, and picking the stronger one is the honest answer.
+const EMOTION_NEIGHBOURS = {
+  neutral: new Set(["sad", "angry", "disgusted"]),
+  sad: new Set(["neutral", "fearful", "disgusted", "angry"]),
+  angry: new Set(["neutral", "disgusted", "sad"]),
+  disgusted: new Set(["angry", "sad", "neutral"]),
+  fearful: new Set(["surprised", "sad"]),
+  surprised: new Set(["fearful", "happy"]),
+  happy: new Set(["surprised"]),
+};
+
+function emotionsArePairable(a, b) {
+  if (!a || !b || a === b) return false;
+  return Boolean(EMOTION_NEIGHBOURS[a]?.has(b));
+}
+
+/**
+ * Builds the label for a near-tie, e.g. "sad+neutral".
+ *
+ * Two conditions, both in points on a 0-100 scale over the normalised vector:
+ *   1. the top two are within `maxGap` of each other, and
+ *   2. the second one leads the third by at least `minLead`.
+ *
+ * The second condition is what makes this mean "these two stand out together".
+ * Without it a flat read — say 30 / 28 / 26 — would pair the first two even
+ * though the third is just as close, and one clear winner over a spread field
+ * (58 / 22 / 16) would pair too. Returns "" when the pair does not stand out or
+ * the two cannot plausibly appear on one face.
+ */
+function buildPairedEmotionLabel(vector, keys, maxGap, minLead = 0) {
+  if (!(maxGap > 0)) return "";
+  let total = 0;
+  for (const key of keys) total += Math.max(0, Number(vector[key] ?? 0));
+  if (total <= 0) return "";
+
+  const ranked = keys
+    .map((key) => ({ key, value: (Math.max(0, Number(vector[key] ?? 0)) / total) * 100 }))
+    .sort((left, right) => right.value - left.value);
+  const [top, second, third] = ranked;
+  if (!top || !second) return "";
+  if (top.value - second.value > maxGap) return "";
+  const thirdValue = third ? third.value : 0;
+  if (second.value - thirdValue < minLead) return "";
+  if (!emotionsArePairable(top.key, second.key)) return "";
+  return `${top.key}+${second.key}`;
+}
+
+function pruneSessionEmotionSamples(session, now, windowMs) {
+  if (!Array.isArray(session.emotionSamples)) session.emotionSamples = [];
+  if (windowMs > 0) {
+    const cutoff = now - windowMs;
+    while (session.emotionSamples.length && session.emotionSamples[0].at < cutoff) {
+      session.emotionSamples.shift();
+    }
+  }
+  session.emotionSampleCount = session.emotionSamples.length;
+  return session.emotionSamples;
+}
+
+function addSessionEmotionSample(session, emotionKey, emotionConfidence, now, windowMs, vector) {
   const key = String(emotionKey ?? "").trim().toLowerCase();
   const confidence = Number(emotionConfidence ?? 0);
   if (!key || !Number.isFinite(confidence) || confidence <= 0) return;
-  const prev = session.emotionStats.get(key) || { sum: 0, count: 0, max: 0 };
-  prev.sum += confidence;
-  prev.count += 1;
-  prev.max = Math.max(prev.max, confidence);
-  session.emotionStats.set(key, prev);
-  session.emotionSampleCount += 1;
+  if (!Array.isArray(session.emotionSamples)) session.emotionSamples = [];
+  const safeVector = vector && typeof vector === "object" && !Array.isArray(vector) ? vector : null;
+  session.emotionSamples.push({
+    key,
+    confidence,
+    vector: safeVector,
+    at: Number(now) || Date.now(),
+  });
+  pruneSessionEmotionSamples(session, Number(now) || Date.now(), windowMs);
 }
 
 function resolveSessionEmotionLabel({
@@ -683,33 +775,77 @@ function resolveSessionEmotionLabel({
   allowFallbackMood,
   fallbackMood,
   strictness = 0,
+  peakWeight = 0,
+  voteWeight = 0,
+  pairMaxGap = 0,
+  pairMinLead = 0,
 }) {
+  // Weight a label by how much of the visit it actually occupied. The old formula
+  // was avg*0.75 + peak*0.25 with at most a 1.08 boost for repetition, so a single
+  // frame read as "sad" at 0.99 outscored four "neutral" frames at 0.5. Frame share
+  // is the honest signal: a real mood persists, a misread frame does not.
+  const samples = Array.isArray(session.emotionSamples) ? session.emotionSamples : [];
+  const keys = emotionKeys && emotionKeys.length ? emotionKeys : [];
+  const totalSamples = samples.length;
+  const safePeakWeight = Math.max(0, Math.min(1, Number(peakWeight) || 0));
+  const safeVoteWeight = Math.max(0, Math.min(1, Number(voteWeight ?? 0)));
+
+  // Average the full per-frame distributions across the window. This is what
+  // makes a single misread frame harmless — one spike of sad=0.99 among seven
+  // frames of neutral~0.6 averages well below neutral — while still preserving a
+  // genuine near-tie, which counting only the winning label per frame destroys.
   const vector = {};
-  for (const [key, stats] of session.emotionStats.entries()) {
-    const count = Number(stats?.count ?? 0);
-    const sum = Number(stats?.sum ?? 0);
-    const peak = Number(stats?.max ?? 0);
-    if (!count || !Number.isFinite(sum)) continue;
-    const avg = sum / count;
-    const safePeak = Number.isFinite(peak) ? peak : avg;
-    const supportBoost = Math.min(1.08, 1 + Math.max(0, count - 1) * 0.02);
-    vector[key] = (avg * 0.75 + safePeak * 0.25) * supportBoost;
+  const vectorSamples = samples.filter((sample) => sample.vector);
+  if (vectorSamples.length) {
+    for (const key of keys) {
+      let sum = 0;
+      for (const sample of vectorSamples) sum += Math.max(0, Number(sample.vector[key] ?? 0));
+      vector[key] = sum / vectorSamples.length;
+    }
+  } else {
+    // Older samples carried only a label and its confidence.
+    for (const sample of samples) {
+      vector[sample.key] = (vector[sample.key] ?? 0) + sample.confidence / Math.max(1, totalSamples);
+    }
+  }
+
+  if (safePeakWeight > 0 || safeVoteWeight > 0) {
+    const stats = new Map();
+    for (const sample of samples) {
+      const entry = stats.get(sample.key) || { count: 0, max: 0 };
+      entry.count += 1;
+      entry.max = Math.max(entry.max, sample.confidence);
+      stats.set(sample.key, entry);
+    }
+    for (const key of Object.keys(vector)) {
+      const entry = stats.get(key) || { count: 0, max: 0 };
+      const share = totalSamples > 0 ? entry.count / totalSamples : 1;
+      const voteFactor = 1 - safeVoteWeight + safeVoteWeight * share;
+      const peaked = vector[key] * (1 - safePeakWeight) + entry.max * safePeakWeight;
+      vector[key] = peaked * voteFactor;
+    }
   }
 
   const parsed = parseEmotionFromExpressions(vector, emotionKeys || Object.keys(vector), strictness);
+  // A near-tie between two emotions that really can share a face is reported as
+  // both, instead of silently picking the one that happened to be 0.02 ahead.
+  const pairedLabel = parsed.key
+    ? buildPairedEmotionLabel(vector, emotionKeys || Object.keys(vector), pairMaxGap, pairMinLead)
+    : "";
+  const label = pairedLabel && pairedLabel.startsWith(`${parsed.key}+`) ? pairedLabel : parsed.key;
   if (parsed.key) {
     const aggregatedConfidence = Number(parsed.confidence ?? 0);
     if (aggregatedConfidence >= minConfidence) {
       return {
-        moodLabel: parsed.key,
-        emotionLabel: `${parsed.key} ${(aggregatedConfidence * 100).toFixed(0)}%`,
+        moodLabel: label,
+        emotionLabel: `${label} ${(aggregatedConfidence * 100).toFixed(0)}%`,
         emotionConfidence: Number(aggregatedConfidence.toFixed(4)),
       };
     }
     if (allowLowConfidenceLabel && aggregatedConfidence >= lowConfidenceFloor) {
       return {
-        moodLabel: parsed.key,
-        emotionLabel: `${parsed.key} ${(aggregatedConfidence * 100).toFixed(0)}%`,
+        moodLabel: label,
+        emotionLabel: `${label} ${(aggregatedConfidence * 100).toFixed(0)}%`,
         emotionConfidence: Number(aggregatedConfidence.toFixed(4)),
       };
     }
@@ -1124,11 +1260,36 @@ function findClosestDescriptorInBank(bank, descriptor) {
   return best;
 }
 
-function computeLumaBufferFromRgb(rgb) {
-  const luma = new Uint8Array(Math.floor(rgb.length / 3));
-  let j = 0;
-  for (let i = 0; i < rgb.length; i += 3) {
-    luma[j++] = (77 * rgb[i] + 150 * rgb[i + 1] + 29 * rgb[i + 2]) >> 8;
+// Box-average downsample straight to luma. Replaces a tfjs resizeBilinear that
+// forced a full int32 tensor of every frame (~25 MB at 1920x1080) to be built and
+// disposed on every loop purely to score motion.
+function downsampleRgbToLuma(rgb, srcWidth, srcHeight, dstWidth, dstHeight) {
+  const luma = new Uint8Array(dstWidth * dstHeight);
+  const xRatio = srcWidth / dstWidth;
+  const yRatio = srcHeight / dstHeight;
+  let out = 0;
+  for (let dy = 0; dy < dstHeight; dy += 1) {
+    const y0 = Math.floor(dy * yRatio);
+    const y1 = Math.min(srcHeight, Math.max(y0 + 1, Math.floor((dy + 1) * yRatio)));
+    for (let dx = 0; dx < dstWidth; dx += 1) {
+      const x0 = Math.floor(dx * xRatio);
+      const x1 = Math.min(srcWidth, Math.max(x0 + 1, Math.floor((dx + 1) * xRatio)));
+      // Cap the samples per cell: averaging every source pixel costs ~20 ms at
+      // 1920x1080 and buys nothing for a motion score.
+      const yStep = Math.max(1, Math.floor((y1 - y0) / 4));
+      const xStep = Math.max(1, Math.floor((x1 - x0) / 4));
+      let sum = 0;
+      let count = 0;
+      for (let y = y0; y < y1; y += yStep) {
+        const rowBase = y * srcWidth * 3;
+        for (let x = x0; x < x1; x += xStep) {
+          const idx = rowBase + x * 3;
+          sum += (77 * rgb[idx] + 150 * rgb[idx + 1] + 29 * rgb[idx + 2]) >> 8;
+          count += 1;
+        }
+      }
+      luma[out++] = count ? Math.round(sum / count) : 0;
+    }
   }
   return luma;
 }
@@ -1236,18 +1397,34 @@ function computeMatchCandidates(labeledDescriptors, descriptor) {
   return ranked;
 }
 
-function upsertKnownDescriptor(labeledDescriptors, label, descriptor) {
+function normalizeDescriptorList(input) {
+  if (!Array.isArray(input)) return [];
+  const out = [];
+  for (const item of input) {
+    const safe = normalizeDescriptor(item);
+    if (safe) out.push(safe);
+  }
+  return out;
+}
+
+function upsertKnownDescriptor(labeledDescriptors, label, descriptor, template) {
   const safeLabel = String(label ?? "").trim();
   const safeDescriptor = normalizeDescriptor(descriptor);
   if (!safeLabel || !safeDescriptor) return false;
 
+  // Prefer the template /api/faces/identify just returned: it is authoritative and
+  // already capped and spread-filtered there, so the worker never reimplements
+  // that. Falls back to the single vector for older server responses.
+  const safeTemplate = normalizeDescriptorList(template);
+  const descriptors = safeTemplate.length ? safeTemplate : [safeDescriptor];
+
   const index = labeledDescriptors.findIndex((item) => String(item?.label ?? "") === safeLabel);
   if (index >= 0) {
-    labeledDescriptors[index] = { label: safeLabel, descriptors: [safeDescriptor] };
+    labeledDescriptors[index] = { label: safeLabel, descriptors };
     return false;
   }
 
-  labeledDescriptors.push({ label: safeLabel, descriptors: [safeDescriptor] });
+  labeledDescriptors.push({ label: safeLabel, descriptors });
   return true;
 }
 
@@ -1887,10 +2064,37 @@ async function main() {
   // 0 = legacy expressive bias, 1 = strict (favours neutral, fewer unrealistic emotions).
   const emotionStrictness = Math.max(0, Math.min(1, envFloat("WORKER_EMOTION_STRICTNESS", 0.5)));
   const emotionEmaAlpha = Math.max(0, Math.min(1, envFloat("WORKER_EMOTION_EMA_ALPHA", 0.9)));
+  // 0 = ignore a label's best frame entirely (recommended), 1 = the old peak-driven
+  // behaviour where one strong frame could decide the whole visit.
+  const emotionPeakWeight = Math.max(0, Math.min(1, envFloat("WORKER_EMOTION_PEAK_WEIGHT", 0)));
+  // 1 = rank labels by the share of frames they won, 0 = ignore frequency.
+  // Averaging the per-frame distributions already resists a single bad frame, and
+  // unlike counting argmax winners it keeps near-ties visible, so this defaults to
+  // off. Raise it to also weight a class by how many frames it outright won.
+  const emotionVoteWeight = Math.max(0, Math.min(1, envFloat("WORKER_EMOTION_VOTE_WEIGHT", 0)));
+  // How far back the label is computed over. Longer = steadier but slower to
+  // follow a real change; shorter = quicker but a single bad frame weighs more.
+  const emotionWindowMs = Math.max(300, envInt("WORKER_EMOTION_WINDOW_MS", 2500));
+  // Gap in points (0-100) below which two compatible emotions are reported as a
+  // pair, e.g. "neutral+sad". 0 disables pairing.
+  const emotionPairMaxGap = Math.max(0, Math.min(100, envFloat("WORKER_EMOTION_PAIR_MAX_GAP", 0)));
+  // How far the pair must lead the third emotion to count as "these two stand
+  // out". Without it a flat read pairs its first two arbitrarily.
+  const emotionPairMinLead = Math.max(0, Math.min(100, envFloat("WORKER_EMOTION_PAIR_MIN_LEAD", 12)));
   const emotionEmaTtlMs = Math.max(2000, envInt("WORKER_EMOTION_EMA_TTL_MS", 12000));
   const emotionCarryoverMs = Math.max(1000, envInt("WORKER_EMOTION_CARRYOVER_MS", 10000));
   const dbEndpoint = (process.env.WORKER_DB_ENDPOINT || "http://127.0.0.1:3000/api/recognitions").trim();
   const dbCooldownMs = Math.max(800, envInt("WORKER_DB_COOLDOWN_MS", 2000));
+  // A presence session normally writes one row per visit. With this on it also
+  // writes when the mood actually changes while the person stays in frame.
+  const emotionChangeRecordEnabled = envBool("WORKER_EMOTION_CHANGE_RECORD", true);
+  // The new mood must hold this long before it is written, so a single noisy
+  // frame cannot produce a row.
+  const emotionChangeMinMs = Math.max(0, envInt("WORKER_EMOTION_CHANGE_MIN_MS", 1200));
+  const emotionChangeMinConfidence = Math.max(
+    0,
+    Math.min(1, envFloat("WORKER_EMOTION_CHANGE_MIN_CONFIDENCE", 0.35)),
+  );
   const dbReentryGapMs = Math.max(250, envInt("WORKER_DB_REENTRY_GAP_MS", 800));
   const dbSeenTtlMs = Math.max(dbCooldownMs * 6, dbReentryGapMs * 6);
   const dbAllowMoodFallback = envBool("WORKER_DB_ALLOW_MOOD_FALLBACK", true);
@@ -2099,19 +2303,42 @@ async function main() {
   }
   await fsp.mkdir(phantomSnapshotDir, { recursive: true }).catch(() => {});
 
-  const faceApiFallbackEnabled = inferenceBackend === "faceapi" || allowFaceApiFallback;
+  const faceApiWanted = inferenceBackend === "faceapi" || allowFaceApiFallback || enableEmotions;
   const modelDir = path.join(rootDir, "public", "models");
-  if (!fs.existsSync(modelDir) && (faceApiFallbackEnabled || enableEmotions)) {
-    log(`model dir not found: ${modelDir}`);
-    process.exit(1);
-  }
 
   log(
-    `[boot] loading models backend=${inferenceBackend} fallback=${faceApiFallbackEnabled ? "on" : "off"} ` +
-      `emotions=${enableEmotions ? "on" : "off"}`,
+    `[boot] loading models backend=${inferenceBackend} ` +
+      `fallback=${allowFaceApiFallback ? "on" : "off"} emotions=${enableEmotions ? "on" : "off"}`,
   );
-  faceapi.tf.enableProdMode();
-  const needTinyFaceDetector = faceApiFallbackEnabled || enableEmotions;
+
+  // face-api is optional. Its native tfjs-node addon may be missing on this
+  // machine, and with the InsightFace backend plus HSEmotion nothing needs it.
+  let faceApiReady = false;
+  if (faceApiWanted) {
+    if (!fs.existsSync(modelDir)) {
+      log(`[boot] face-api disabled: model dir not found ${modelDir}`);
+    } else if (await loadFaceApi()) {
+      faceApiReady = true;
+    } else {
+      log(`[boot] face-api unavailable: ${faceApiLoadError}`);
+    }
+  }
+
+  if (inferenceBackend === "faceapi" && !faceApiReady) {
+    log("[boot] fatal: backend=faceapi but face-api could not be loaded");
+    process.exit(1);
+  }
+  if (faceApiWanted && !faceApiReady) {
+    log(
+      "[boot] continuing without face-api: detection and embeddings come from the " +
+        "InsightFace service; emotions need the HSEmotion model in that service " +
+        "(node scripts/download-emotion-model.mjs)",
+    );
+  }
+
+  const faceApiFallbackEnabled = (inferenceBackend === "faceapi" || allowFaceApiFallback) && faceApiReady;
+  if (faceApiReady) faceapi.tf.enableProdMode();
+  const needTinyFaceDetector = faceApiReady && (faceApiFallbackEnabled || enableEmotions);
   if (needTinyFaceDetector) {
     await faceapi.nets.tinyFaceDetector.loadFromDisk(modelDir);
     log("[boot] tiny-face-detector loaded");
@@ -2131,15 +2358,21 @@ async function main() {
       log(`ssd fallback disabled (load failed): ${String(err)}`);
     }
   }
-  const tinyOptions = new faceapi.TinyFaceDetectorOptions({
-    inputSize: tinyInputSize,
-    scoreThreshold: tinyScoreThreshold,
-  });
-  const emotionTinyOptions = new faceapi.TinyFaceDetectorOptions({
-    inputSize: emotionTinyInputSize,
-    scoreThreshold: emotionTinyScoreThreshold,
-  });
-  const ssdOptions = new faceapi.SsdMobilenetv1Options({ minConfidence: ssdMinConfidence });
+  const tinyOptions = faceApiReady
+    ? new faceapi.TinyFaceDetectorOptions({
+        inputSize: tinyInputSize,
+        scoreThreshold: tinyScoreThreshold,
+      })
+    : null;
+  const emotionTinyOptions = faceApiReady
+    ? new faceapi.TinyFaceDetectorOptions({
+        inputSize: emotionTinyInputSize,
+        scoreThreshold: emotionTinyScoreThreshold,
+      })
+    : null;
+  const ssdOptions = faceApiReady
+    ? new faceapi.SsdMobilenetv1Options({ minConfidence: ssdMinConfidence })
+    : null;
   const reloadFaceRegistry = async (reason) => {
     const loadedAt = Date.now();
     if (!faceRegistryEndpoint) return;
@@ -2151,7 +2384,10 @@ async function main() {
         const label = String(item?.shortId ?? "").trim();
         const descriptor = normalizeDescriptor(item?.descriptor);
         if (!label || !descriptor) continue;
-        nextDescriptors.push({ label, descriptors: [descriptor] });
+        // computeMatchCandidates already scores against every vector of a label,
+        // so handing it the full template is all that multi-pose matching needs.
+        const template = normalizeDescriptorList(item?.descriptors);
+        nextDescriptors.push({ label, descriptors: template.length ? template : [descriptor] });
       }
       knownLabeledDescriptors = nextDescriptors;
       blockedDescriptorBank = buildDescriptorBankFromBlockedIds(
@@ -2196,13 +2432,14 @@ async function main() {
       );
       const shortId = String(payload?.shortId ?? "").trim();
       const mergedDescriptor = normalizeDescriptor(payload?.descriptor) || safeDescriptor;
+      const mergedTemplate = normalizeDescriptorList(payload?.descriptors);
       if (!shortId || !mergedDescriptor) return null;
       const elapsedMs = Date.now() - startedAt;
       if (elapsedMs >= 650 && Date.now() - lastIdentifySlowLogAt >= 3000) {
         log(`[faces] identify slow elapsed_ms=${elapsedMs}`);
         lastIdentifySlowLogAt = Date.now();
       }
-      upsertKnownDescriptor(knownLabeledDescriptors, shortId, mergedDescriptor);
+      upsertKnownDescriptor(knownLabeledDescriptors, shortId, mergedDescriptor, mergedTemplate);
       return {
         shortId,
         distance: Number(payload?.distance),
@@ -2228,19 +2465,24 @@ async function main() {
       width,
       height,
     },
-    { includeDescriptor = false, maxFaces = 10, minScore = 0 } = {},
+    { includeDescriptor = false, includeEmotions = false, maxFaces = 10, minScore = 0 } = {},
   ) => {
     if (inferenceBackend !== "insightface") return null;
     if (!(rgb instanceof Uint8Array) || !rgb.length || !width || !height) return [];
     try {
+      // Send the JPEG when we have one and skip the raw RGB entirely: at 960px the
+      // raw buffer is ~1.5 MB (~2 MB base64) against ~150 KB for the JPEG, and both
+      // used to go out on every single request while the service read only the RGB.
+      const hasJpg = jpgBuffer instanceof Buffer && jpgBuffer.length > 0;
       const payload = await postJsonExpectJsonWithTimeout(
         insightFaceAnalyzeEndpoint,
         {
-          imageBase64: jpgBuffer instanceof Buffer && jpgBuffer.length ? toBase64(jpgBuffer) : "",
-          rgbBase64: Buffer.from(rgb).toString("base64"),
+          imageBase64: hasJpg ? toBase64(jpgBuffer) : "",
+          rgbBase64: hasJpg ? "" : Buffer.from(rgb).toString("base64"),
           width,
           height,
           includeDescriptor,
+          includeEmotions,
           maxFaces,
           minScore,
         },
@@ -2279,8 +2521,14 @@ async function main() {
   let lastEmotionFallbackErrLogAt = 0;
   const enrichDetectionsWithEmotionFallback = async (rgb, frameWidth, frameHeight, detections) => {
     if (!enableEmotions || !Array.isArray(detections) || !detections.length) return detections;
+    // With the HSEmotion model loaded the service already returns expressions, so
+    // this whole path is skipped. It stays as the fallback for when that model is
+    // absent or could not classify a particular face — and it needs face-api.
+    if (!faceApiReady || !emotionTinyOptions) return detections;
+    if (detections.every((det) => det?.expressions)) return detections;
     try {
       for (const det of detections) {
+        if (det?.expressions) continue;
         const detBox = getBox(det);
         if (!detBox) continue;
         // Crop the face region from the full rgb frame and run face-api on the crop.
@@ -2432,11 +2680,13 @@ async function main() {
       `min_sharp=${recordMinSharpness.toFixed(2)} max_distance=${recordMaxDistance.toFixed(3)}`,
   );
 
-  if (enableEmotions) {
+  if (enableEmotions && faceApiReady) {
     await faceapi.nets.faceExpressionNet.loadFromDisk(modelDir);
-    log("[boot] face-expression loaded");
-  } else {
+    log("[boot] face-expression loaded (fallback only; HSEmotion runs in the service)");
+  } else if (!enableEmotions) {
     log("emotions=off reason=env_disabled");
+  } else {
+    log("emotions=service_only reason=faceapi_unavailable");
   }
 
   if (inferenceBackend === "insightface") {
@@ -2581,12 +2831,17 @@ async function main() {
   }
   log(
     `emotion min_confidence=${emotionMinConfidence} ema_alpha=${emotionEmaAlpha} ` +
+      `peak_weight=${emotionPeakWeight} vote_weight=${emotionVoteWeight} ` +
+      `window_ms=${emotionWindowMs} pair_max_gap=${emotionPairMaxGap} ` +
+      `pair_min_lead=${emotionPairMinLead} ` +
       `ema_ttl_ms=${emotionEmaTtlMs} low_floor=${emotionLowConfidenceFloor} ` +
       `allow_low_label=${emotionAllowLowConfidenceLabel ? "on" : "off"} ` +
       `carryover_ms=${emotionCarryoverMs}`,
   );
   log(
     `db cooldown_ms=${dbCooldownMs} reentry_gap_ms=${dbReentryGapMs} ` +
+      `emotion_change=${emotionChangeRecordEnabled ? "on" : "off"} ` +
+      `change_min_ms=${emotionChangeMinMs} change_min_conf=${emotionChangeMinConfidence.toFixed(2)} ` +
       `mood_fallback=${dbAllowMoodFallback ? dbFallbackMood : "off"}`,
   );
   log(
@@ -3526,53 +3781,68 @@ async function main() {
 
       const rgba = ctx.getImageData(0, 0, workerWidth, workerHeight).data;
       const rgb = rgbaToRgbTensorData(rgba);
-      let frameTensorNumBefore = 0;
-      try { frameTensorNumBefore = faceapi.tf.memory().numTensors; } catch (_) {}
-      const frameTensor = faceapi.tf.tensor3d(rgb, [workerHeight, workerWidth, 3], "int32");
+
+      // Motion scoring no longer goes through tfjs: the same 96x54 grid is built
+      // directly from the RGB buffer, so no full-frame tensor is allocated unless
+      // face-api detection is actually going to run.
+      const nextLuma = downsampleRgbToLuma(rgb, workerWidth, workerHeight, 96, 54);
 
       let detections = [];
+      // Raw InsightFace result for THIS frame, reused by the snapshot pass below
+      // instead of paying for a second full detection on the same image.
+      let reusableInsightResults = null;
+      let frameTensor = null;
+      let frameTensorNumBefore = 0;
+      const ensureFrameTensor = () => {
+        if (frameTensor) return frameTensor;
+        try { frameTensorNumBefore = faceapi.tf.memory().numTensors; } catch (_) {}
+        frameTensor = faceapi.tf.tensor3d(rgb, [workerHeight, workerWidth, 3], "int32");
+        return frameTensor;
+      };
+
       try {
         if (inferenceBackend === "insightface") {
+          // Descriptors cost almost nothing next to detection (measured: 278 ms
+          // with embeddings vs 335 ms detect-only), so request everything once.
           const insightResults = await analyzeWithInsightFace({
             jpgBuffer: jpg,
             rgb,
             width: workerWidth,
             height: workerHeight,
           }, {
-            includeDescriptor: false,
+            includeDescriptor: enableMatching,
+            includeEmotions: enableEmotions,
             maxFaces: 12,
             minScore: 0.05,
           });
-          if (insightResults === null && allowFaceApiFallback) {
-            detections = await faceapi.detectAllFaces(frameTensor, tinyOptions);
+          reusableInsightResults = insightResults;
+          if (insightResults === null && faceApiFallbackEnabled) {
+            detections = await faceapi.detectAllFaces(ensureFrameTensor(), tinyOptions);
             if (!detections.length && ssdLoaded) {
-              detections = await faceapi.detectAllFaces(frameTensor, ssdOptions);
+              detections = await faceapi.detectAllFaces(ensureFrameTensor(), ssdOptions);
             }
           } else {
             detections = insightResults || [];
           }
         } else {
-          detections = await faceapi.detectAllFaces(frameTensor, tinyOptions);
+          detections = await faceapi.detectAllFaces(ensureFrameTensor(), tinyOptions);
           if (!detections.length && ssdLoaded) {
-            detections = await faceapi.detectAllFaces(frameTensor, ssdOptions);
+            detections = await faceapi.detectAllFaces(ensureFrameTensor(), ssdOptions);
           }
         }
       } finally {
-        const resized = faceapi.tf.image.resizeBilinear(frameTensor, [54, 96], true);
-        const downsampled = await resized.data();
-        resized.dispose();
-        frameTensor.dispose();
+        if (frameTensor) {
+          frameTensor.dispose();
+          // Clean up any tensors that leaked during detection
+          try {
+            const numAfter = faceapi.tf.memory().numTensors;
+            if (numAfter - frameTensorNumBefore > 20) {
+              faceapi.tf.engine().startScope();
+              faceapi.tf.engine().endScope();
+            }
+          } catch (_) {}
+        }
 
-        // Clean up any tensors that leaked during detection
-        try {
-          const numAfter = faceapi.tf.memory().numTensors;
-          if (numAfter - frameTensorNumBefore > 20) {
-            faceapi.tf.engine().startScope();
-            faceapi.tf.engine().endScope();
-          }
-        } catch (_) {}
-
-        const nextLuma = computeLumaBufferFromRgb(downsampled);
         cam.motion = computeMotionScore(cam.prevLuma, nextLuma);
         cam.prevLuma = nextLuma;
       }
@@ -3720,17 +3990,24 @@ async function main() {
 
           try {
             if (inferenceBackend === "insightface") {
-              const insightResults = await analyzeWithInsightFace({
-                jpgBuffer: jpg,
-                rgb,
-                width: workerWidth,
-                height: workerHeight,
-              }, {
-                includeDescriptor: enableMatching,
-                maxFaces: 12,
-                minScore: 0.05,
-              });
-              if (insightResults === null && allowFaceApiFallback) {
+              // Same frame as the pass above, and that pass already requested
+              // descriptors and emotions — running detection again would just
+              // double the per-frame latency.
+              const insightResults =
+                reusableInsightResults !== null
+                  ? reusableInsightResults
+                  : await analyzeWithInsightFace({
+                      jpgBuffer: jpg,
+                      rgb,
+                      width: workerWidth,
+                      height: workerHeight,
+                    }, {
+                      includeDescriptor: enableMatching,
+                      includeEmotions: needExpressionsForSnapshot,
+                      maxFaces: 12,
+                      minScore: 0.05,
+                    });
+              if (insightResults === null && faceApiFallbackEnabled) {
                 snapTensor = faceapi.tf.tensor3d(rgb, [workerHeight, workerWidth, 3], "int32");
                 results = await runFaceApiDetect(tinyOptions);
                 if ((!results || !results.length) && ssdLoaded) {
@@ -3956,6 +4233,7 @@ async function main() {
             }
             let emotionKey = parsedEmotion.key;
             let emotionConfidence = parsedEmotion.confidence;
+            let emotionVector = parsedEmotion.vector;
             if (emotionKey && Number.isFinite(emotionConfidence) && emotionConfidence > 0) {
               cam.lastRawEmotionKey = String(emotionKey || "").trim();
               cam.lastRawEmotionConfidence = Number(emotionConfidence);
@@ -3967,9 +4245,10 @@ async function main() {
               for (const key of emotionKeys) {
                 const currentVal = Number(parsedEmotion.vector[key] ?? 0);
                 const prevVal = Number(prev?.[key] ?? currentVal);
-                const smoothingAlpha = key === "neutral"
-                  ? camEmotionEmaAlpha
-                  : Math.min(1, camEmotionEmaAlpha + 0.16);
+                // One alpha for every class. The old +0.16 for non-neutral let an
+                // expressive spike through instantly while neutral was damped —
+                // another face-api-era correction that skews a calibrated model.
+                const smoothingAlpha = camEmotionEmaAlpha;
                 smoothed[key] = prev
                   ? smoothingAlpha * currentVal + (1 - smoothingAlpha) * prevVal
                   : currentVal;
@@ -3978,6 +4257,7 @@ async function main() {
               const parsedSmoothed = parseEmotionFromExpressions(smoothed, emotionKeys, emotionStrictness);
               emotionKey = parsedSmoothed.key;
               emotionConfidence = parsedSmoothed.confidence;
+              emotionVector = parsedSmoothed.vector;
               cam.emotionEmaByName.set(name, smoothed);
               cam.emotionSeenAtByName.set(name, now);
             }
@@ -4012,6 +4292,10 @@ async function main() {
                 emotion: displayEmotionLabel,
                 emotionKey: emotionKey || "",
                 emotionConfidence: Number(emotionConfidence.toFixed(4)),
+                // Full per-frame distribution. Keeping only the winning label
+                // would hide near-ties, and a near-tie is exactly what the
+                // paired label ("sad+neutral") is meant to report.
+                emotionVector,
                 distance: Number(distance.toFixed(3)),
                 faceScore: Number(faceScore.toFixed(4)),
                 faceSide: Number(faceSide.toFixed(1)),
@@ -4167,7 +4451,14 @@ async function main() {
               if (shouldTakeSessionSample) {
                 session.lastSampleAt = now;
                 session.sampleCount += 1;
-                addSessionEmotionSample(session, person.emotionKey, person.emotionConfidence);
+                addSessionEmotionSample(
+                  session,
+                  person.emotionKey,
+                  person.emotionConfidence,
+                  now,
+                  emotionWindowMs,
+                  person.emotionVector,
+                );
               }
 
               const strictRecordable = isRecordablePerson(person);
@@ -4246,6 +4537,7 @@ async function main() {
               let resolvedEmotionConfidence = Number(person.emotionConfidence ?? 0);
               const sessionAgeMs = now - session.startedAt;
               const readyByRegistration = Boolean(person.justRegistered);
+              pruneSessionEmotionSamples(session, now, emotionWindowMs);
               const canResolveFromSamples =
                 session.sampleCount >= camSessionMinSamples &&
                 sessionAgeMs >= camSessionResolveWaitMs &&
@@ -4260,6 +4552,10 @@ async function main() {
                   allowFallbackMood: dbAllowMoodFallback,
                   fallbackMood: dbFallbackMood,
                   strictness: emotionStrictness,
+                  peakWeight: emotionPeakWeight,
+                  voteWeight: emotionVoteWeight,
+                  pairMaxGap: emotionPairMaxGap,
+                  pairMinLead: emotionPairMinLead,
                 });
                 moodLabel = resolved.moodLabel || moodLabel;
                 if (resolved.emotionLabel) {
@@ -4293,8 +4589,32 @@ async function main() {
               }
 
               const readyBySession = canResolveFromSamples && Boolean(moodLabel);
+
+              // Mood change inside an ongoing visit: the person never left, so the
+              // session stays, but the recorded mood is now wrong. Require the new
+              // label to hold for a while before writing, otherwise one noisy frame
+              // would emit a row.
+              let emotionChanged = false;
+              if (emotionChangeRecordEnabled && session.emittedAt && moodLabel) {
+                const previousLabel = session.emittedMoodLabel || session.lastMoodLabel;
+                if (previousLabel && moodLabel !== previousLabel) {
+                  if (session.pendingMoodLabel !== moodLabel) {
+                    session.pendingMoodLabel = moodLabel;
+                    session.pendingMoodSince = now;
+                  } else if (
+                    now - session.pendingMoodSince >= emotionChangeMinMs &&
+                    Number(resolvedEmotionConfidence ?? 0) >= emotionChangeMinConfidence
+                  ) {
+                    emotionChanged = true;
+                  }
+                } else {
+                  session.pendingMoodLabel = "";
+                  session.pendingMoodSince = 0;
+                }
+              }
+
               const shouldEmitSessionRecord =
-                !session.emittedAt && (readyBySession || readyByRegistration);
+                (!session.emittedAt && (readyBySession || readyByRegistration)) || emotionChanged;
               if (!shouldEmitSessionRecord) continue;
 
               const prevSeenAt = cam.lastSeenMatchedAt.get(person.name) ?? 0;
@@ -4364,6 +4684,12 @@ async function main() {
 
               cam.lastDbSentAt.set(cooldownKey, now);
               session.emittedAt = now;
+              session.emittedMoodLabel = String(moodLabel || "");
+              session.pendingMoodLabel = "";
+              session.pendingMoodSince = 0;
+              // The rolling window is NOT cleared here. Clearing it left the next
+              // frame as the only sample in the window — share 1.0 — so a single
+              // misread frame could immediately write a second, wrong row.
               session.lastMoodLabel = moodLabel;
             }
           }
@@ -4517,7 +4843,7 @@ async function main() {
     const now = Date.now();
     let confirmedTotal = 0;
     // Periodically clean up leaked TensorFlow.js tensors to prevent memory growth
-    if (now - lastTfCleanupAt >= 10000) {
+    if (faceApiReady && now - lastTfCleanupAt >= 10000) {
       try {
         faceapi.tf.engine().startScope();
         faceapi.tf.engine().endScope();

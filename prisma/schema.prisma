@@ -37,7 +37,13 @@ model Recognition {
 model FaceIdentity {
   id         String        @id @default(cuid())
   shortId    String        @unique
+  // Primary vector, EMA-updated on every confident match. Kept as-is so older
+  // code paths and the dashboard keep working.
   descriptor Json
+  // Template: up to FACE_TEMPLATE_MAX distinct vectors for this person, so one
+  // identity can cover several poses. Null on rows created before this existed;
+  // readers fall back to [descriptor].
+  descriptors Json?
   createdAt  DateTime      @default(now())
   updatedAt  DateTime      @updatedAt
   recognitions Recognition[]

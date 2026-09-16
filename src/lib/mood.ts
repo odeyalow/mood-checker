@@ -36,6 +36,14 @@ export function classifyMood(rawMood: string): MoodKind {
   const mood = rawMood.trim().toLowerCase();
   if (!mood) return "neutral";
 
+  // Paired labels like "neutral+sad" mean the two were within a few points of
+  // each other. Classify by the dominant half (written first) so a near-tie is
+  // not counted as fully negative just because the weaker half was.
+  if (mood.includes("+")) {
+    const dominant = mood.split("+")[0]?.trim();
+    if (dominant) return classifyMood(dominant);
+  }
+
   if (NEGATIVE_KEYWORDS.some((keyword) => mood.includes(keyword))) {
     return "negative";
   }

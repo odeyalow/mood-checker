@@ -17,7 +17,7 @@ Set these in `.env` for the single camera setup:
 ```bash
 NEXT_PUBLIC_CAMERA_1_GO2RTC_SRC=cam01_main
 NEXT_PUBLIC_CAMERA_1_NAME=Camera 1
-NEXT_PUBLIC_CAMERA_1_LOCATION=10.16.12.39
+NEXT_PUBLIC_CAMERA_1_LOCATION=192.168.0.225
 NEXT_PUBLIC_CAMERA_1_DIGITAL_ZOOM=1
 NEXT_PUBLIC_CAMERA_1_FRAME_OFFSET_Y=0
 NEXT_PUBLIC_ENABLE_WEBCAM_TILE=false
@@ -87,6 +87,12 @@ Optional identity env (app process):
 - `FACE_IDENTITY_MATCH_THRESHOLD=0.56`
 - `FACE_IDENTITY_POSTCHECK_THRESHOLD=0.60` (optional, background duplicate cleanup threshold)
 - `FACE_IDENTITY_DESCRIPTOR_ALPHA=0.2`
+- `FACE_TEMPLATE_MAX=8` (`1..32`) — how many distinct vectors one identity may keep.
+  A face seen from several angles needs more than one; matching scores against the
+  closest member. Set to `1` to get the old single-vector behaviour back.
+- `FACE_TEMPLATE_MIN_SPREAD=0.15` (`0..0.8`) — a new vector is only stored if it is
+  at least this far from every vector already held, so one pass in front of the
+  camera cannot fill the template with near-copies.
 - `RECOGNITION_QUALITY_GUARD_ENABLED=true`
 - `RECOGNITION_MIN_FACE_SCORE=0.12`
 - `RECOGNITION_MIN_FACE_SIDE_PX=20`
@@ -178,3 +184,4 @@ npm run pm2:start:worker
 npm run pm2:restart:worker
 npm run pm2:save
 ```
+

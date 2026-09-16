@@ -25,6 +25,18 @@
 *.pem
 .venv-worker/
 .tmp/
+__pycache__/
+*.pyc
+
+# Worker runtime output: live previews, face crops and rejected-face snapshots.
+public/_worker-live/
+public/_worker-snaps/
+public/_faces/
+public/_phantom-rejects/
+
+# Emotion ONNX model (~16 MB) — fetch with scripts/download-emotion-model.mjs
+worker/models/
+
 worker/recognition-queue.jsonl
 worker/recognition-queue.cursor
 worker/recognition-queue.cursor.tmp

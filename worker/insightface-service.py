@@ -14,6 +14,7 @@ from typing import Any
 
 import cv2
 import numpy as np
+import onnxruntime as ort
 
 
 def log(message: str) -> None:
@@ -155,6 +156,208 @@ def landmarks_from_face(face: Any) -> dict[str, list[dict[str, float]]]:
     }
 
 
+# HSEmotion (github.com/HSE-asavchenko/face-emotion-recognition) emits 8 AffectNet
+# classes in this exact order. The rest of this project speaks face-api's 7-key
+# vocabulary (see emotionKeys in node-detection-worker.mjs), so we fold the 8 into
+# the 7 here and everything downstream — smoothing, strictness, classifyMood —
+# keeps working untouched. "Contempt" has no face-api equivalent; it is folded into
+# "disgusted", the nearest class, and both are negative for classifyMood anyway.
+HSEMOTION_LABELS = (
+    "Anger",
+    "Contempt",
+    "Disgust",
+    "Fear",
+    "Happiness",
+    "Neutral",
+    "Sadness",
+    "Surprise",
+)
+HSEMOTION_TO_FACEAPI = {
+    "Anger": "angry",
+    "Contempt": "disgusted",
+    "Disgust": "disgusted",
+    "Fear": "fearful",
+    "Happiness": "happy",
+    "Neutral": "neutral",
+    "Sadness": "sad",
+    "Surprise": "surprised",
+}
+FACEAPI_EMOTION_KEYS = (
+    "neutral",
+    "happy",
+    "sad",
+    "angry",
+    "fearful",
+    "disgusted",
+    "surprised",
+)
+
+# EfficientNet-B0 trained on AffectNet: 224x224 RGB, NCHW, ImageNet normalisation.
+EMOTION_INPUT_SIZE = 224
+IMAGENET_MEAN = np.array([0.485, 0.456, 0.406], dtype=np.float32).reshape(3, 1, 1)
+IMAGENET_STD = np.array([0.229, 0.224, 0.225], dtype=np.float32).reshape(3, 1, 1)
+
+
+def parse_class_bias(raw: str) -> dict[str, float]:
+    """Per-class multipliers, e.g. "neutral=1.4,sad=0.8".
+
+    Emotion models carry a person-specific bias: a resting face with slightly
+    down-turned mouth corners reads as mildly sad, and no amount of temporal
+    smoothing fixes that because every frame agrees. Scaling the class scores
+    moves the decision boundary instead. Run scripts/calibrate-emotion.mjs to
+    get values measured from a real face rather than guessed.
+    """
+    bias: dict[str, float] = {}
+    for part in str(raw or "").split(","):
+        part = part.strip()
+        if not part or "=" not in part:
+            continue
+        key, _, value = part.partition("=")
+        key = key.strip().lower()
+        if key not in FACEAPI_EMOTION_KEYS:
+            continue
+        try:
+            weight = float(value)
+        except ValueError:
+            continue
+        if weight > 0:
+            bias[key] = weight
+    return bias
+
+
+def softmax(logits: np.ndarray) -> np.ndarray:
+    shifted = logits - np.max(logits)
+    exp = np.exp(shifted)
+    total = exp.sum()
+    if not np.isfinite(total) or total <= 0:
+        return np.full(logits.shape, 1.0 / max(1, logits.size), dtype=np.float32)
+    return (exp / total).astype(np.float32)
+
+
+class EmotionEngine:
+    """Runs HSEmotion directly on the already-detected face box.
+
+    The previous pipeline cropped the face and then ran face-api's TinyFaceDetector
+    *again* to re-find a face inside that crop (up to four detector passes per face)
+    before classifying. The box is already known here, so classification is a single
+    ONNX forward pass on the crop.
+    """
+
+    def __init__(self) -> None:
+        self._session: Any = None
+        self._input_name = ""
+        self._lock = threading.Lock()
+        self._model_path = ""
+        self._margin = max(0.0, min(0.6, env_float("WORKER_EMOTION_CROP_MARGIN", 0.1)))
+        self._class_bias = parse_class_bias(env_str("WORKER_EMOTION_CLASS_BIAS", ""))
+        self._fail_logged = False
+
+        if env_str("WORKER_EMOTION_BACKEND", "hsemotion").lower() in {"none", "off", "disabled"}:
+            log("emotion backend disabled (WORKER_EMOTION_BACKEND)")
+            return
+
+        default_path = str(ROOT_DIR / "worker" / "models" / "enet_b0_8_best_afew.onnx")
+        model_path = Path(env_str("WORKER_EMOTION_MODEL_PATH", default_path))
+        if not model_path.exists():
+            log(
+                f"emotion model not found at {model_path} — emotions fall back to face-api. "
+                "Run: node scripts/download-emotion-model.mjs"
+            )
+            return
+
+        try:
+            options = ort.SessionOptions()
+            options.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
+            intra = env_int("WORKER_ONNX_INTRA_THREADS", 0)
+            if intra > 0:
+                options.intra_op_num_threads = intra
+            providers = [
+                part.strip()
+                for part in env_str("WORKER_EMOTION_PROVIDERS", "CPUExecutionProvider").split(",")
+                if part.strip()
+            ] or ["CPUExecutionProvider"]
+            self._session = ort.InferenceSession(
+                str(model_path), sess_options=options, providers=providers
+            )
+            self._input_name = self._session.get_inputs()[0].name
+            self._model_path = str(model_path)
+            bias_note = (
+                " bias=" + ",".join(f"{k}={v:g}" for k, v in sorted(self._class_bias.items()))
+                if self._class_bias
+                else ""
+            )
+            log(f"emotion model loaded {model_path.name} providers={','.join(providers)}{bias_note}")
+        except Exception as exc:  # noqa: BLE001 - never let emotions break detection
+            self._session = None
+            log(f"emotion model failed to load err={exc} — emotions fall back to face-api")
+
+    @property
+    def enabled(self) -> bool:
+        return self._session is not None
+
+    @property
+    def info(self) -> dict[str, Any]:
+        return {
+            "emotionModel": Path(self._model_path).name if self._model_path else None,
+            "emotionEnabled": self.enabled,
+            "emotionClassBias": self._class_bias or None,
+        }
+
+    def _preprocess(self, frame_bgr: np.ndarray, box: dict[str, float]) -> np.ndarray | None:
+        height, width = frame_bgr.shape[:2]
+        pad_x = box["width"] * self._margin
+        pad_y = box["height"] * self._margin
+        x1 = int(max(0, math.floor(box["x"] - pad_x)))
+        y1 = int(max(0, math.floor(box["y"] - pad_y)))
+        x2 = int(min(width, math.ceil(box["x"] + box["width"] + pad_x)))
+        y2 = int(min(height, math.ceil(box["y"] + box["height"] + pad_y)))
+        if x2 - x1 < 16 or y2 - y1 < 16:
+            return None
+
+        crop = frame_bgr[y1:y2, x1:x2]
+        if crop.size == 0:
+            return None
+        resized = cv2.resize(
+            crop, (EMOTION_INPUT_SIZE, EMOTION_INPUT_SIZE), interpolation=cv2.INTER_LINEAR
+        )
+        rgb = cv2.cvtColor(resized, cv2.COLOR_BGR2RGB).astype(np.float32) / 255.0
+        chw = np.transpose(rgb, (2, 0, 1))
+        normalized = (chw - IMAGENET_MEAN) / IMAGENET_STD
+        return normalized[np.newaxis, ...].astype(np.float32)
+
+    def predict(self, frame_bgr: np.ndarray, box: dict[str, float]) -> dict[str, float] | None:
+        if self._session is None:
+            return None
+        try:
+            tensor = self._preprocess(frame_bgr, box)
+            if tensor is None:
+                return None
+            with self._lock:
+                outputs = self._session.run(None, {self._input_name: tensor})
+            logits = np.asarray(outputs[0], dtype=np.float32).reshape(-1)
+            if logits.size != len(HSEMOTION_LABELS):
+                return None
+            probs = softmax(logits)
+        except Exception as exc:  # noqa: BLE001
+            if not self._fail_logged:
+                log(f"emotion inference failed err={exc}")
+                self._fail_logged = True
+            return None
+
+        scores = {key: 0.0 for key in FACEAPI_EMOTION_KEYS}
+        for label, prob in zip(HSEMOTION_LABELS, probs):
+            scores[HSEMOTION_TO_FACEAPI[label]] += float(prob)
+
+        if self._class_bias:
+            for key, weight in self._class_bias.items():
+                scores[key] *= weight
+            total = sum(scores.values())
+            if total > 0:
+                for key in scores:
+                    scores[key] /= total
+        return scores
+
+
 class InsightFaceEngine:
     def __init__(self) -> None:
         from insightface.app import FaceAnalysis  # type: ignore
@@ -169,17 +372,28 @@ class InsightFaceEngine:
         if not providers:
             providers = ["CPUExecutionProvider"]
 
+        det_thresh = env_float("WORKER_INSIGHTFACE_DET_THRESH", 0.5)
+
         self._lock = threading.Lock()
-        self._app = FaceAnalysis(name=model_name, providers=providers)
-        self._app.prepare(ctx_id=0, det_size=(det_size, det_size))
+        # Only detection + recognition. A buffalo_* pack also ships 2d106det,
+        # 1k3d68 and genderage; without allowed_modules FaceAnalysis.get() runs
+        # all three on every detected face and this service throws the results
+        # away — it returns nothing but box, 5-point kps and the embedding.
+        self._app = FaceAnalysis(
+            name=model_name,
+            providers=providers,
+            allowed_modules=["detection", "recognition"],
+        )
+        self._app.prepare(ctx_id=0, det_thresh=det_thresh, det_size=(det_size, det_size))
         self._model_name = model_name
         self._det_size = det_size
+        self._det_thresh = det_thresh
         self._providers = providers
         self._descriptor_length = 0
         log(
             "loaded "
-            + f"model={self._model_name} det_size={self._det_size} "
-            + f"providers={','.join(self._providers)}"
+            + f"model={self._model_name} det_size={self._det_size} det_thresh={self._det_thresh} "
+            + f"modules=detection,recognition providers={','.join(self._providers)}"
         )
 
     @property
@@ -187,6 +401,7 @@ class InsightFaceEngine:
         return {
             "model": self._model_name,
             "detSize": self._det_size,
+            "detThresh": self._det_thresh,
             "providers": self._providers,
             "descriptorLength": self._descriptor_length,
         }
@@ -196,6 +411,7 @@ class InsightFaceEngine:
         frame_bgr: np.ndarray,
         *,
         include_descriptor: bool,
+        include_emotions: bool,
         max_faces: int,
         min_score: float,
     ) -> list[dict[str, Any]]:
@@ -227,6 +443,14 @@ class InsightFaceEngine:
         rows.sort(key=lambda item: float(item.get("score", 0.0)), reverse=True)
         if max_faces > 0:
             rows = rows[:max_faces]
+
+        # Classify only the faces actually being returned, after the max_faces cut.
+        if include_emotions and EMOTIONS.enabled:
+            for row in rows:
+                expressions = EMOTIONS.predict(frame_bgr, row["box"])
+                if expressions:
+                    row["expressions"] = expressions
+
         return rows
 
 
@@ -234,6 +458,7 @@ ROOT_DIR = Path(__file__).resolve().parent.parent
 load_env_file(ROOT_DIR / ".env.worker")
 load_env_file(ROOT_DIR / ".env")
 
+EMOTIONS = EmotionEngine()
 ENGINE = InsightFaceEngine()
 
 
@@ -254,7 +479,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self) -> None:
         if self.path.startswith("/health"):
-            self._json(200, {"ok": True, **ENGINE.info})
+            self._json(200, {"ok": True, **ENGINE.info, **EMOTIONS.info})
             return
         self._json(404, {"error": "not_found"})
 
@@ -277,13 +502,16 @@ class Handler(BaseHTTPRequestHandler):
 
         image_base64 = str(payload.get("imageBase64") or "").strip()
         rgb_base64 = str(payload.get("rgbBase64") or "").strip()
+        # JPEG first: a 960x540 frame is ~150 KB as JPEG against ~1.5 MB as raw RGB
+        # (~2 MB once base64-encoded), and cv2.imdecode costs only a few ms. Raw RGB
+        # stays supported so an older worker keeps working against this service.
         frame_bgr = None
-        if rgb_base64:
+        if image_base64:
+            frame_bgr = decode_image_from_base64(image_base64)
+        elif rgb_base64:
             width = int(payload.get("width") or 0)
             height = int(payload.get("height") or 0)
             frame_bgr = decode_rgb_from_base64(rgb_base64, width, height)
-        elif image_base64:
-            frame_bgr = decode_image_from_base64(image_base64)
         else:
             self._json(400, {"error": "image_required"})
             return
@@ -293,6 +521,7 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         include_descriptor = bool(payload.get("includeDescriptor", False))
+        include_emotions = bool(payload.get("includeEmotions", False))
         max_faces = max(1, min(20, int(payload.get("maxFaces", 10) or 10)))
         min_score = max(0.0, min(1.0, float(payload.get("minScore", 0.0) or 0.0)))
 
@@ -300,6 +529,7 @@ class Handler(BaseHTTPRequestHandler):
             faces = ENGINE.analyze(
                 frame_bgr,
                 include_descriptor=include_descriptor,
+                include_emotions=include_emotions,
                 max_faces=max_faces,
                 min_score=min_score,
             )
@@ -314,6 +544,7 @@ class Handler(BaseHTTPRequestHandler):
                 "ok": True,
                 "faces": faces,
                 **ENGINE.info,
+                **EMOTIONS.info,
             },
         )
 

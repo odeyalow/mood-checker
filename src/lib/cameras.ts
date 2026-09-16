@@ -24,7 +24,7 @@ function parseFrameOffsetY(rawValue: string | undefined): number | undefined {
 const camera1Go2rtcSrc = process.env.NEXT_PUBLIC_CAMERA_1_GO2RTC_SRC || "cam01_main";
 
 const camera1Name = process.env.NEXT_PUBLIC_CAMERA_1_NAME || "Camera 1";
-const camera1Location = process.env.NEXT_PUBLIC_CAMERA_1_LOCATION || "10.16.12.39";
+const camera1Location = process.env.NEXT_PUBLIC_CAMERA_1_LOCATION || "192.168.0.225";
 const camera1DigitalZoom = parseDigitalZoom(process.env.NEXT_PUBLIC_CAMERA_1_DIGITAL_ZOOM) ?? 1;
 const camera1FrameOffsetY =
   parseFrameOffsetY(process.env.NEXT_PUBLIC_CAMERA_1_FRAME_OFFSET_Y) ?? 0;

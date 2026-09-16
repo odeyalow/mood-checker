@@ -3,11 +3,13 @@ import { prisma } from "@/lib/prisma";
 import fs from "node:fs/promises";
 import path from "node:path";
 import {
-  descriptorDistance,
+  addToTemplate,
   generateFaceShortId,
   mergeDescriptor,
   normalizeDescriptor,
+  normalizeDescriptorList,
   normalizeFaceIdLength,
+  templateDistance,
 } from "@/lib/faces";
 
 export const dynamic = "force-dynamic";
@@ -251,19 +253,30 @@ export async function POST(request: Request) {
 
     const identities = await prisma.faceIdentity.findMany({
       where: blockedList.length ? { shortId: { notIn: blockedList } } : undefined,
-      select: { id: true, shortId: true, descriptor: true },
+      select: { id: true, shortId: true, descriptor: true, descriptors: true },
     });
 
-    const ranked: Array<{ id: string; shortId: string; descriptor: number[]; distance: number }> = [];
-    let best: { id: string; shortId: string; descriptor: number[]; distance: number } | null = null;
+    type Candidate = {
+      id: string;
+      shortId: string;
+      descriptor: number[];
+      template: number[][];
+      distance: number;
+    };
+    const ranked: Candidate[] = [];
+    let best: Candidate | null = null;
     for (const item of identities) {
       const known = normalizeDescriptor(item.descriptor);
       if (!known) continue;
-      const distance = descriptorDistance(descriptor, known);
+      // Match against the closest template member, not just the primary vector:
+      // that is what lets one identity cover several poses.
+      const stored = normalizeDescriptorList(item.descriptors);
+      const template = stored.length ? stored : [known];
+      const distance = templateDistance(template, descriptor);
       if (!Number.isFinite(distance)) continue;
-      ranked.push({ id: item.id, shortId: item.shortId, descriptor: known, distance });
+      ranked.push({ id: item.id, shortId: item.shortId, descriptor: known, template, distance });
       if (!best || distance < best.distance) {
-        best = { id: item.id, shortId: item.shortId, descriptor: known, distance };
+        best = { id: item.id, shortId: item.shortId, descriptor: known, template, distance };
       }
     }
     ranked.sort((a, b) => a.distance - b.distance);
@@ -277,9 +290,18 @@ export async function POST(request: Request) {
       const nextDescriptor = shouldUpdateDescriptor
         ? mergeDescriptor(best.descriptor, descriptor, updateAlpha)
         : best.descriptor;
+      // Only confident matches may extend the template, otherwise a wrong match
+      // would teach the identity someone else's face. addToTemplate returns null
+      // when this vector is too close to one we already hold.
+      const nextTemplate = shouldUpdateDescriptor
+        ? addToTemplate(best.template, descriptor)
+        : null;
       await prisma.faceIdentity.update({
         where: { id: best.id },
-        data: { descriptor: nextDescriptor },
+        data: {
+          descriptor: nextDescriptor,
+          ...(nextTemplate ? { descriptors: nextTemplate } : {}),
+        },
       });
       return NextResponse.json({
         shortId: best.shortId,
@@ -287,6 +309,8 @@ export async function POST(request: Request) {
         created: false,
         distance: Number(best.distance.toFixed(6)),
         descriptor: nextDescriptor,
+        descriptors: nextTemplate ?? best.template,
+        templateSize: (nextTemplate ?? best.template).length,
       });
     }
 
@@ -295,6 +319,7 @@ export async function POST(request: Request) {
       data: {
         shortId,
         descriptor,
+        descriptors: [descriptor],
       },
       select: { id: true, shortId: true, descriptor: true, createdAt: true },
     });
@@ -309,7 +334,7 @@ export async function POST(request: Request) {
         id: { not: created.id },
         ...(blockedList.length ? { shortId: { notIn: blockedList } } : {}),
       },
-      select: { id: true, shortId: true, descriptor: true, createdAt: true },
+      select: { id: true, shortId: true, descriptor: true, descriptors: true, createdAt: true },
     });
 
     let duplicateCandidate:
@@ -317,6 +342,7 @@ export async function POST(request: Request) {
           id: string;
           shortId: string;
           descriptor: number[];
+          template: number[][];
           createdAt: Date;
           distance: number;
           margin: number;
@@ -325,7 +351,9 @@ export async function POST(request: Request) {
     for (const item of postCheckCandidates) {
       const known = normalizeDescriptor(item.descriptor);
       if (!known) continue;
-      const distance = descriptorDistance(descriptor, known);
+      const storedTemplate = normalizeDescriptorList(item.descriptors);
+      const candidateTemplate = storedTemplate.length ? storedTemplate : [known];
+      const distance = templateDistance(candidateTemplate, descriptor);
       if (!Number.isFinite(distance)) continue;
       const competitor = ranked.find((candidate) => candidate.id !== item.id);
       const competitorDistance = Number(competitor?.distance ?? Number.POSITIVE_INFINITY);
@@ -341,6 +369,7 @@ export async function POST(request: Request) {
           id: item.id,
           shortId: item.shortId,
           descriptor: known,
+          template: candidateTemplate,
           createdAt: item.createdAt,
           distance,
           margin: candidateMargin,
@@ -368,13 +397,19 @@ export async function POST(request: Request) {
     if (duplicateCandidate && shouldMerge && duplicateCandidate.createdAt <= created.createdAt) {
       const targetSnapshotUrl = await getBestIdentitySnapshot(duplicateCandidate.id, duplicateCandidate.shortId);
       const mergedDescriptor = mergeDescriptor(duplicateCandidate.descriptor, descriptor, updateAlpha);
+      // The duplicate was a real sighting of this person, so its vector is worth
+      // keeping as another pose on the surviving identity.
+      const mergedTemplate = addToTemplate(duplicateCandidate.template, descriptor);
       const usedThreshold = mergeByStrict ? postCheckThreshold : postCheckRelaxedThreshold;
       const mergeRule = mergeByStrict ? "strict" : "relaxed";
 
       await prisma.$transaction([
         prisma.faceIdentity.update({
           where: { id: duplicateCandidate.id },
-          data: { descriptor: mergedDescriptor },
+          data: {
+            descriptor: mergedDescriptor,
+            ...(mergedTemplate ? { descriptors: mergedTemplate } : {}),
+          },
         }),
         prisma.recognition.updateMany({
           where: {
@@ -410,6 +445,8 @@ export async function POST(request: Request) {
         mergeRule,
         distance: Number(duplicateCandidate.distance.toFixed(6)),
         descriptor: mergedDescriptor,
+        descriptors: mergedTemplate ?? duplicateCandidate.template,
+        templateSize: (mergedTemplate ?? duplicateCandidate.template).length,
       });
     }
 
@@ -420,6 +457,8 @@ export async function POST(request: Request) {
       merged: false,
       distance: null,
       descriptor: created.descriptor,
+      descriptors: [descriptor],
+      templateSize: 1,
     });
   } catch (error) {
     console.error("[api/faces/identify] POST failed", error);

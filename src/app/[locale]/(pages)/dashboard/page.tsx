@@ -27,6 +27,7 @@ const L10N = {
     loadError: "Ошибка загрузки",
     connectionError: "Ошибка соединения",
     allTimeShare: "Доля за все время",
+    ppVsPrevDay: "п.п. ко вчера",
     exportData: "Экспорт данных",
   },
   kz: {
@@ -43,6 +44,7 @@ const L10N = {
     loadError: "Жүктеу қатесі",
     connectionError: "Байланыс қатесі",
     allTimeShare: "Барлық уақыттағы үлес",
+    ppVsPrevDay: "п.т. кешеге қарағанда",
     exportData: "Деректерді экспорттау",
   },
   en: {
@@ -59,6 +61,7 @@ const L10N = {
     loadError: "Load error",
     connectionError: "Connection error",
     allTimeShare: "All-time share",
+    ppVsPrevDay: "pp vs yesterday",
     exportData: "Export data",
   },
 } as const;
@@ -74,8 +77,15 @@ type DashboardStats = {
   connectedCameras: number;
   recognitionsLast24h: number;
   negativePercent: number;
-  negativeDeltaVsPrevDay: number;
+  // null when there is no previous day to compare against
+  negativeDeltaVsPrevDay: number | null;
   riskZoneCount: number;
+  positivePercent?: number;
+  neutralPercent?: number;
+  facesTotal?: number;
+  recognitionsLastDay?: number;
+  facesLastDay?: number;
+  riskZoneCountLastDay?: number;
 };
 
 type EmotionPoint = {
@@ -150,7 +160,7 @@ export default function DashboardPage({
             connectedCameras: 0,
             recognitionsLast24h: 0,
             negativePercent: 0,
-            negativeDeltaVsPrevDay: 0,
+            negativeDeltaVsPrevDay: null,
             riskZoneCount: 0,
           });
         }
@@ -220,7 +230,22 @@ export default function DashboardPage({
                   suffix="%"
                   styles={{ content: { color: "#dc2626" } }}
                 />
-                <Text type="secondary">{t.allTimeShare}</Text>
+                <Text type="secondary">
+                  {t.allTimeShare}
+                  {typeof stats?.negativeDeltaVsPrevDay === "number" ? (
+                    <>
+                      {" · "}
+                      <span
+                        style={{
+                          color: stats.negativeDeltaVsPrevDay > 0 ? "#dc2626" : "#16a34a",
+                        }}
+                      >
+                        {stats.negativeDeltaVsPrevDay > 0 ? "+" : ""}
+                        {stats.negativeDeltaVsPrevDay} {t.ppVsPrevDay}
+                      </span>
+                    </>
+                  ) : null}
+                </Text>
               </Card>
             </Col>
             <Col xs={24} md={12} lg={6} style={{ display: "flex" }}>

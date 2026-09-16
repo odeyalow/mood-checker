@@ -14,6 +14,10 @@ const eslintConfig = defineConfig([
     "next-env.d.ts",
     ".venv/**",
     ".venv-worker/**",
+    // Stale nested copy of the whole project (own .git/.next). Not part of
+    // the build — tsconfig excludes it too. Without this, eslint lints its
+    // bundled vendor chunks: ~11.5k extra problems.
+    "src/components/mood-checker/**",
   ]),
 ]);
 

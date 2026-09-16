@@ -1,3 +1,13 @@
+# Worker inference deps (CPU only).
+#
+# insightface 0.7.3 ships as an sdist with Cython sources: on Windows/Python 3.12
+# it needs MSVC build tools. For local testing use insightface 2.0 instead — it is
+# a pure-Python wheel (py3-none-any), requires Python >= 3.10, and is API-compatible
+# with everything insightface-service.py uses (FaceAnalysis name/providers/
+# allowed_modules, prepare(ctx_id, det_thresh, det_size), get()).
+#
+# Emotions need no extra package: onnxruntime + opencv + numpy below already cover
+# HSEmotion. Fetch the model with: node scripts/download-emotion-model.mjs
 numpy==1.26.4
 onnxruntime==1.17.3
 insightface==0.7.3

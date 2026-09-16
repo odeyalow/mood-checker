@@ -1,27 +1,11 @@
-/*
-  Warnings:
-
-  - You are about to alter the column `recognitions` on the `EmotionSnapshot` table. The data in that column could be lost. The data in that column will be cast from `Unsupported("json")` to `Json`.
-  - You are about to alter the column `students` on the `EmotionSnapshot` table. The data in that column could be lost. The data in that column will be cast from `Unsupported("json")` to `Json`.
-
-*/
--- RedefineTables
-PRAGMA defer_foreign_keys=ON;
-PRAGMA foreign_keys=OFF;
-CREATE TABLE "new_EmotionSnapshot" (
-    "id" TEXT NOT NULL PRIMARY KEY,
-    "bucketStart" DATETIME NOT NULL,
-    "totalStudents" INTEGER NOT NULL,
-    "positiveCount" INTEGER NOT NULL,
-    "neutralCount" INTEGER NOT NULL,
-    "negativeCount" INTEGER NOT NULL,
-    "students" JSONB NOT NULL,
-    "recognitions" JSONB NOT NULL,
-    "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
-);
-INSERT INTO "new_EmotionSnapshot" ("bucketStart", "createdAt", "id", "negativeCount", "neutralCount", "positiveCount", "recognitions", "students", "totalStudents") SELECT "bucketStart", "createdAt", "id", "negativeCount", "neutralCount", "positiveCount", "recognitions", "students", "totalStudents" FROM "EmotionSnapshot";
-DROP TABLE "EmotionSnapshot";
-ALTER TABLE "new_EmotionSnapshot" RENAME TO "EmotionSnapshot";
-CREATE UNIQUE INDEX "EmotionSnapshot_bucketStart_key" ON "EmotionSnapshot"("bucketStart");
-PRAGMA foreign_keys=ON;
-PRAGMA defer_foreign_keys=OFF;
+-- No-op, kept so the migration history stays linear.
+--
+-- This migration originally ALTERed "EmotionSnapshot" to change two column types,
+-- but the CREATE for that table lives in the LATER migration
+-- 20260203113000_add_emotion_snapshot. On an empty database it therefore failed
+-- ("no such table: EmotionSnapshot") and blocked every migration after it, which
+-- is why `prisma migrate deploy` could not build a fresh database.
+--
+-- The column types it wanted are exactly what 20260203113000 creates, so dropping
+-- the statements here loses nothing and makes the chain replayable.
+SELECT 1;
