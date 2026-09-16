@@ -1,18 +1,18 @@
 #!/usr/bin/env node
 /*
- * Measures the per-class emotion bias for a particular face.
+ * Measures the per-class emotion bias for a particular face and camera.
  *
- * Emotion models carry a person-specific offset: a resting face can read as
- * mildly sad or angry, and every frame agrees, so no amount of temporal
- * smoothing helps. This samples real frames of YOUR neutral face and computes
- * the multiplier that moves the decision boundary just far enough.
+ * Emotion models carry an offset that depends on the face AND on the optics:
+ * a resting face can read as mildly sad, or a camera's contrast and compression
+ * can make "happy" bleed onto neutral faces. Every frame agrees, so no amount of
+ * temporal smoothing helps — the decision boundary has to move instead.
  *
- * Usage — with the stack running (`npm run dev:all`), stand in front of the
- * camera with a relaxed neutral face and run:
+ * Usage — with the stack running, stand in front of the camera holding the
+ * expression you are calibrating, and run:
  *
- *   node scripts/calibrate-emotion.mjs
+ *   node scripts/calibrate-emotion.mjs                      # neutral face
+ *   node scripts/calibrate-emotion.mjs --label happy        # while smiling
  *   node scripts/calibrate-emotion.mjs --seconds 20 --target 0.95
- *   node scripts/calibrate-emotion.mjs --label neutral
  */
 import fs from "node:fs";
 import path from "node:path";
@@ -52,17 +52,21 @@ const SRC = arg("--src", "cam-01");
 
 // Same source the worker uses: go2rtc directly unless overridden.
 const GO2RTC = (process.env.GO2RTC_BASE_URL || "http://127.0.0.1:1984").replace(/\/+$/, "");
-const STREAM = (process.env.WORKER_CAMERA_SOURCES || "")
-  .split(",")
-  .map((pair) => pair.split("=")[1]?.trim())
-  .filter(Boolean)[0] || SRC;
+const STREAM =
+  (process.env.WORKER_CAMERA_SOURCES || "")
+    .split(",")
+    .map((pair) => pair.split("=")[1]?.trim())
+    .filter(Boolean)[0] || SRC;
 const FRAME_URL = (process.env.WORKER_FRAME_API_BASE || "").trim()
   ? `${process.env.WORKER_FRAME_API_BASE.replace(/\/+$/, "")}?src=${STREAM}`
   : `${GO2RTC}/api/frame.jpeg?src=${STREAM}` +
     `&width=${process.env.GO2RTC_FRAME_WIDTH || 1920}` +
     `&height=${process.env.GO2RTC_FRAME_HEIGHT || 1080}` +
     `&quality=${process.env.GO2RTC_FRAME_QUALITY || 82}`;
-const SERVICE = (process.env.WORKER_INSIGHTFACE_ENDPOINT || "http://127.0.0.1:8765").replace(/\/+$/, "");
+const SERVICE = (process.env.WORKER_INSIGHTFACE_ENDPOINT || "http://127.0.0.1:8765").replace(
+  /\/+$/,
+  "",
+);
 
 async function grabFrame() {
   const res = await fetch(FRAME_URL, { cache: "no-store" });
@@ -97,21 +101,28 @@ function quantile(sorted, q) {
   return lo === hi ? sorted[lo] : sorted[lo] + (sorted[hi] - sorted[lo]) * (pos - lo);
 }
 
+const round05 = (value, dir) =>
+  dir === "down" ? Math.floor(value * 20) / 20 : Math.ceil(value * 20) / 20;
+
 async function main() {
   console.log(`\nCalibrating "${LABEL}" for ${SECONDS}s.`);
-  console.log("Hold a relaxed, neutral expression and look at the camera.\n");
+  console.log(`Hold a genuine "${LABEL}" expression and look at the camera.\n`);
 
-  const health = await fetch(`${SERVICE}/health`).then((r) => r.json()).catch(() => null);
+  const health = await fetch(`${SERVICE}/health`)
+    .then((r) => r.json())
+    .catch(() => null);
   if (!health?.emotionEnabled) {
-    console.error(`No emotion model at ${SERVICE}. Start the stack first (npm run dev:all).`);
+    console.error(`No emotion model at ${SERVICE}. Is the worker running?`);
     return 1;
   }
   if (health.emotionClassBias) {
     console.log(`NOTE: a bias is already active: ${JSON.stringify(health.emotionClassBias)}`);
-    console.log("      Clear WORKER_EMOTION_CLASS_BIAS and restart before calibrating.\n");
+    console.log("      Numbers below are measured THROUGH it, so they refine rather than");
+    console.log("      replace it. Clear WORKER_EMOTION_CLASS_BIAS and restart for a");
+    console.log("      reading of the raw model.\n");
   }
 
-  const ratios = [];        // how much `LABEL` must be scaled to win this frame
+  const samples = []; // full score vector of every frame
   const winners = new Map();
   let frames = 0;
   let noFace = 0;
@@ -142,9 +153,11 @@ async function main() {
         bestOtherKey = key;
       }
     }
-    const winner = own >= bestOther ? LABEL : bestOtherKey;
-    winners.set(winner, (winners.get(winner) ?? 0) + 1);
-    ratios.push(own > 0 ? bestOther / own : Number.POSITIVE_INFINITY);
+    winners.set(
+      own >= bestOther ? LABEL : bestOtherKey,
+      (winners.get(own >= bestOther ? LABEL : bestOtherKey) ?? 0) + 1,
+    );
+    samples.push(scores);
 
     if (Date.now() - lastDot > 1000) {
       process.stdout.write(".");
@@ -156,33 +169,102 @@ async function main() {
 
   if (frames < 10) {
     console.error(`Only ${frames} usable frames (${noFace} without a face).`);
-    console.error("Is the camera reachable? Check: npm run diagnose");
+    console.error("Is the camera reachable and is a face in view? Check: npm run diagnose");
     return 1;
   }
 
-  const sorted = ratios.filter(Number.isFinite).sort((a, b) => a - b);
   const correct = winners.get(LABEL) ?? 0;
-  console.log(`frames analysed : ${frames}`);
-  console.log(`"${LABEL}" already won : ${correct} (${((correct / frames) * 100).toFixed(0)}%)`);
+  console.log(`frames analysed  : ${frames}`);
+  console.log(`"${LABEL}" won        : ${correct} (${((correct / frames) * 100).toFixed(0)}%)`);
+
+  if (correct === frames) {
+    console.log(`\nNothing to change — "${LABEL}" already wins every frame.`);
+    console.log("If the stored label still looks wrong, the problem is in the aggregation");
+    console.log("window, not the model: see WORKER_EMOTION_WINDOW_MS.\n");
+    return 0;
+  }
+
   console.log("what the model saw instead:");
   for (const [key, count] of [...winners.entries()].sort((a, b) => b[1] - a[1])) {
     if (key === LABEL) continue;
     console.log(`   ${key.padEnd(10)} ${count} frame(s)  ${((count / frames) * 100).toFixed(0)}%`);
   }
 
-  const needed = quantile(sorted, TARGET);
-  const recommended = Math.max(1, Math.ceil(needed * 1.05 * 20) / 20); // round up to .05
-  console.log(`\nto win ${(TARGET * 100).toFixed(0)}% of frames, "${LABEL}" needs x${needed.toFixed(2)}`);
-
-  if (recommended <= 1.01) {
-    console.log("\nNo bias needed — the model already reads this face correctly.");
-    console.log("If it still looks wrong in the DB, the issue is aggregation, not the model.");
-    return 0;
+  /*
+   * Two ways to fix the same misread, and the right one depends on its shape.
+   * Lifting LABEL raises it against EVERY class — correct when the model is
+   * generally under-confident about it. Damping one rival is surgical and leaves
+   * the other emotions untouched — correct when a single class is bleeding onto
+   * faces where it does not belong.
+   */
+  const rivals = [];
+  for (const key of Object.keys(samples[0] ?? {})) {
+    if (key === LABEL) continue;
+    const beat = samples.filter(
+      (scores) => Number(scores[key] ?? 0) > Number(scores[LABEL] ?? 0),
+    ).length;
+    if (!beat) continue;
+    // How far this rival must be scaled down to stop outranking LABEL.
+    const ratios = samples
+      .map((scores) => {
+        const own = Number(scores[LABEL] ?? 0);
+        const rival = Number(scores[key] ?? 0);
+        return rival > 0 ? own / rival : Number.POSITIVE_INFINITY;
+      })
+      .filter(Number.isFinite)
+      .sort((a, b) => a - b);
+    if (!ratios.length) continue;
+    const needed = quantile(ratios, 1 - TARGET);
+    if (needed < 0.98) {
+      rivals.push({ key, multiplier: Math.max(0.05, round05(needed * 0.95, "down")), beat });
+    }
   }
-  console.log(`\nAdd to .env.worker and restart:\n`);
-  console.log(`  WORKER_EMOTION_CLASS_BIAS=${LABEL}=${recommended.toFixed(2)}\n`);
-  console.log("Then re-run this to confirm, and check a real smile is still detected:");
-  console.log("  node scripts/calibrate-emotion.mjs --label happy   (while smiling)\n");
+  rivals.sort((a, b) => b.beat - a.beat);
+
+  // Lifting LABEL: it has to clear whichever rival is strongest in each frame.
+  const lifts = samples
+    .map((scores) => {
+      const own = Number(scores[LABEL] ?? 0);
+      let best = 0;
+      for (const [key, value] of Object.entries(scores)) {
+        if (key !== LABEL && Number(value) > best) best = Number(value);
+      }
+      return own > 0 ? best / own : Number.POSITIVE_INFINITY;
+    })
+    .filter(Number.isFinite)
+    .sort((a, b) => a - b);
+  const lift = Math.max(1, round05(quantile(lifts, TARGET) * 1.05, "up"));
+
+  console.log(`\nTo make "${LABEL}" win ${(TARGET * 100).toFixed(0)}% of these frames:\n`);
+
+  if (rivals.length) {
+    console.log("  damp only the classes that actually intrude (surgical):");
+    for (const item of rivals) {
+      console.log(
+        `     ${item.key.padEnd(10)} x${item.multiplier.toFixed(2)}   ` +
+          `outranked "${LABEL}" in ${item.beat} of ${frames} frames`,
+      );
+    }
+    const line = rivals.map((item) => `${item.key}=${item.multiplier.toFixed(2)}`).join(",");
+    console.log(`\n     WORKER_EMOTION_CLASS_BIAS=${line}\n`);
+
+    const harsh = rivals.filter((item) => item.multiplier <= 0.3);
+    if (harsh.length) {
+      console.log(`  WARNING: ${harsh.map((h) => h.key).join(", ")} would be damped very hard.`);
+      console.log("  That suppresses the emotion everywhere, not only on this face. Verify it");
+      console.log("  is still detected when genuinely present before keeping the value.\n");
+    }
+  }
+
+  if (lift > 1.01) {
+    console.log(`  or lift "${LABEL}" against everything (blunt):\n`);
+    console.log(`     WORKER_EMOTION_CLASS_BIAS=${LABEL}=${lift.toFixed(2)}\n`);
+  }
+
+  console.log("Entries combine, so both forms can sit on one line.");
+  console.log("After editing .env.worker restart the worker, then check the other direction");
+  console.log("so the fix has not blinded the model to a real expression:");
+  console.log("  node scripts/calibrate-emotion.mjs --label happy   (while actually smiling)\n");
   return 0;
 }
 
