@@ -179,7 +179,15 @@ if (!fs.existsSync(statusFile)) {
 
 console.log("\n5. InsightFace service");
 const endpoint = (process.env.WORKER_INSIGHTFACE_ENDPOINT || "http://127.0.0.1:8765").replace(/\/+$/, "");
-const health = await get(`${endpoint}/health`, 4000);
+// The worker spawns this service, and it needs a couple of seconds to load the
+// models before it answers. Running diagnose right after a restart would
+// otherwise report a failure that fixes itself a moment later.
+let health = await get(`${endpoint}/health`, 4000);
+for (let attempt = 0; attempt < 4 && health.status === 0; attempt += 1) {
+  if (attempt === 0) console.log("        still loading models, waiting…");
+  await new Promise((resolve) => setTimeout(resolve, 3000));
+  health = await get(`${endpoint}/health`, 4000);
+}
 if (health.status === 0) {
   bad(
     `no answer from ${endpoint}`,
