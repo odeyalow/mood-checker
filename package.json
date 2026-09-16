@@ -7,6 +7,7 @@
     "dev:all": "node scripts/dev-all.mjs",
     "diagnose": "node scripts/diagnose.mjs",
     "calibrate:emotion": "node scripts/calibrate-emotion.mjs",
+    "measure:camera": "node scripts/measure-camera.mjs",
     "build": "next build",
     "start": "node server.js",
     "pm2:start": "pm2 start ecosystem.config.cjs --only mood-checker-app --env production",
