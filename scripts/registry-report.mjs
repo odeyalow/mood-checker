@@ -161,6 +161,31 @@ async function main() {
   }
   process.stdout.write("  (many identities under ~0.4 => lots of duplicates in the registry)\n\n");
 
+  // A histogram that stops at ">=0.60" hides the difference between 0.61 — a
+  // degraded but still usable embedding — and 0.95, where no identity
+  // information survives at all. That distinction decides whether changing
+  // WORKER_MATCH_THRESHOLD can help or whether the face simply needs more
+  // pixels. With a handful of identities the exact numbers fit on screen.
+  if (n >= 2 && n <= 12) {
+    process.stdout.write("--- exact pairwise distances ---\n");
+    process.stdout.write(
+      "        " + items.map((it) => String(it.shortId).padStart(8)).join("") + "\n",
+    );
+    for (let i = 0; i < n; i += 1) {
+      let row = String(items[i].shortId).padEnd(8);
+      for (let j = 0; j < n; j += 1) {
+        row += i === j ? "       -" : cosineDistance(items[i].vec, items[j].vec).toFixed(2).padStart(8);
+      }
+      process.stdout.write(row + "\n");
+    }
+    process.stdout.write("\n");
+    process.stdout.write("  same person, good crops : 0.20-0.50\n");
+    process.stdout.write("  same person, poor crops : 0.50-0.70  (a higher threshold can help)\n");
+    process.stdout.write("  different people        : 0.80-1.00\n");
+    process.stdout.write("  Above ~0.75 between crops of the SAME face means too little detail\n");
+    process.stdout.write("  survived the capture — no threshold fixes that.\n\n");
+  }
+
   process.stdout.write("--- duplicate clusters at merge thresholds ---\n");
   const clustersByT = [];
   for (let t = 0; t < thresholds.length; t += 1) {
