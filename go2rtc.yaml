@@ -5,8 +5,25 @@ rtsp:
   listen: ":8554"
 
 streams:
+  # Xiongmai / XMeye recorder (NetSurveillance, "Sofia" DVRIP protocol).
+  #
+  # This device exposes NO RTSP at all — a full port scan found only 80 (ActiveX
+  # web UI), 34567 (DVRIP), 30100 and 44884. Port 554 is closed, so the Dahua
+  # style rtsp://.../cam/realmonitor URL this config used to carry could never
+  # have worked here; it belonged to a different device.
+  #
+  # go2rtc speaks DVRIP natively, so it talks to the recorder directly and
+  # republishes the stream as RTSP for the worker.
+  #
+  # channel is ZERO-BASED here: the old Dahua URL said channel=16, which is the
+  # 16th channel counting from one, i.e. index 15 below.
+  # subtype: 0 = main stream, 1 = substream (smaller, use it if the CPU struggles).
   cam01_main:
-    # Dahua main stream (channel 16, subtype 0 = main quality)
-    - "rtsp://danil:danil_2004@192.168.0.225:46056/cam/realmonitor?channel=16&subtype=0"
-    # Если не работает — попробовать substream:
-    # - "rtsp://danil:danil_2004@192.168.0.225:46056/cam/realmonitor?channel=16&subtype=1"
+    - "dvrip://danil:danil_2004@192.168.0.225:34567?channel=15&subtype=0"
+
+  # Handy while finding the right channel — point the worker at one of these,
+  # or just open http://<host>:1984 and watch them side by side.
+  # cam01_ch0:
+  #   - "dvrip://danil:danil_2004@192.168.0.225:34567?channel=0&subtype=0"
+  # cam01_ch1:
+  #   - "dvrip://danil:danil_2004@192.168.0.225:34567?channel=1&subtype=0"
