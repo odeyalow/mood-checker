@@ -12,6 +12,17 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 
+# Must be set BEFORE onnxruntime is imported: it reads these when it builds its
+# thread pools. Without an explicit count ORT tries to pin each thread to a core
+# with pthread_setaffinity_np, which a container with restricted CPU affinity
+# refuses — producing a wall of "[E:onnxruntime] ... error code: 22" lines. The
+# work still runs, unpinned; this just keeps the logs readable.
+_threads = os.getenv("WORKER_ONNX_INTRA_THREADS", "").strip()
+if not _threads or _threads == "0":
+    _threads = str(max(1, len(os.sched_getaffinity(0)) if hasattr(os, "sched_getaffinity") else (os.cpu_count() or 1)))
+os.environ.setdefault("OMP_NUM_THREADS", _threads)
+os.environ.setdefault("OMP_WAIT_POLICY", "PASSIVE")
+
 import cv2
 import numpy as np
 import onnxruntime as ort
@@ -268,7 +279,8 @@ class EmotionEngine:
         try:
             options = ort.SessionOptions()
             options.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
-            intra = env_int("WORKER_ONNX_INTRA_THREADS", 0)
+            # Same reasoning as the OMP_NUM_THREADS block at the top of this file.
+            intra = env_int("WORKER_ONNX_INTRA_THREADS", int(_threads))
             if intra > 0:
                 options.intra_op_num_threads = intra
             providers = [
