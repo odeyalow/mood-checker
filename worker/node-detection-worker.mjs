@@ -1480,6 +1480,106 @@ async function readWorkerZoomState(filePath) {
   }
 }
 
+/*
+ * Continuous MJPEG reader.
+ *
+ * One JPEG per HTTP request costs a full decode plus a wait for the next
+ * keyframe — measured at 623-711 ms on an H265 camera, which is about three
+ * frames for someone walking past. Reading the stream once and keeping the most
+ * recent frame in memory removes both: the loop gets whatever arrived a few
+ * milliseconds ago instead of asking for a new one and waiting.
+ *
+ * We deliberately keep only the latest frame. Detection takes ~145 ms, so a
+ * queue would only build a backlog of stale images; freshness matters more than
+ * completeness here.
+ */
+function createMjpegReader({ url, staleMs, log: logLine }) {
+  const state = {
+    latest: null,
+    latestAt: 0,
+    connected: false,
+    stopped: false,
+    frames: 0,
+    lastErrorAt: 0,
+  };
+
+  const SOI = Buffer.from([0xff, 0xd8]);
+  const EOI = Buffer.from([0xff, 0xd9]);
+
+  async function connectOnce() {
+    const controller = new AbortController();
+    const res = await fetch(url, { signal: controller.signal, cache: "no-store" });
+    if (!res.ok || !res.body) throw new Error(`mjpeg_http_${res.status}`);
+    state.connected = true;
+    logLine(`[mjpeg] connected ${url}`);
+
+    let buf = Buffer.alloc(0);
+    try {
+      for await (const chunk of res.body) {
+        if (state.stopped) break;
+        buf = buf.length ? Buffer.concat([buf, Buffer.from(chunk)]) : Buffer.from(chunk);
+
+        // Pull out every complete JPEG the buffer holds, keeping the last one.
+        for (;;) {
+          const start = buf.indexOf(SOI);
+          if (start < 0) {
+            if (buf.length > 4_000_000) buf = Buffer.alloc(0);
+            break;
+          }
+          const end = buf.indexOf(EOI, start + 2);
+          if (end < 0) {
+            if (start > 0) buf = buf.subarray(start);
+            // A single frame should never reach this size; treat it as garbage.
+            if (buf.length > 16_000_000) buf = Buffer.alloc(0);
+            break;
+          }
+          state.latest = Buffer.from(buf.subarray(start, end + 2));
+          state.latestAt = Date.now();
+          state.frames += 1;
+          buf = buf.subarray(end + 2);
+        }
+      }
+    } finally {
+      controller.abort();
+      state.connected = false;
+    }
+  }
+
+  (async () => {
+    let backoffMs = 500;
+    while (!state.stopped) {
+      try {
+        await connectOnce();
+        backoffMs = 500;
+      } catch (err) {
+        const now = Date.now();
+        if (now - state.lastErrorAt >= 5000) {
+          logLine(`[mjpeg] disconnected err=${String(err?.message ?? err)}`);
+          state.lastErrorAt = now;
+        }
+      }
+      if (state.stopped) break;
+      await sleep(backoffMs);
+      backoffMs = Math.min(10000, Math.round(backoffMs * 1.7));
+    }
+  })();
+
+  return {
+    /** Newest frame, or null when nothing fresh has arrived. */
+    take() {
+      if (!state.latest) return null;
+      if (staleMs > 0 && Date.now() - state.latestAt > staleMs) return null;
+      return state.latest;
+    },
+    stats() {
+      return { connected: state.connected, frames: state.frames, ageMs: Date.now() - state.latestAt };
+    },
+    stop() {
+      state.stopped = true;
+    },
+  };
+}
+
 async function fetchFrame(frameUrl, timeoutMs) {
   const url = new URL(frameUrl);
   url.searchParams.set("t", String(Date.now()));
@@ -1924,6 +2024,14 @@ async function main() {
 
   const frameApiBaseRaw = (process.env.WORKER_FRAME_API_BASE || "").trim();
   const frameApiBase = (frameApiBaseRaw || buildDefaultFrameApiBase()).replace(/\/+$/, "");
+
+  // "mjpeg" holds one connection open and serves the newest frame from memory.
+  // "snapshot" issues an HTTP request per frame, which costs a decode plus a wait
+  // for the next keyframe — fine for a still scene, far too slow for someone
+  // walking past.
+  const frameMode = String(process.env.WORKER_FRAME_MODE || "snapshot").trim().toLowerCase();
+  const mjpegStaleMs = Math.max(200, envInt("WORKER_MJPEG_STALE_MS", 2000));
+  let mjpegReader = null;
   const frameTimeoutMs = Math.max(500, envInt("WORKER_FRAME_TIMEOUT_MS", 3000));
   const frameAbortRetryEnabled = envBool("WORKER_FRAME_ABORT_RETRY_ENABLED", true);
   const frameAbortRetryTimeoutMs = Math.max(500, envInt("WORKER_FRAME_ABORT_RETRY_TIMEOUT_MS", 5200));
@@ -2825,7 +2933,16 @@ async function main() {
     return true;
   };
 
-  log(`started cameras=${states.length} frame_api=${frameApiBase}`);
+  if (frameMode === "mjpeg") {
+    const go2rtcBase = (process.env.GO2RTC_BASE_URL || "http://127.0.0.1:1984").replace(/\/+$/, "");
+    const mjpegUrl =
+      String(process.env.WORKER_MJPEG_URL || "").trim() ||
+      `${go2rtcBase}/api/stream.mjpeg?src=${encodeURIComponent(states[0]?.src ?? "")}`;
+    mjpegReader = createMjpegReader({ url: mjpegUrl, staleMs: mjpegStaleMs, log });
+    log(`[mjpeg] frame_mode=mjpeg url=${mjpegUrl} stale_ms=${mjpegStaleMs}`);
+  }
+
+  log(`started cameras=${states.length} frame_api=${frameApiBase} frame_mode=${frameMode}`);
   log(
     `pipeline parallel_cameras=${parallelCameraLimit} db_writer=${dbWriterMode} ` +
       `db_queue_max=${dbQueueMaxSize} db_batch=${dbQueueBatchSize} db_timeout_ms=${dbRequestTimeoutMs}`,
@@ -2861,6 +2978,7 @@ async function main() {
   let stopping = false;
   const stop = () => {
     stopping = true;
+    mjpegReader?.stop();
     if (insightFaceServiceChild && !insightFaceServiceChild.killed) {
       try {
         insightFaceServiceChild.kill("SIGTERM");
@@ -3724,9 +3842,11 @@ async function main() {
       });
 
     try {
-      let jpg;
+      let jpg = mjpegReader?.take() ?? null;
       try {
-        jpg = await fetchFrame(frameUrl, frameTimeoutMs);
+        // Falls through to a one-shot request whenever the stream is down or its
+        // newest frame is already stale, so a reconnect never stops detection.
+        if (!jpg) jpg = await fetchFrame(frameUrl, frameTimeoutMs);
       } catch (err) {
         if (!frameAbortRetryEnabled || !isRetriableFrameError(err)) throw err;
         const retryUrl = buildAbortFallbackFrameUrl(
