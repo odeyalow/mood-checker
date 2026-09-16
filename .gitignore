@@ -25,6 +25,10 @@
 *.pem
 .venv-worker/
 .tmp/
+# Stale nested copy of this same project; kept out of the repo so a clone does
+# not get a phantom submodule. Safe to delete locally.
+src/components/mood-checker/
+
 __pycache__/
 *.pyc
 
