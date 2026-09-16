@@ -13,6 +13,7 @@
  * any code.
  *
  *   node scripts/measure-camera.mjs
+ *   node scripts/measure-camera.mjs --stream cam01_mjpeg
  *   node scripts/measure-camera.mjs --samples 25 --walk 1.4
  */
 import fs from "node:fs";
@@ -51,11 +52,15 @@ const WALK_SPEED = Number.parseFloat(arg("--walk", "1.4")); // m/s, normal indoo
 const CROSS_METRES = Number.parseFloat(arg("--cross", "3")); // width of the useful zone
 
 const GO2RTC = (process.env.GO2RTC_BASE_URL || "http://127.0.0.1:1984").replace(/\/+$/, "");
+// --stream wins over the config: this file reads .env.worker with override, so an
+// env var set on the command line would otherwise be overwritten by the file.
 const STREAM =
+  arg("--stream", "") ||
   (process.env.WORKER_CAMERA_SOURCES || "")
     .split(",")
     .map((pair) => pair.split("=")[1]?.trim())
-    .filter(Boolean)[0] || "cam01_main";
+    .filter(Boolean)[0] ||
+  "cam01_main";
 const WIDTH = process.env.GO2RTC_FRAME_WIDTH || 1920;
 const HEIGHT = process.env.GO2RTC_FRAME_HEIGHT || 1080;
 const QUALITY = process.env.GO2RTC_FRAME_QUALITY || 82;
