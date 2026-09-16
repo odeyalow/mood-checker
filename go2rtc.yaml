@@ -27,3 +27,16 @@ streams:
   #   - "dvrip://danil:danil_2004@192.168.0.225:34567?channel=0&subtype=0"
   # cam01_ch1:
   #   - "dvrip://danil:danil_2004@192.168.0.225:34567?channel=1&subtype=0"
+
+  # Same camera, transcoded to MJPEG by ffmpeg.
+  #
+  # Every MJPEG frame is a keyframe, so /api/frame.jpeg against this source has
+  # nothing to wait for — the ~470 ms keyframe wait measured on cam01_main goes
+  # away, and the H.264 decode happens once in a running pipeline instead of once
+  # per HTTP request.
+  #
+  # Costs a continuous ffmpeg process. Try it before committing to it:
+  #   npm run measure:camera        (after pointing WORKER_CAMERA_SOURCES here)
+  # and watch CPU with `top` — this box has 4 cores and the detector needs them.
+  cam01_mjpeg:
+    - "ffmpeg:cam01_main#video=mjpeg"
