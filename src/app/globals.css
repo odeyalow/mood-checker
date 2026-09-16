@@ -93,6 +93,10 @@ body {
 .camera-media {
   position: relative;
   width: 100%;
+  /* With a single camera the grid hands this the full row, and 16:9 at full
+     width makes the tile tall enough to push the pipeline log off screen.
+     Capping the width shrinks the height with it, since the ratio is fixed. */
+  max-width: 82%;
   aspect-ratio: 16 / 9;
   border-radius: 14px;
   overflow: hidden;
@@ -324,5 +328,12 @@ body {
 @media (max-width: 1024px) {
   .auth-split {
     grid-template-columns: 1fr;
+  }
+}
+
+@media (max-width: 768px) {
+  /* On a phone the tile is already small; let it use the whole width again. */
+  .camera-media {
+    max-width: 100%;
   }
 }
