@@ -27,6 +27,40 @@ import cv2
 import numpy as np
 import onnxruntime as ort
 
+# InsightFace builds its own InferenceSessions and passes no SessionOptions, so
+# every buffalo_l model leaves intra_op_num_threads at the default. ONNX Runtime
+# then pins each worker thread to a core, which a container with restricted CPU
+# affinity refuses — one "[E:onnxruntime] ... error code: 22" line per thread per
+# model, drowning the real output in pm2 logs. Setting OMP_NUM_THREADS above is
+# not enough: that governs OpenMP, not ORT's own pool.
+#
+# Wrapping the constructor is the only hook we have into sessions we do not
+# create. The work still runs on the same number of threads — they are simply
+# not pinned, which is exactly what the error message asks for.
+_ORT_SESSION_CLS = ort.InferenceSession
+
+
+class _ThreadPinnedSession(_ORT_SESSION_CLS):  # type: ignore[misc, valid-type]
+    """InferenceSession that always carries an explicit intra-op thread count.
+
+    Must stay a CLASS, not a factory function: insightface's model_zoo does
+    `class PickableInferenceSession(onnxruntime.InferenceSession)`, so replacing
+    the attribute with a function breaks the import outright.
+    """
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        # sess_options is the second positional parameter; only fill it in when
+        # the caller left it out entirely.
+        if len(args) < 2 and kwargs.get("sess_options") is None:
+            options = ort.SessionOptions()
+            options.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
+            options.intra_op_num_threads = int(_threads)
+            kwargs["sess_options"] = options
+        super().__init__(*args, **kwargs)
+
+
+ort.InferenceSession = _ThreadPinnedSession
+
 
 def log(message: str) -> None:
     ts = datetime.now(timezone.utc).isoformat(timespec="seconds")
@@ -279,7 +313,6 @@ class EmotionEngine:
         try:
             options = ort.SessionOptions()
             options.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
-            # Same reasoning as the OMP_NUM_THREADS block at the top of this file.
             intra = env_int("WORKER_ONNX_INTRA_THREADS", int(_threads))
             if intra > 0:
                 options.intra_op_num_threads = intra
