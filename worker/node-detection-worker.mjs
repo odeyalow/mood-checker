@@ -3566,6 +3566,28 @@ async function main() {
         identityScore < effectiveMinScore ||
         faceSharpness < effectiveMinSharpness
       ) {
+        // Say why. While the registry is empty this is the difference between
+        // "bootstrapping" and "nobody will ever be enrolled" — and silence there
+        // looks exactly like a broken pipeline. Once identities exist it is noise,
+        // so it needs WORKER_NEW_ID_DEBUG=1.
+        const wantLog = noKnownIdentities || process.env.WORKER_NEW_ID_DEBUG === "1";
+        if (wantLog && now - (cam.lastNewIdBlockLogAt || 0) >= 2000) {
+          const blockers = [];
+          if (faceSide < effectiveMinFaceSide) {
+            blockers.push(`side=${Number(faceSide).toFixed(0)}<${effectiveMinFaceSide}`);
+          }
+          if (identityScore < effectiveMinScore) {
+            blockers.push(`score=${Number(identityScore).toFixed(3)}<${effectiveMinScore.toFixed(3)}`);
+          }
+          if (faceSharpness < effectiveMinSharpness) {
+            blockers.push(`sharp=${Number(faceSharpness).toFixed(1)}<${effectiveMinSharpness.toFixed(1)}`);
+          }
+          log(
+            `[${cam.cameraId}] new_id blocked ${blockers.join(" ")} ` +
+              `registry=${noKnownIdentities ? "empty" : String(knownLabeledDescriptors.length)}`,
+          );
+          cam.lastNewIdBlockLogAt = now;
+        }
         resetNewIdGate();
         return false;
       }
