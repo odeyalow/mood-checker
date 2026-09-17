@@ -4119,6 +4119,7 @@ async function main() {
         cam.prevLuma = nextLuma;
       }
 
+      const rawDetections = Array.isArray(detections) ? detections : [];
       detections = filterAndDedupeDetections(detections, workerWidth, workerHeight, {
         minSidePxBase: camFilterMinSidePx,
         minSideRatio: camFilterMinSideRatio,
@@ -4147,6 +4148,20 @@ async function main() {
         }
       }
       cam.candidate = detections.length;
+
+      // Why a walking person produced nothing. Silent while the detector sees
+      // no face at all (that is a recall problem: zoom or det_size); once it
+      // does, this shows whether the size/score filters threw the face away.
+      if (rawDetections.length && now - (cam.lastDetectDebugAt || 0) >= 1000) {
+        const raw = largestFaceStats(rawDetections);
+        log(
+          `[${cam.cameraId}] detect raw=${rawDetections.length} kept=${detections.length} ` +
+            `raw_max_side=${raw.maxSide.toFixed(0)} raw_max_score=${raw.maxScore.toFixed(3)} ` +
+            `min_side=${camFilterMinSidePx} min_score=${Number(camFilterMinScore).toFixed(2)} ` +
+            `frontal=${camRequireFrontalFace ? "on" : "off"} frame=${workerWidth}x${workerHeight}`,
+        );
+        cam.lastDetectDebugAt = now;
+      }
 
       const { maxSide, maxScore } = largestFaceStats(detections);
       cam.score = maxScore;
