@@ -23,6 +23,10 @@ const L10N = {
     deleteConfirm: "\u0423\u0434\u0430\u043b\u0438\u0442\u044c \u043b\u0438\u0446\u043e?",
     deleteSuccess: "\u041b\u0438\u0446\u043e \u0443\u0434\u0430\u043b\u0435\u043d\u043e",
     deleteError: "\u041d\u0435 \u0443\u0434\u0430\u043b\u043e\u0441\u044c \u0443\u0434\u0430\u043b\u0438\u0442\u044c",
+    block: "\u0417\u0430\u0431\u043b\u043e\u043a\u0438\u0440\u043e\u0432\u0430\u0442\u044c",
+    blockConfirm: "\u0417\u0430\u0431\u043b\u043e\u043a\u0438\u0440\u043e\u0432\u0430\u0442\u044c? \u041a\u0430\u0440\u0442\u043e\u0447\u043a\u0430 \u0438\u0441\u0447\u0435\u0437\u043d\u0435\u0442, \u0430 \u043f\u043e\u0445\u043e\u0436\u0438\u0435 \u0434\u0435\u0442\u0435\u043a\u0446\u0438\u0438 \u0431\u043e\u043b\u044c\u0448\u0435 \u043d\u0435 \u0431\u0443\u0434\u0443\u0442 \u0440\u0435\u0433\u0438\u0441\u0442\u0440\u0438\u0440\u043e\u0432\u0430\u0442\u044c\u0441\u044f.",
+    blockSuccess: "\u041b\u0438\u0446\u043e \u0437\u0430\u0431\u043b\u043e\u043a\u0438\u0440\u043e\u0432\u0430\u043d\u043e",
+    blockError: "\u041d\u0435 \u0443\u0434\u0430\u043b\u043e\u0441\u044c \u0437\u0430\u0431\u043b\u043e\u043a\u0438\u0440\u043e\u0432\u0430\u0442\u044c",
     loadError: "\u041e\u0448\u0438\u0431\u043a\u0430 \u0437\u0430\u0433\u0440\u0443\u0437\u043a\u0438",
     dedupJournal: "\u0416\u0443\u0440\u043d\u0430\u043b \u043c\u0430\u0442\u0447\u0438\u043d\u0433\u0430",
     prevPage: "\u041d\u0430\u0437\u0430\u0434",
@@ -42,6 +46,10 @@ const L10N = {
     deleteConfirm: "\u0422\u04b1\u043b\u0493\u0430\u043d\u044b \u0436\u043e\u044e \u043a\u0435\u0440\u0435\u043a \u043f\u0435?",
     deleteSuccess: "\u0422\u04b1\u043b\u0493\u0430 \u0436\u043e\u0439\u044b\u043b\u0434\u044b",
     deleteError: "\u0416\u043e\u044e \u0441\u04d9\u0442\u0441\u0456\u0437 \u0430\u044f\u049b\u0442\u0430\u043b\u0434\u044b",
+    block: "\u0411\u04b1\u0493\u0430\u0442\u0442\u0430\u0443",
+    blockConfirm: "\u0411\u04b1\u0493\u0430\u0442\u0442\u0430\u0443 \u043a\u0435\u0440\u0435\u043a \u043f\u0435? \u041a\u0430\u0440\u0442\u043e\u0447\u043a\u0430 \u0436\u043e\u0439\u044b\u043b\u0430\u0434\u044b, \u04b1\u049b\u0441\u0430\u0441 \u0430\u043d\u044b\u049b\u0442\u0430\u0443\u043b\u0430\u0440 \u0435\u043d\u0434\u0456 \u0442\u0456\u0440\u043a\u0435\u043b\u043c\u0435\u0439\u0434\u0456.",
+    blockSuccess: "\u0422\u04b1\u043b\u0493\u0430 \u0431\u04b1\u0493\u0430\u0442\u0442\u0430\u043b\u0434\u044b",
+    blockError: "\u0411\u04b1\u0493\u0430\u0442\u0442\u0430\u0443 \u0441\u04d9\u0442\u0441\u0456\u0437 \u0430\u044f\u049b\u0442\u0430\u043b\u0434\u044b",
     loadError: "\u0416\u04af\u043a\u0442\u0435\u0443 \u049b\u0430\u0442\u0435\u0441\u0456",
     dedupJournal: "\u041c\u0430\u0442\u0447\u0438\u043d\u0433 \u0436\u0443\u0440\u043d\u0430\u043b\u044b",
     prevPage: "\u0410\u0440\u0442\u049b\u0430",
@@ -61,6 +69,10 @@ const L10N = {
     deleteConfirm: "Delete this face?",
     deleteSuccess: "Face deleted",
     deleteError: "Delete failed",
+    block: "Block",
+    blockConfirm: "Block this face? The card disappears and similar detections are no longer enrolled.",
+    blockSuccess: "Face blocked",
+    blockError: "Block failed",
     loadError: "Load error",
     dedupJournal: "Matching Journal",
     prevPage: "Previous",
@@ -102,6 +114,7 @@ export default function FacesPage({
   const [items, setItems] = useState<FaceCard[]>([]);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [deletingId, setDeletingId] = useState<string>("");
+  const [blockingId, setBlockingId] = useState<string>("");
   const [page, setPage] = useState(1);
 
   const loadFaces = useCallback(async () => {
@@ -137,6 +150,27 @@ export default function FacesPage({
       message.error(t.deleteError);
     } finally {
       setDeletingId("");
+    }
+  }
+
+  // For false positives (a cap, the back of a head). Unlike delete, this keeps
+  // the descriptor so the worker refuses to enrol the same thing again.
+  async function handleBlock(shortId: string) {
+    setBlockingId(shortId);
+    try {
+      const response = await fetch(`/api/faces/${encodeURIComponent(shortId)}/block`, {
+        method: "POST",
+      });
+      if (!response.ok) {
+        message.error(t.blockError);
+        return;
+      }
+      message.success(t.blockSuccess);
+      await loadFaces();
+    } catch {
+      message.error(t.blockError);
+    } finally {
+      setBlockingId("");
     }
   }
 
@@ -205,6 +239,22 @@ export default function FacesPage({
                         <Link key="open" href={`/${safeLocale}/faces/${encodeURIComponent(item.shortId)}`}>
                           {t.open}
                         </Link>,
+                        <Popconfirm
+                          key="block"
+                          title={t.blockConfirm}
+                          okText="OK"
+                          cancelText="Cancel"
+                          onConfirm={() => handleBlock(item.shortId)}
+                        >
+                          <Button
+                            type="link"
+                            size="small"
+                            style={{ color: "#d46b08" }}
+                            loading={blockingId === item.shortId}
+                          >
+                            {t.block}
+                          </Button>
+                        </Popconfirm>,
                         <Popconfirm
                           key="delete"
                           title={t.deleteConfirm}

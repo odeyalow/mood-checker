@@ -248,6 +248,11 @@ export async function POST(request: Request) {
       process.env.FACE_IDENTITY_ID_LENGTH ? Number(process.env.FACE_IDENTITY_ID_LENGTH) : 6,
     );
     const snapshotBuffer = parseSnapshotBuffer(body?.snapshotBase64);
+    // The worker asks to match far more often than it is sure enough to enrol:
+    // a soft-quality face may still be recognised, but only a face that passed
+    // the worker's full new-ID gate may create an identity. Older workers send
+    // nothing and keep the old behaviour.
+    const allowCreate = parseBoolean(body?.allowCreate, true);
     const blockedIds = await getBlockedFaceIds();
     const blockedList = Array.from(blockedIds);
 
@@ -311,6 +316,18 @@ export async function POST(request: Request) {
         descriptor: nextDescriptor,
         descriptors: nextTemplate ?? best.template,
         templateSize: (nextTemplate ?? best.template).length,
+      });
+    }
+
+    if (!allowCreate) {
+      return NextResponse.json({
+        shortId: "",
+        faceIdentityId: "",
+        created: false,
+        merged: false,
+        distance: best ? Number(best.distance.toFixed(6)) : null,
+        nearestShortId: best?.shortId ?? "",
+        margin: Number.isFinite(margin) ? Number(margin.toFixed(6)) : null,
       });
     }
 
@@ -459,6 +476,8 @@ export async function POST(request: Request) {
       descriptor: created.descriptor,
       descriptors: [descriptor],
       templateSize: 1,
+      // The worker points the identity's first DB record at this picture.
+      snapshotUrl: sourceSnapshotUrl || "",
     });
   } catch (error) {
     console.error("[api/faces/identify] POST failed", error);

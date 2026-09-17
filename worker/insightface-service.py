@@ -143,6 +143,27 @@ def decode_rgb_from_base64(raw: str, width: int, height: int) -> np.ndarray | No
     return cv2.cvtColor(frame_rgb, cv2.COLOR_RGB2BGR)
 
 
+def apply_crop(frame: np.ndarray, crop: dict) -> np.ndarray | None:
+    """Cuts the window the worker is looking at out of the full frame (source pixels)."""
+    try:
+        x = int(crop.get("x") or 0)
+        y = int(crop.get("y") or 0)
+        w = int(crop.get("width") or 0)
+        h = int(crop.get("height") or 0)
+    except (TypeError, ValueError, AttributeError):
+        return None
+    frame_h, frame_w = frame.shape[:2]
+    if w <= 0 or h <= 0:
+        return frame
+    if x <= 0 and y <= 0 and w >= frame_w and h >= frame_h:
+        return frame
+    x = max(0, min(frame_w - 1, x))
+    y = max(0, min(frame_h - 1, y))
+    w = max(1, min(frame_w - x, w))
+    h = max(1, min(frame_h - y, h))
+    return np.ascontiguousarray(frame[y : y + h, x : x + w])
+
+
 def normalize_embedding(face: Any) -> list[float] | None:
     embedding = getattr(face, "normed_embedding", None)
     if embedding is None:
@@ -564,6 +585,17 @@ class Handler(BaseHTTPRequestHandler):
         if frame_bgr is None:
             self._json(400, {"error": "image_decode_failed"})
             return
+
+        # The worker detects on a zoomed window of the frame but sends the JPEG
+        # untouched (re-encoding it would cost quality and CPU), so the window is
+        # applied here and every box, landmark and crop comes back in the
+        # worker's own coordinates. Older workers send no crop and get the frame.
+        crop = payload.get("crop")
+        if isinstance(crop, dict):
+            frame_bgr = apply_crop(frame_bgr, crop)
+            if frame_bgr is None:
+                self._json(400, {"error": "invalid_crop"})
+                return
 
         include_descriptor = bool(payload.get("includeDescriptor", False))
         include_emotions = bool(payload.get("includeEmotions", False))

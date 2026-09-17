@@ -38,5 +38,17 @@ streams:
   # Costs a continuous ffmpeg process. Try it before committing to it:
   #   npm run measure:camera        (after pointing WORKER_CAMERA_SOURCES here)
   # and watch CPU with `top` — this box has 4 cores and the detector needs them.
+  #
+  # -q:v sets JPEG quality (2 = best, 31 = worst). go2rtc's own mjpeg template
+  # sets none, and ffmpeg then falls back to bitrate control tuned for tiny
+  # frames: a 2560x1440 frame came out at ~57 KB, i.e. heavy block artifacts,
+  # and a face 60-100 px across became a smear. The same pixels feed the
+  # detector, the embeddings, the emotion model and the saved snapshots, so
+  # this one flag is the input-quality lever for all four. Expect ~400-700 KB
+  # per frame at q3 (npm run measure:camera -- --stream cam01_mjpeg shows it).
+  #
+  # -r caps the transcode to 12 fps: the worker only ever takes the newest
+  # frame and a pass takes longer than 1/12 s, so frames above that are pure
+  # encode/parse cost.
   cam01_mjpeg:
-    - "ffmpeg:cam01_main#video=mjpeg"
+    - "ffmpeg:cam01_main#video=mjpeg#raw=-q:v 3 -r 12"

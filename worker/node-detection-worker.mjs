@@ -599,6 +599,38 @@ async function cropJpegBuffer(buffer, rect) {
   return Buffer.from(canvas.toBuffer("image/jpeg", { quality: 0.92 }));
 }
 
+// Cuts a face out of the ALREADY DECODED source image at native resolution.
+// cropJpegBuffer decodes the whole 2560x1440 frame again (~40 ms) for every
+// crop; the person loop already holds the decoded image, so this costs only
+// the small JPEG encode. `box` is in worker pixels; offsetX/offsetY move it
+// back into source pixels (the worker window is a centre crop when zoom > 1).
+function cropFaceFromImage(
+  image,
+  box,
+  { offsetX = 0, offsetY = 0, padding = 0.25, quality = 0.92 } = {},
+) {
+  if (!image || !box) return null;
+  const sourceWidth = Number(image.width ?? 0);
+  const sourceHeight = Number(image.height ?? 0);
+  if (!sourceWidth || !sourceHeight) return null;
+  const rect = expandCropRect(
+    {
+      x: Number(box.x ?? 0) + offsetX,
+      y: Number(box.y ?? 0) + offsetY,
+      width: Number(box.width ?? 0),
+      height: Number(box.height ?? 0),
+    },
+    sourceWidth,
+    sourceHeight,
+    padding,
+  );
+  if (!rect || rect.width < 8 || rect.height < 8) return null;
+  const canvas = createCanvas(rect.width, rect.height);
+  const ctx = canvas.getContext("2d");
+  ctx.drawImage(image, rect.x, rect.y, rect.width, rect.height, 0, 0, rect.width, rect.height);
+  return Buffer.from(canvas.toBuffer("image/jpeg", { quality }));
+}
+
 async function savePhantomSnapshot(snapshotDir, publicBase, cameraId, jpgBuffer, now, faceRect = null) {
   if (!snapshotDir || !publicBase || !(jpgBuffer instanceof Buffer) || !jpgBuffer.length) return "";
   const safeCameraId = sanitizeFileName(cameraId || "cam");
@@ -2526,6 +2558,7 @@ async function main() {
     descriptor,
     threshold,
     snapshotBase64 = "",
+    { allowCreate = true } = {},
   ) => {
     if (!faceIdentifyEndpoint || !faceAutoCreate) return null;
     const safeDescriptor = normalizeDescriptor(descriptor);
@@ -2536,6 +2569,9 @@ async function main() {
         descriptor: safeDescriptor,
         threshold,
         snapshotBase64: typeof snapshotBase64 === "string" ? snapshotBase64 : "",
+        // Matching is cheap to ask for; enrolment is not. Only a face that
+        // passed the full new-ID gate may create an identity server-side.
+        allowCreate: Boolean(allowCreate),
       };
       const payload = await postJsonExpectJsonWithTimeout(
         faceIdentifyEndpoint,
@@ -2556,6 +2592,7 @@ async function main() {
         shortId,
         distance: Number(payload?.distance),
         created: Boolean(payload?.created),
+        snapshotUrl: typeof payload?.snapshotUrl === "string" ? payload.snapshotUrl : "",
       };
     } catch (err) {
       const now = Date.now();
@@ -2576,6 +2613,7 @@ async function main() {
       rgb,
       width,
       height,
+      crop = null,
     },
     { includeDescriptor = false, includeEmotions = false, maxFaces = 10, minScore = 0 } = {},
   ) => {
@@ -2593,6 +2631,10 @@ async function main() {
           rgbBase64: hasJpg ? "" : Buffer.from(rgb).toString("base64"),
           width,
           height,
+          // The JPEG is the untouched source frame while `rgb` is the zoomed
+          // window: the service cuts that same window so boxes and landmarks
+          // come back in worker pixels. Raw RGB already is the window.
+          crop: hasJpg && crop ? crop : undefined,
           includeDescriptor,
           includeEmotions,
           maxFaces,
@@ -3955,6 +3997,7 @@ async function main() {
             rgb,
             width: workerWidth,
             height: workerHeight,
+            crop: { x: cropX, y: cropY, width: workerWidth, height: workerHeight },
           }, {
             includeDescriptor: enableMatching,
             includeEmotions: enableEmotions,
@@ -4147,6 +4190,7 @@ async function main() {
                       rgb,
                       width: workerWidth,
                       height: workerHeight,
+                      crop: { x: cropX, y: cropY, width: workerWidth, height: workerHeight },
                     }, {
                       includeDescriptor: enableMatching,
                       includeEmotions: needExpressionsForSnapshot,
@@ -4204,7 +4248,59 @@ async function main() {
             }
           }
 
-          const snapshotBase64 = jpg.toString("base64");
+          // Per-face crops replace the old whole-frame snapshot. The identify
+          // route used to store the entire source JPEG as the identity's picture,
+          // so the Faces page showed a scaled-down room with a tiny head in it —
+          // the "240p" look. A crop from the decoded source image keeps every
+          // native pixel of the face, needs no re-decode, and is ~10 KB instead
+          // of hundreds. Built lazily: most detections never need one.
+          const faceCropCache = new Map();
+          const faceCropFor = (det) => {
+            if (faceCropCache.has(det)) return faceCropCache.get(det);
+            let buffer = null;
+            try {
+              buffer = cropFaceFromImage(image, getBox(det), { offsetX: cropX, offsetY: cropY });
+            } catch {
+              buffer = null;
+            }
+            faceCropCache.set(det, buffer);
+            return buffer;
+          };
+          // One crop per person per cooldown into public/_faces/<id>/, which is
+          // where the Faces page and the DB record look for a picture. Gated by
+          // the record-quality thresholds: a blurred or undersized crop makes a
+          // bad thumbnail and would only mislead whoever reviews the identity.
+          const archiveFaceCropForPerson = async (det, personName, quality) => {
+            if (!camFaceArchiveEnabled || !faceArchiveDir) return;
+            const shortId = normalizeFaceShortId(personName);
+            if (!shortId || blockedFaceIds.has(shortId)) return;
+            const lastAt = Number(cam.lastFaceArchiveAtByName.get(personName) || 0);
+            if (now - lastAt < camFaceArchiveCooldownMs) return;
+            if (Number(quality?.faceSide ?? 0) < camRecordMinFaceSidePx) return;
+            if (Number(quality?.faceSharpness ?? 0) < camRecordMinSharpness) return;
+            const buffer = faceCropFor(det);
+            if (!buffer) return;
+            try {
+              const url = await archiveFaceSnapshot({
+                archiveDir: faceArchiveDir,
+                archivePublicBase: faceArchivePublicBase,
+                faceShortId: shortId,
+                cameraId: cam.cameraId,
+                jpgBuffer: buffer,
+                now,
+                maxPerFace: camFaceArchiveMaxPerFace,
+              });
+              if (url) {
+                cam.lastFaceArchiveAtByName.set(personName, now);
+                cam.lastFaceArchiveUrlByName.set(personName, url);
+              }
+            } catch (err) {
+              if (now - cam.lastErrLogAt >= 2000) {
+                log(`[${cam.cameraId}] face archive error: ${String(err)}`);
+                cam.lastErrLogAt = now;
+              }
+            }
+          };
           const people = [];
           const descriptorByName = new Map();
           let bestDistance = 0;
@@ -4323,10 +4419,18 @@ async function main() {
                       now - cam.lastAutoCreatedAt < Math.max(camAutoCreateCooldownMs, 4500);
                     if (identifyReady && !autoCreateCoolingDown) {
                       cam.lastIdentifyAt = now;
+                      // The soft gate still asks the server for a match, but
+                      // only a face that cleared the full new-ID gate (size,
+                      // score, sharpness, N stable frames) may enrol. Before
+                      // this the soft path could create an identity from a
+                      // single marginal frame — the back of a head with a cap
+                      // is exactly what that produced.
+                      const cropBuffer = faceCropFor(det);
                       const identified = await identifyFaceDescriptor(
                         descriptor,
                         camMatchThreshold,
-                        snapshotBase64,
+                        cropBuffer ? cropBuffer.toString("base64") : "",
+                        { allowCreate: readyForNewId },
                       );
                       if (identified?.shortId) {
                         const identifiedShortId = normalizeFaceShortId(identified.shortId);
@@ -4346,7 +4450,23 @@ async function main() {
                           }
                           if (justRegistered) {
                             cam.lastAutoCreatedAt = now;
-                            log(`[${cam.cameraId}] new_id created shortId=${name}`);
+                            if (identified.snapshotUrl) {
+                              // The route stored our crop as the identity's first
+                              // picture; the first DB record should point at it
+                              // rather than at the shared camera snapshot.
+                              cam.lastFaceArchiveUrlByName.set(name, identified.snapshotUrl);
+                              cam.lastFaceArchiveAtByName.set(name, now);
+                            }
+                            // The numbers a false enrolment leaves behind. When a
+                            // "face" that was the back of a head shows up on the
+                            // Faces page, this says what score/size/sharpness let
+                            // it through, so WORKER_NEW_ID_MIN_* can be set from
+                            // measured values instead of guesses.
+                            log(
+                              `[${cam.cameraId}] new_id created shortId=${name} ` +
+                                `score=${Number(identityScore).toFixed(3)} side=${Number(faceSide).toFixed(0)} ` +
+                                `sharp=${Number(faceSharpness).toFixed(1)}`,
+                            );
                           }
                         }
                       }
@@ -4433,6 +4553,7 @@ async function main() {
             const displayEmotionLabel = emotionLabel || fallbackEmotionLabel || recentRawEmotionLabel;
 
             if (!isUnknownIdentity(name)) {
+              await archiveFaceCropForPerson(det, name, { faceSide, faceSharpness });
               people.push({
                 name,
                 emotion: displayEmotionLabel,

@@ -168,7 +168,7 @@ routes:
   api_groups:
     auth: [login, logout, me]
     camera: [frame, mjpeg]   # frame proxies go2rtc; the worker bypasses it and reads go2rtc directly
-    faces: [faces, faces/[id], faces/identify, faces/registry, faces/dedup-logs]
+    faces: ["faces", "faces/[id]", "faces/[id]/block", "faces/identify", "faces/registry", "faces/dedup-logs"]
     data: [recognitions, students, stats/by-date, dashboard-stats, emotion-dynamics]
     worker: [worker/status, worker/zoom]
     logging: [detections/log]
