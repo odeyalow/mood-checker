@@ -16,9 +16,15 @@
 
 // Must come first: PrismaClient needs DATABASE_URL from .env.
 import "./load-env.mjs";
+import fs from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { PrismaClient } from "@prisma/client";
 
 const prisma = new PrismaClient();
+const ROOT_DIR = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
+const fmt = (value) => (Number.isFinite(value) ? Number(value).toFixed(3) : "-");
+const ts = (date, len = 19) => (date instanceof Date ? date.toISOString().slice(0, len) : "-");
 
 function parseArgs(argv) {
   const args = { top: 12 };
@@ -75,6 +81,102 @@ function bar(count, max, width = 30) {
   return "█".repeat(Math.round((count / max) * width));
 }
 
+/*
+ * Where a row can go missing between pages. The Faces list groups rows by
+ * `name`, the detail page counts rows by name OR faceIdentityId, and the
+ * pictures on the detail page also include crops the worker archives on disk
+ * without any row. When the three disagree, this is where it shows.
+ */
+async function printConsistency(identities) {
+  const shortIdByPk = new Map(identities.map((it) => [it.id, it.shortId]));
+  const knownShortIds = new Set(identities.map((it) => it.shortId));
+
+  // Merges the identify route performed in its post-check: a freshly created
+  // identity that turned out to be an existing person is folded into it.
+  let merges = [];
+  try {
+    merges = await prisma.faceDedupLog.findMany({ orderBy: { createdAt: "desc" }, take: 15 });
+  } catch {
+    merges = [];
+  }
+  process.stdout.write("--- last merges (identify post-check, newest first) ---\n");
+  if (!merges.length) process.stdout.write("  none\n");
+  for (const m of merges) {
+    process.stdout.write(
+      `  ${ts(m.createdAt)}  ${m.action}  ${m.sourceShortId ?? "?"} -> ${m.targetShortId ?? "?"}  ` +
+        `dist=${fmt(m.distance)} th=${fmt(m.threshold)}\n`,
+    );
+  }
+  process.stdout.write("\n");
+
+  const recs = await prisma.recognition.findMany({
+    orderBy: { detectedAt: "desc" },
+    take: 3000,
+    select: {
+      id: true,
+      name: true,
+      faceIdentityId: true,
+      detectedAt: true,
+      mood: true,
+      cameraId: true,
+      snapshotUrl: true,
+    },
+  });
+
+  const mismatched = recs.filter(
+    (r) => r.faceIdentityId && shortIdByPk.has(r.faceIdentityId) && shortIdByPk.get(r.faceIdentityId) !== r.name,
+  );
+  const unlinked = recs.filter((r) => !r.faceIdentityId);
+  const orphanNames = new Map();
+  for (const r of recs) {
+    if (!knownShortIds.has(r.name)) orphanNames.set(r.name, (orphanNames.get(r.name) ?? 0) + 1);
+  }
+  process.stdout.write("--- recognition rows vs identities ---\n");
+  process.stdout.write(`  rows checked:                         ${recs.length}\n`);
+  process.stdout.write(`  name differs from linked identity:    ${mismatched.length}\n`);
+  for (const r of mismatched.slice(0, 10)) {
+    process.stdout.write(`     ${ts(r.detectedAt)} name=${r.name} identity=${shortIdByPk.get(r.faceIdentityId)}\n`);
+  }
+  process.stdout.write(`  no identity link (faceIdentityId null): ${unlinked.length}\n`);
+  process.stdout.write(`  names without an identity row:        ${orphanNames.size}\n`);
+  for (const [name, count] of orphanNames) process.stdout.write(`     ${name} (${count} rows)\n`);
+  process.stdout.write("\n");
+
+  const byName = new Map();
+  const byLink = new Map();
+  for (const r of recs) {
+    byName.set(r.name, (byName.get(r.name) ?? 0) + 1);
+    if (r.faceIdentityId) byLink.set(r.faceIdentityId, (byLink.get(r.faceIdentityId) ?? 0) + 1);
+  }
+  process.stdout.write("--- per identity: rows by name / rows by link / pictures on disk ---\n");
+  process.stdout.write("  (by_name is what the Faces card shows; pictures include archived crops without a row)\n");
+  for (const it of identities) {
+    const dir = path.join(ROOT_DIR, "public", "_faces", it.shortId);
+    let pictures = 0;
+    try {
+      pictures = fs.readdirSync(dir).filter((f) => /\.(jpe?g|png)$/i.test(f)).length;
+    } catch {
+      pictures = 0;
+    }
+    const last = recs.find((r) => r.name === it.shortId || r.faceIdentityId === it.id);
+    process.stdout.write(
+      `  ${String(it.shortId).padEnd(8)} by_name=${String(byName.get(it.shortId) ?? 0).padStart(3)} ` +
+        `by_link=${String(byLink.get(it.id) ?? 0).padStart(3)} pictures=${String(pictures).padStart(3)} ` +
+        `created=${ts(it.createdAt, 16)} last_row=${last ? ts(last.detectedAt, 16) : "-"}\n`,
+    );
+  }
+  process.stdout.write("\n");
+
+  process.stdout.write("--- last 12 rows ---\n");
+  for (const r of recs.slice(0, 12)) {
+    process.stdout.write(
+      `  ${ts(r.detectedAt)} ${String(r.name).padEnd(8)} ${String(r.mood).padEnd(14)} ` +
+        `${r.cameraId ?? "-"} ${String(r.snapshotUrl ?? "").slice(0, 52)}\n`,
+    );
+  }
+  process.stdout.write("\n");
+}
+
 async function main() {
   const args = parseArgs(process.argv.slice(2));
 
@@ -119,6 +221,8 @@ async function main() {
   process.stdout.write(`  0 recognitions (orphan): ${seenNever}\n`);
   process.stdout.write(`  exactly 1 (likely junk): ${seenOnce}\n`);
   process.stdout.write(`  2+ (established):        ${n - seenOnce - seenNever}\n\n`);
+
+  await printConsistency(identities);
 
   if (n < 2) {
     process.stdout.write("Not enough vectors to analyse duplicates.\n");
