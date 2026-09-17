@@ -2257,13 +2257,21 @@ async function main() {
     /\/+$/,
     "",
   );
-  const workerPreviewEnabled = envBool("WORKER_PREVIEW_ENABLED", true);
+  // Off by default: nothing in the UI reads /_worker-live (the camera tile
+  // streams from go2rtc directly, and the middleware does not even expose the
+  // path). Left on, it encoded the full 2560x1440 canvas to JPEG and wrote
+  // ~600 KB to disk on EVERY pass — measured as a constant 1.5-2.3 MB/s of
+  // writes and 40-60 ms of CPU per pass for a file nobody opened.
+  const workerPreviewEnabled = envBool("WORKER_PREVIEW_ENABLED", false);
   const workerPreviewDir =
     process.env.WORKER_PREVIEW_DIR || path.join(rootDir, "public", "_worker-live");
   const workerPreviewPublicBase = (
     process.env.WORKER_PREVIEW_PUBLIC_BASE || "/_worker-live"
   ).replace(/\/+$/, "");
-  const workerPreviewIntervalMs = Math.max(0, envInt("WORKER_PREVIEW_INTERVAL_MS", 0));
+  const workerPreviewIntervalMs = Math.max(0, envInt("WORKER_PREVIEW_INTERVAL_MS", 1000));
+  // A debugging picture does not need native resolution; 960 px wide is a
+  // ~7x smaller encode and file than the full frame.
+  const workerPreviewMaxWidth = Math.max(160, envInt("WORKER_PREVIEW_MAX_WIDTH", 960));
   const workerPreviewQuality = Math.min(
     0.98,
     Math.max(0.4, envFloat("WORKER_PREVIEW_QUALITY", 0.82)),
@@ -3952,8 +3960,19 @@ async function main() {
         now - Number(cam.lastPreviewSavedAt || 0) >= workerPreviewIntervalMs
       ) {
         try {
+          let previewCanvas = canvas;
+          if (workerWidth > workerPreviewMaxWidth) {
+            const scale = workerPreviewMaxWidth / workerWidth;
+            previewCanvas = createCanvas(
+              workerPreviewMaxWidth,
+              Math.max(1, Math.round(workerHeight * scale)),
+            );
+            previewCanvas
+              .getContext("2d")
+              .drawImage(canvas, 0, 0, previewCanvas.width, previewCanvas.height);
+          }
           const previewBuffer = Buffer.from(
-            canvas.toBuffer("image/jpeg", { quality: workerPreviewQuality }),
+            previewCanvas.toBuffer("image/jpeg", { quality: workerPreviewQuality }),
           );
           const previewFile = path.join(workerPreviewDir, `${cam.cameraId}.jpg`);
           await writeFileAtomic(previewFile, previewBuffer);
