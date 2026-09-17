@@ -12,7 +12,10 @@ const MJPEG_RETRY_DELAY_MS = 1500;
 const MJPEG_LOAD_TIMEOUT_MS = 5000;
 const MJPEG_MAX_RECOVERY_ATTEMPTS = 2;
 
-type PreviewMode = "mjpeg-direct" | "mjpeg-proxy" | "frame";
+// "worker": the worker's own downscaled copy of the frame it detects on, via
+// /api/camera/preview. Costs no second ffmpeg transcode of the H265 stream while
+// the dashboard is open. Needs WORKER_PREVIEW_ENABLED=true on the worker side.
+type PreviewMode = "mjpeg-direct" | "mjpeg-proxy" | "frame" | "worker";
 
 function parseClientEnvInt(
   rawValue: string | undefined,
@@ -32,6 +35,7 @@ function parsePreviewMode(rawValue: string | undefined, fallback: PreviewMode): 
   if (normalized === "mjpeg" || normalized === "mjpeg-direct") return "mjpeg-direct";
   if (normalized === "mjpeg-proxy") return "mjpeg-proxy";
   if (normalized === "frame") return "frame";
+  if (normalized === "worker") return "worker";
   return fallback;
 }
 
@@ -317,6 +321,12 @@ export default function CameraTile({
 
   const previewUrl = useMemo(() => {
     if (!camera.go2rtcSrc) return "";
+    if (previewMode === "worker") {
+      const params = new URLSearchParams();
+      params.set("cameraId", camera.id);
+      params.set("v", String(previewToken));
+      return `/api/camera/preview?${params.toString()}`;
+    }
     if (previewMode === "frame") {
       const params = new URLSearchParams();
       params.set("src", camera.go2rtcSrc);
@@ -331,7 +341,7 @@ export default function CameraTile({
       return buildDirectMjpegUrl(go2rtcPublicBaseUrl, camera.go2rtcSrc, previewToken);
     }
     return buildMjpegApiPath(camera.go2rtcSrc, previewToken);
-  }, [camera.go2rtcSrc, go2rtcPublicBaseUrl, previewMode, previewToken]);
+  }, [camera.go2rtcSrc, camera.id, go2rtcPublicBaseUrl, previewMode, previewToken]);
 
   useEffect(() => {
     const explicitBase = String(process.env.NEXT_PUBLIC_GO2RTC_BASE_URL || "").trim();
@@ -644,8 +654,11 @@ export default function CameraTile({
 
   const effectivePreviewZoom = clampWorkerZoom(workerZoom || camera.digitalZoom);
   const effectivePreviewOffsetY = clampFrameOffsetY(workerOffsetY ?? camera.frameOffsetY);
+  // The worker preview already IS the zoomed window; scaling it again would
+  // zoom twice.
   const previewTransform =
-    effectivePreviewZoom > MIN_ZOOM || Math.abs(effectivePreviewOffsetY) > 0.001
+    previewMode !== "worker" &&
+    (effectivePreviewZoom > MIN_ZOOM || Math.abs(effectivePreviewOffsetY) > 0.001)
       ? `translateY(${((effectivePreviewZoom - 1) * effectivePreviewOffsetY * 100).toFixed(2)}%) scale(${effectivePreviewZoom})`
       : "scale(1)";
 
@@ -671,7 +684,7 @@ export default function CameraTile({
               frameFailureCountRef.current = 0;
               mjpegFailureCountRef.current = 0;
               setStatus("ready");
-              if (previewMode === "frame") {
+              if (previewMode === "frame" || previewMode === "worker") {
                 scheduleFrameRefresh();
               }
             }}

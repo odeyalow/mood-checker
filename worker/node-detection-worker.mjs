@@ -4,6 +4,7 @@
 import fs from "node:fs";
 import fsp from "node:fs/promises";
 import { spawn } from "node:child_process";
+import os from "node:os";
 import path from "node:path";
 import process from "node:process";
 import { setTimeout as sleep } from "node:timers/promises";
@@ -141,6 +142,17 @@ async function startInsightFaceService({
         env: { ...process.env },
         stdio: ["ignore", "pipe", "pipe"],
       });
+      // Detection may use every core, but it must never starve the H265 decode
+      // that feeds it: a niced service yields to ffmpeg/go2rtc under contention,
+      // so frames stay whole and only detection slows down a little.
+      const pythonNice = Math.max(0, Math.min(19, envInt("WORKER_PYTHON_NICE", 5)));
+      if (pythonNice > 0 && proc.pid) {
+        try {
+          os.setPriority(proc.pid, pythonNice);
+        } catch (err) {
+          log(`[insightface] nice failed err=${String(err)}`);
+        }
+      }
       proc.on("error", (err) => {
         log(`[insightface] process error python=${pythonBin} err=${String(err)}`);
       });
@@ -1533,6 +1545,8 @@ function createMjpegReader({ url, staleMs, log: logLine }) {
     stopped: false,
     frames: 0,
     lastErrorAt: 0,
+    lastStatsAt: Date.now(),
+    framesAtStats: 0,
   };
 
   const SOI = Buffer.from([0xff, 0xd8]);
@@ -1545,30 +1559,69 @@ function createMjpegReader({ url, staleMs, log: logLine }) {
     state.connected = true;
     logLine(`[mjpeg] connected ${url}`);
 
-    let buf = Buffer.alloc(0);
+    // Chunks since the last frame boundary. They are joined only when a chunk
+    // brings an EOI marker: joining and re-scanning on every chunk made this
+    // loop quadratic in frame size, and with ~600 KB frames arriving in ~16 KB
+    // pieces at 12 fps that was hundreds of MB/s of copying and scanning on
+    // the same thread that runs detection.
+    let pending = [];
+    let pendingBytes = 0;
+    let lastByte = -1;
     try {
       for await (const chunk of res.body) {
         if (state.stopped) break;
-        buf = buf.length ? Buffer.concat([buf, Buffer.from(chunk)]) : Buffer.from(chunk);
+        const piece = Buffer.isBuffer(chunk)
+          ? chunk
+          : Buffer.from(chunk.buffer, chunk.byteOffset, chunk.byteLength);
+        if (!piece.length) continue;
+        const bringsEoi =
+          piece.indexOf(EOI) >= 0 || (lastByte === 0xff && piece[0] === 0xd9);
+        pending.push(piece);
+        pendingBytes += piece.length;
+        lastByte = piece[piece.length - 1];
+        if (!bringsEoi) {
+          // A single frame should never reach this size; treat it as garbage.
+          if (pendingBytes > 16_000_000) {
+            pending = [];
+            pendingBytes = 0;
+          }
+          continue;
+        }
 
+        let buf = pending.length === 1 ? pending[0] : Buffer.concat(pending, pendingBytes);
+        pending = [];
+        pendingBytes = 0;
         // Pull out every complete JPEG the buffer holds, keeping the last one.
         for (;;) {
           const start = buf.indexOf(SOI);
           if (start < 0) {
-            if (buf.length > 4_000_000) buf = Buffer.alloc(0);
+            buf = Buffer.alloc(0);
             break;
           }
           const end = buf.indexOf(EOI, start + 2);
           if (end < 0) {
             if (start > 0) buf = buf.subarray(start);
-            // A single frame should never reach this size; treat it as garbage.
-            if (buf.length > 16_000_000) buf = Buffer.alloc(0);
             break;
           }
           state.latest = Buffer.from(buf.subarray(start, end + 2));
           state.latestAt = Date.now();
           state.frames += 1;
           buf = buf.subarray(end + 2);
+        }
+        if (buf.length) {
+          pending.push(buf);
+          pendingBytes = buf.length;
+        }
+
+        const statsNow = Date.now();
+        if (statsNow - state.lastStatsAt >= 30_000) {
+          const seconds = Math.max(0.001, (statsNow - state.lastStatsAt) / 1000);
+          logLine(
+            `[mjpeg] stats fps=${((state.frames - state.framesAtStats) / seconds).toFixed(1)} ` +
+              `frame_kb=${state.latest ? Math.round(state.latest.length / 1024) : 0}`,
+          );
+          state.lastStatsAt = statsNow;
+          state.framesAtStats = state.frames;
         }
       }
     } finally {
@@ -3041,6 +3094,9 @@ async function main() {
   process.on("SIGTERM", stop);
 
   let lastHeartbeatAt = 0;
+  // Per-pass wall time, reported in the heartbeat. "It cannot keep up" is a
+  // number here: passes per second against the ~2 s a walking person is in view.
+  const passStats = { count: 0, totalMs: 0, maxMs: 0, since: Date.now() };
   let lastStatusAt = 0;
   let lastZoomReloadAt = 0;
   let workerZoomMap = {};
@@ -3738,8 +3794,10 @@ async function main() {
         // "bootstrapping" and "nobody will ever be enrolled" — and silence there
         // looks exactly like a broken pipeline. Once identities exist it is noise,
         // so it needs WORKER_NEW_ID_DEBUG=1.
-        const wantLog = noKnownIdentities || process.env.WORKER_NEW_ID_DEBUG === "1";
-        if (wantLog && now - (cam.lastNewIdBlockLogAt || 0) >= 2000) {
+        // Always say why, just less often once identities exist: a person who
+        // never gets enrolled is invisible in every other log line.
+        const verbose = noKnownIdentities || process.env.WORKER_NEW_ID_DEBUG === "1";
+        if (now - (cam.lastNewIdBlockLogAt || 0) >= (verbose ? 2000 : 5000)) {
           const blockers = [];
           if (faceSide < effectiveMinFaceSide) {
             blockers.push(`side=${Number(faceSide).toFixed(0)}<${effectiveMinFaceSide}`);
@@ -4388,6 +4446,24 @@ async function main() {
                       `margin=${Number(margin).toFixed(3)} floor=${Math.max(camMatchMinMargin, camAmbiguousMarginFloor).toFixed(3)}`,
                   );
                   cam.lastAmbiguousLogAt = now;
+                }
+                if (
+                  !accepted &&
+                  bestCandidate &&
+                  !ambiguousNearMatch &&
+                  now - (cam.lastNoMatchLogAt || 0) >= 2000
+                ) {
+                  // The one line that answers "it sees me but does not know
+                  // me": how far the nearest identity actually was. A best of
+                  // 0.6-0.7 against a template built from degraded frames means
+                  // re-enrol, not a looser threshold.
+                  log(
+                    `[${cam.cameraId}] no_match best=${Number(bestCandidate.distance).toFixed(3)} ` +
+                      `nearest=${bestCandidate.label} margin=${Number.isFinite(margin) ? margin.toFixed(3) : "inf"} ` +
+                      `th=${camMatchThreshold.toFixed(2)} side=${Number(faceSide).toFixed(0)} ` +
+                      `score=${Number(identityScore).toFixed(3)} sharp=${Number(faceSharpness).toFixed(1)}`,
+                  );
+                  cam.lastNoMatchLogAt = now;
                 }
                 const readyForNewId = confirmNewIdCandidate(
                   descriptor,
@@ -5153,6 +5229,7 @@ async function main() {
         lastBlockedFaceIdsReloadAt = now;
       }
 
+      const passStartedAt = Date.now();
       const workers = [];
       let cursor = 0;
       const activeWorkers = Math.min(parallelCameraLimit, states.length);
@@ -5168,6 +5245,12 @@ async function main() {
         );
       }
       await Promise.all(workers);
+      {
+        const passMs = Date.now() - passStartedAt;
+        passStats.count += 1;
+        passStats.totalMs += passMs;
+        if (passMs > passStats.maxMs) passStats.maxMs = passMs;
+      }
 
       if (dbWriterMode !== "external") {
         const dbResult = await drainDbQueue({
@@ -5189,9 +5272,17 @@ async function main() {
       }
 
       if (now - lastHeartbeatAt >= heartbeatSeconds * 1000) {
+        const passAvg = passStats.count ? passStats.totalMs / passStats.count : 0;
+        const passRate = passStats.count / Math.max(0.001, (now - passStats.since) / 1000);
         log(
-          `heartbeat: cameras_ready=${states.length}/${states.length} faces_detected=${confirmedTotal}`,
+          `heartbeat: cameras_ready=${states.length}/${states.length} faces_detected=${confirmedTotal} ` +
+            `passes=${passStats.count} pass_ms avg=${passAvg.toFixed(0)} max=${passStats.maxMs} ` +
+            `passes_per_s=${passRate.toFixed(1)}`,
         );
+        passStats.count = 0;
+        passStats.totalMs = 0;
+        passStats.maxMs = 0;
+        passStats.since = now;
         lastHeartbeatAt = now;
       }
 

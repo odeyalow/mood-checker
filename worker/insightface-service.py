@@ -23,6 +23,9 @@ if not _threads or _threads == "0":
 os.environ.setdefault("OMP_NUM_THREADS", _threads)
 os.environ.setdefault("OMP_WAIT_POLICY", "PASSIVE")
 
+import threading
+import time
+
 import cv2
 import numpy as np
 import onnxruntime as ort
@@ -38,6 +41,22 @@ import onnxruntime as ort
 # create. The work still runs on the same number of threads — they are simply
 # not pinned, which is exactly what the error message asks for.
 _ORT_SESSION_CLS = ort.InferenceSession
+_ALLOW_SPINNING = os.getenv("WORKER_ONNX_ALLOW_SPINNING", "0").strip().lower() in ("1", "true", "yes", "on")
+
+
+def _configure_session_options(options: "ort.SessionOptions", threads: int) -> None:
+    options.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
+    options.intra_op_num_threads = int(threads)
+    # ORT's pool keeps its threads spinning after each op in case more work is
+    # coming. On a 4-core box that must also decode H265 in real time, spinning
+    # threads take cycles from ffmpeg between detections and the camera stream
+    # answers with dropped or half-decoded (dark) frames. Blocking waits cost a
+    # few microseconds of wake-up latency per op instead.
+    if not _ALLOW_SPINNING:
+        try:
+            options.add_session_config_entry("session.intra_op.allow_spinning", "0")
+        except Exception:
+            pass
 
 
 class _ThreadPinnedSession(_ORT_SESSION_CLS):  # type: ignore[misc, valid-type]
@@ -53,8 +72,7 @@ class _ThreadPinnedSession(_ORT_SESSION_CLS):  # type: ignore[misc, valid-type]
         # the caller left it out entirely.
         if len(args) < 2 and kwargs.get("sess_options") is None:
             options = ort.SessionOptions()
-            options.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
-            options.intra_op_num_threads = int(_threads)
+            _configure_session_options(options, int(_threads))
             kwargs["sess_options"] = options
         super().__init__(*args, **kwargs)
 
@@ -162,6 +180,42 @@ def apply_crop(frame: np.ndarray, crop: dict) -> np.ndarray | None:
     w = max(1, min(frame_w - x, w))
     h = max(1, min(frame_h - y, h))
     return np.ascontiguousarray(frame[y : y + h, x : x + w])
+
+
+_TIMING_LOCK = threading.Lock()
+_TIMING = {"n": 0, "decode": 0.0, "decode_max": 0.0, "run": 0.0, "run_max": 0.0, "faces": 0, "last_log": time.monotonic()}
+_TIMING_LOG_EVERY_S = max(2.0, float(os.getenv("WORKER_ANALYZE_TIMING_LOG_S", "10") or 10))
+
+
+def record_timing(decode_ms: float, run_ms: float, faces: int, shape) -> None:
+    """Rate-limited throughput line: where each /analyze call spends its time.
+
+    "It does not keep up" is only answerable with these numbers: how many
+    calls per second the service sustains, how much of each is JPEG decode and
+    how much is the models. The worker's heartbeat prints the matching pass
+    rate on its side.
+    """
+    with _TIMING_LOCK:
+        stats = _TIMING
+        stats["n"] += 1
+        stats["decode"] += decode_ms
+        stats["decode_max"] = max(stats["decode_max"], decode_ms)
+        stats["run"] += run_ms
+        stats["run_max"] = max(stats["run_max"], run_ms)
+        stats["faces"] += faces
+        now = time.monotonic()
+        if now - stats["last_log"] < _TIMING_LOG_EVERY_S:
+            return
+        elapsed = max(1e-6, now - stats["last_log"])
+        count = max(1, stats["n"])
+        height, width = (int(shape[0]), int(shape[1])) if shape is not None and len(shape) >= 2 else (0, 0)
+        log(
+            f"analyze n={stats['n']} per_s={stats['n'] / elapsed:.1f} "
+            f"decode_ms avg={stats['decode'] / count:.0f} max={stats['decode_max']:.0f} "
+            f"run_ms avg={stats['run'] / count:.0f} max={stats['run_max']:.0f} "
+            f"faces_avg={stats['faces'] / count:.2f} size={width}x{height}"
+        )
+        stats.update({"n": 0, "decode": 0.0, "decode_max": 0.0, "run": 0.0, "run_max": 0.0, "faces": 0, "last_log": now})
 
 
 def normalize_embedding(face: Any) -> list[float] | None:
@@ -333,10 +387,7 @@ class EmotionEngine:
 
         try:
             options = ort.SessionOptions()
-            options.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
-            intra = env_int("WORKER_ONNX_INTRA_THREADS", int(_threads))
-            if intra > 0:
-                options.intra_op_num_threads = intra
+            _configure_session_options(options, env_int("WORKER_ONNX_INTRA_THREADS", int(_threads)))
             providers = [
                 part.strip()
                 for part in env_str("WORKER_EMOTION_PROVIDERS", "CPUExecutionProvider").split(",")
@@ -571,6 +622,7 @@ class Handler(BaseHTTPRequestHandler):
         # JPEG first: a 960x540 frame is ~150 KB as JPEG against ~1.5 MB as raw RGB
         # (~2 MB once base64-encoded), and cv2.imdecode costs only a few ms. Raw RGB
         # stays supported so an older worker keeps working against this service.
+        decode_started = time.perf_counter()
         frame_bgr = None
         if image_base64:
             frame_bgr = decode_image_from_base64(image_base64)
@@ -602,6 +654,7 @@ class Handler(BaseHTTPRequestHandler):
         max_faces = max(1, min(20, int(payload.get("maxFaces", 10) or 10)))
         min_score = max(0.0, min(1.0, float(payload.get("minScore", 0.0) or 0.0)))
 
+        run_started = time.perf_counter()
         try:
             faces = ENGINE.analyze(
                 frame_bgr,
@@ -614,6 +667,12 @@ class Handler(BaseHTTPRequestHandler):
             log(f"analyze failed err={exc}")
             self._json(500, {"error": "analyze_failed"})
             return
+        record_timing(
+            (run_started - decode_started) * 1000.0,
+            (time.perf_counter() - run_started) * 1000.0,
+            len(faces) if isinstance(faces, list) else 0,
+            getattr(frame_bgr, "shape", None),
+        )
 
         self._json(
             200,
