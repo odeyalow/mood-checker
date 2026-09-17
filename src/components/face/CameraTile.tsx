@@ -102,6 +102,7 @@ type WorkerStatus = {
   topEmotion?: string;
   lastRecognitionEmotion?: string;
   lastRecognitionMood?: string;
+  lastRecognitionName?: string;
   people?: WorkerPerson[];
   previewUrl?: string;
   snapshotUrl?: string;
@@ -471,7 +472,11 @@ export default function CameraTile({
           const nextSnapshotUrl = typeof ws.snapshotUrl === "string" ? ws.snapshotUrl : "";
           const nextRecognitionAt =
             typeof ws.lastRecognitionAt === "string" ? ws.lastRecognitionAt : "";
-          const nextWho = who || "";
+          // Nobody in frame any more: keep the name of the visit the snapshot
+          // below belongs to, the way the emotion already falls back.
+          const nextWho =
+            who ||
+            (typeof ws.lastRecognitionName === "string" ? ws.lastRecognitionName.trim() : "");
 
           setSnapshotWho(nextWho);
           setSnapshotEmotion(emotion);

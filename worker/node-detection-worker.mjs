@@ -5015,6 +5015,10 @@ async function main() {
                 String(resolvedEmotionLabel || "").trim();
               cam.lastRecognitionMood = String(moodLabel || "").trim();
               cam.lastRecognitionEmotion = effectiveEmotionLabel;
+              // The dashboard card keeps the last snapshot after the person has
+              // left, so it needs the name that went with it — `people` and
+              // `matchedNames` are empty by then.
+              cam.lastRecognitionName = String(person.name || "").trim();
               person.emotionConfidence = Number(
                 Number.isFinite(resolvedEmotionConfidence)
                   ? resolvedEmotionConfidence
@@ -5065,6 +5069,18 @@ async function main() {
                 dbQueue.push(createDbQueueItem(dbPayload, now));
               }
 
+              // One line per row that leaves the worker: what was written and
+              // on how much evidence. "neutral" rows with emotion_samples=0 mean
+              // the visit was recorded before a single emotion reading existed.
+              log(
+                `[${cam.cameraId}] record name=${person.name} mood=${moodLabel} ` +
+                  `emotion="${effectiveEmotionLabel}" conf=${Number(person.emotionConfidence ?? 0).toFixed(3)} ` +
+                  `samples=${session.sampleCount} emotion_samples=${
+                    Array.isArray(session.emotionSamples) ? session.emotionSamples.length : 0
+                  } age_ms=${sessionAgeMs} via=${
+                    emotionChanged ? "change" : readyByRegistration && !readyBySession ? "registration" : "session"
+                  }`,
+              );
               cam.lastDbSentAt.set(cooldownKey, now);
               session.emittedAt = now;
               session.emittedMoodLabel = String(moodLabel || "");
@@ -5389,6 +5405,7 @@ async function main() {
             topEmotion: cam.topEmotion,
             lastRecognitionEmotion: cam.lastRecognitionEmotion,
             lastRecognitionMood: cam.lastRecognitionMood,
+            lastRecognitionName: cam.lastRecognitionName || "",
             previewUrl: cam.previewUrl,
             snapshotUrl: cam.snapshotUrl,
             snapshotSavedCount: Number.isFinite(cam.snapshotSavedCount) ? cam.snapshotSavedCount : 0,
