@@ -5273,7 +5273,10 @@ async function main() {
 
       if (now - lastHeartbeatAt >= heartbeatSeconds * 1000) {
         const passAvg = passStats.count ? passStats.totalMs / passStats.count : 0;
-        const passRate = passStats.count / Math.max(0.001, (now - passStats.since) / 1000);
+        // `now` was taken at the top of this iteration, before the pass ran;
+        // measuring the window with it produced "passes_per_s=1000" on the first
+        // heartbeat. Wall time is the honest denominator.
+        const passRate = passStats.count / Math.max(0.5, (Date.now() - passStats.since) / 1000);
         log(
           `heartbeat: cameras_ready=${states.length}/${states.length} faces_detected=${confirmedTotal} ` +
             `passes=${passStats.count} pass_ms avg=${passAvg.toFixed(0)} max=${passStats.maxMs} ` +
@@ -5282,7 +5285,7 @@ async function main() {
         passStats.count = 0;
         passStats.totalMs = 0;
         passStats.maxMs = 0;
-        passStats.since = now;
+        passStats.since = Date.now();
         lastHeartbeatAt = now;
       }
 
