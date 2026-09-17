@@ -217,7 +217,46 @@ if (health.status === 0) {
   }
 }
 
-console.log("\n6. Database");
+console.log("\n6. Recognition queue");
+// With WORKER_DB_WRITER_MODE=external the worker does not write rows itself: it
+// appends them to a JSONL file that mood-checker-recognition-consumer drains.
+// When that process is down, the worker log looks perfect and nothing reaches
+// the database — the one failure this whole pipeline gives no other sign of.
+const writerMode = String(process.env.WORKER_DB_WRITER_MODE || "").trim().toLowerCase();
+if (writerMode !== "external") {
+  ok(`worker writes rows itself (WORKER_DB_WRITER_MODE=${writerMode || "inline"})`);
+} else {
+  const queueFile =
+    (process.env.WORKER_DB_QUEUE_FILE || "").trim() ||
+    path.join(ROOT_DIR, "worker", "recognition-queue.jsonl");
+  const cursorFile = (process.env.WORKER_DB_QUEUE_CURSOR_FILE || "").trim() || `${queueFile}.cursor`;
+  if (!fs.existsSync(queueFile)) {
+    warn(`no queue file at ${queueFile} — nothing has been queued yet`);
+  } else {
+    const size = fs.statSync(queueFile).size;
+    let offset = 0;
+    try {
+      offset = Number(JSON.parse(fs.readFileSync(cursorFile, "utf-8"))?.offset ?? 0);
+    } catch {
+      offset = 0;
+    }
+    const pending = Math.max(0, size - offset);
+    const human = (bytes) => (bytes < 1024 ? `${bytes} B` : `${(bytes / 1024).toFixed(1)} KB`);
+    if (pending === 0) {
+      ok(`queue drained (${human(size)} processed)`);
+    } else {
+      // A backlog of a few hundred bytes is one row mid-flight; a growing one is
+      // a stopped or failing consumer.
+      const ageMs = Date.now() - fs.statSync(queueFile).mtimeMs;
+      bad(
+        `${human(pending)} queued but not written (last append ${(ageMs / 1000).toFixed(0)} s ago)`,
+        "pm2 logs mood-checker-recognition-consumer --lines 40   then   pm2 restart mood-checker-recognition-consumer",
+      );
+    }
+  }
+}
+
+console.log("\n7. Database");
 const recognitions = await get(`${BASE}/api/recognitions?limit=3`);
 if (recognitions.status === 0) {
   bad("app unreachable, see step 1");
