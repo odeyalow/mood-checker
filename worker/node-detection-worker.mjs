@@ -728,6 +728,9 @@ function createPresenceSession(now) {
     // as soon as it fills most of the window.
     emotionSamples: [],
     emittedMoodLabel: "",
+    // The emitted row carries the placeholder mood, so the first real reading
+    // of this visit should replace it rather than be treated as a mood change.
+    emittedWithFallbackMood: false,
     pendingMoodLabel: "",
     pendingMoodSince: 0,
     lastMoodLabel: "",
@@ -2284,6 +2287,10 @@ async function main() {
   // The new mood must hold this long before it is written, so a single noisy
   // frame cannot produce a row.
   const emotionChangeMinMs = Math.max(0, envInt("WORKER_EMOTION_CHANGE_MIN_MS", 1200));
+  // How long after a placeholder row the real emotion may still replace it.
+  // Keep it below RECOGNITION_DEDUP_MS (1800 by default) on the API side, or
+  // the upgrade lands as a second row instead of replacing the first.
+  const emotionUpgradeMaxMs = Math.max(0, envInt("WORKER_EMOTION_UPGRADE_MAX_MS", 1500));
   const emotionChangeMinConfidence = Math.max(
     0,
     Math.min(1, envFloat("WORKER_EMOTION_CHANGE_MIN_CONFIDENCE", 0.35)),
@@ -4951,8 +4958,14 @@ async function main() {
                 }
               }
 
+              // Whether the label about to be written is a real reading or the
+              // placeholder. A visit is often recorded on the frame the person
+              // is registered on, before a single emotion reading exists, and
+              // then the row says "neutral" for a face that was never read.
+              let moodFromFallback = false;
               if (!moodLabel && readyByRegistration && dbAllowMoodFallback) {
                 moodLabel = dbFallbackMood;
+                moodFromFallback = true;
               }
               // Keep recognition persistence robust: if session matured but
               // emotion label is still missing, emit with fallback mood.
@@ -4962,6 +4975,7 @@ async function main() {
                 sessionAgeMs >= camSessionResolveWaitMs
               ) {
                 moodLabel = dbFallbackMood;
+                moodFromFallback = true;
               }
               if (!resolvedEmotionLabel && moodLabel) {
                 resolvedEmotionLabel = moodLabel;
@@ -4971,6 +4985,12 @@ async function main() {
               // when mood inference is missing for a short session.
               if (!moodLabel) {
                 moodLabel = dbFallbackMood;
+                moodFromFallback = true;
+              }
+              // resolveSessionEmotionLabel hands back the same placeholder when
+              // the window holds no usable reading, and that path sets no flag.
+              if (!moodFromFallback && moodLabel === dbFallbackMood && !session.emotionSampleCount) {
+                moodFromFallback = true;
               }
 
               const readyBySession = canResolveFromSamples && Boolean(moodLabel);
@@ -4998,8 +5018,27 @@ async function main() {
                 }
               }
 
+              // A row already written from the placeholder is an unfinished
+              // reading, not a mood that changed: as soon as the face is
+              // actually read, send the real label instead of waiting out
+              // WORKER_EMOTION_CHANGE_MIN_MS, which a 2-second walk-past never
+              // reaches. The recognitions route replaces a recent neutral row
+              // rather than adding one (RECOGNITION_DEDUP_MS).
+              // Only inside the route's dedupe window: later than that it would
+              // add a second row instead of replacing the placeholder, and two
+              // rows for one walk-past is worse than one imprecise row.
+              const upgradesFallbackMood =
+                Boolean(session.emittedAt) &&
+                Boolean(session.emittedWithFallbackMood) &&
+                !moodFromFallback &&
+                Boolean(moodLabel) &&
+                moodLabel !== session.emittedMoodLabel &&
+                now - session.emittedAt <= emotionUpgradeMaxMs;
+
               const shouldEmitSessionRecord =
-                (!session.emittedAt && (readyBySession || readyByRegistration)) || emotionChanged;
+                (!session.emittedAt && (readyBySession || readyByRegistration)) ||
+                emotionChanged ||
+                upgradesFallbackMood;
               if (!shouldEmitSessionRecord) continue;
 
               const prevSeenAt = cam.lastSeenMatchedAt.get(person.name) ?? 0;
@@ -5007,7 +5046,9 @@ async function main() {
 
               const cooldownKey = `${cam.cameraId}:${person.name}`;
               const lastSent = cam.lastDbSentAt.get(cooldownKey) ?? 0;
-              if (!isReentry && now - lastSent < dbCooldownMs) continue;
+              // The upgrade replaces the row it is chasing, so the cooldown that
+              // protects against repeat rows does not apply to it.
+              if (!isReentry && !upgradesFallbackMood && now - lastSent < dbCooldownMs) continue;
 
               if (!person.emotion && resolvedEmotionLabel) {
                 person.emotion = resolvedEmotionLabel;
@@ -5080,12 +5121,19 @@ async function main() {
                   `samples=${session.sampleCount} emotion_samples=${
                     Array.isArray(session.emotionSamples) ? session.emotionSamples.length : 0
                   } age_ms=${sessionAgeMs} via=${
-                    emotionChanged ? "change" : readyByRegistration && !readyBySession ? "registration" : "session"
-                  }`,
+                    upgradesFallbackMood
+                      ? "upgrade"
+                      : emotionChanged
+                      ? "change"
+                      : readyByRegistration && !readyBySession
+                      ? "registration"
+                      : "session"
+                  } fallback=${moodFromFallback ? "1" : "0"}`,
               );
               cam.lastDbSentAt.set(cooldownKey, now);
               session.emittedAt = now;
               session.emittedMoodLabel = String(moodLabel || "");
+              session.emittedWithFallbackMood = moodFromFallback;
               session.pendingMoodLabel = "";
               session.pendingMoodSince = 0;
               // The rolling window is NOT cleared here. Clearing it left the next
