@@ -167,6 +167,34 @@ async function printConsistency(identities) {
   }
   process.stdout.write("\n");
 
+  // Folders left behind when an identity disappeared: deleted from the Faces
+  // page, or created and merged away by the identify post-check.
+  const facesRoot = path.join(ROOT_DIR, "public", "_faces");
+  const orphanDirs = [];
+  try {
+    for (const entry of fs.readdirSync(facesRoot, { withFileTypes: true })) {
+      if (!entry.isDirectory() || knownShortIds.has(entry.name)) continue;
+      let files = 0;
+      try {
+        files = fs.readdirSync(path.join(facesRoot, entry.name)).length;
+      } catch {
+        files = 0;
+      }
+      orphanDirs.push({ name: entry.name, files });
+    }
+  } catch {
+    // no snapshot folder yet
+  }
+  process.stdout.write("--- picture folders without an identity ---\n");
+  if (!orphanDirs.length) process.stdout.write("  none\n");
+  for (const dir of orphanDirs) {
+    process.stdout.write(`  ${dir.name.padEnd(10)} ${dir.files} file(s)   public/_faces/${dir.name}\n`);
+  }
+  if (orphanDirs.length) {
+    process.stdout.write("  Safe to delete: no page lists them. rm -rf the paths above.\n");
+  }
+  process.stdout.write("\n");
+
   process.stdout.write("--- last 12 rows ---\n");
   for (const r of recs.slice(0, 12)) {
     process.stdout.write(

@@ -123,6 +123,59 @@ async function getBlockedFaceIds() {
   return blockedIdsCache;
 }
 
+/**
+ * Moves the pictures of an identity that is about to disappear into the one
+ * that survives the merge, and returns the new URL of `keepUrl`.
+ *
+ * Without this the crop saved a moment ago under the temporary shortId is
+ * orphaned: public/_faces/<temp>/ stays on disk forever, no page ever lists it
+ * (the identity row is gone), and the dashboard is left pointing at a path
+ * whose identity no longer exists — which is exactly what "an id that is not on
+ * the Faces page" looks like from the outside.
+ */
+async function moveSnapshotsToIdentity(fromShortId: string, toShortId: string, keepUrl: string) {
+  const from = sanitizeShortId(fromShortId);
+  const to = sanitizeShortId(toShortId);
+  if (!from || !to || from === to) return keepUrl;
+
+  const fromDir = path.join(process.cwd(), "public", "_faces", from);
+  const toDir = path.join(process.cwd(), "public", "_faces", to);
+  let names: string[] = [];
+  try {
+    const entries = await fs.readdir(fromDir, { withFileTypes: true });
+    names = entries.filter((e) => e.isFile() && /\.(jpe?g|png)$/i.test(e.name)).map((e) => e.name);
+  } catch {
+    return keepUrl;
+  }
+  if (!names.length) {
+    await fs.rm(fromDir, { recursive: true, force: true }).catch(() => {});
+    return keepUrl;
+  }
+
+  await fs.mkdir(toDir, { recursive: true }).catch(() => {});
+  const keepName = keepUrl ? keepUrl.split("/").pop() || "" : "";
+  let movedKeepUrl = "";
+  for (const name of names) {
+    // The two identities were created within milliseconds of each other, so a
+    // name collision is conceivable; prefix on collision rather than overwrite.
+    let target = name;
+    try {
+      await fs.access(path.join(toDir, target));
+      target = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}-${name}`;
+    } catch {
+      // free
+    }
+    try {
+      await fs.rename(path.join(fromDir, name), path.join(toDir, target));
+      if (name === keepName) movedKeepUrl = `/_faces/${to}/${target}`;
+    } catch {
+      // Best effort: a picture we cannot move is not worth failing a merge over.
+    }
+  }
+  await fs.rm(fromDir, { recursive: true, force: true }).catch(() => {});
+  return movedKeepUrl || keepUrl;
+}
+
 async function saveSnapshot(shortId: string, buf: Buffer) {
   const safeId = sanitizeShortId(shortId);
   if (!safeId) return "";
@@ -412,6 +465,14 @@ export async function POST(request: Request) {
     const shouldMerge = mergeByStrict || mergeByRelaxed;
 
     if (duplicateCandidate && shouldMerge && duplicateCandidate.createdAt <= created.createdAt) {
+      // Do this before the transaction so the dedup log records where the
+      // picture actually ended up. If the transaction then fails, the crop sits
+      // with the surviving identity, which is where it belongs anyway.
+      const mergedSnapshotUrl = await moveSnapshotsToIdentity(
+        created.shortId,
+        duplicateCandidate.shortId,
+        sourceSnapshotUrl,
+      );
       const targetSnapshotUrl = await getBestIdentitySnapshot(duplicateCandidate.id, duplicateCandidate.shortId);
       const mergedDescriptor = mergeDescriptor(duplicateCandidate.descriptor, descriptor, updateAlpha);
       // The duplicate was a real sighting of this person, so its vector is worth
@@ -443,7 +504,7 @@ export async function POST(request: Request) {
             reason: DUPLICATE_REASON,
             sourceFaceId: created.id,
             sourceShortId: created.shortId,
-            sourceSnapshotUrl: sourceSnapshotUrl || null,
+            sourceSnapshotUrl: mergedSnapshotUrl || null,
             targetFaceId: duplicateCandidate.id,
             targetShortId: duplicateCandidate.shortId,
             targetSnapshotUrl: targetSnapshotUrl || null,
@@ -464,6 +525,9 @@ export async function POST(request: Request) {
         descriptor: mergedDescriptor,
         descriptors: mergedTemplate ?? duplicateCandidate.template,
         templateSize: (mergedTemplate ?? duplicateCandidate.template).length,
+        // Under the surviving identity now, so the worker and the dashboard
+        // point at a path that still has an identity behind it.
+        snapshotUrl: mergedSnapshotUrl || "",
       });
     }
 

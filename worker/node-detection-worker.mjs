@@ -4564,15 +4564,17 @@ async function main() {
                             distance = Number(identified.distance) || 0;
                             if (!bestDistance || distance < bestDistance) bestDistance = distance;
                           }
+                          if (identified.snapshotUrl) {
+                            // The route stored our crop as this identity's
+                            // picture; the DB record should point at it rather
+                            // than at the shared camera snapshot. Also set on a
+                            // merge, where the crop was moved into the surviving
+                            // identity's folder and `name` is that identity.
+                            cam.lastFaceArchiveUrlByName.set(name, identified.snapshotUrl);
+                            cam.lastFaceArchiveAtByName.set(name, now);
+                          }
                           if (justRegistered) {
                             cam.lastAutoCreatedAt = now;
-                            if (identified.snapshotUrl) {
-                              // The route stored our crop as the identity's first
-                              // picture; the first DB record should point at it
-                              // rather than at the shared camera snapshot.
-                              cam.lastFaceArchiveUrlByName.set(name, identified.snapshotUrl);
-                              cam.lastFaceArchiveAtByName.set(name, now);
-                            }
                             // The numbers a false enrolment leaves behind. When a
                             // "face" that was the back of a head shows up on the
                             // Faces page, this says what score/size/sharpness let
