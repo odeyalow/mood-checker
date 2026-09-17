@@ -2366,6 +2366,12 @@ async function main() {
     envFloat("WORKER_NEW_ID_EMPTY_MIN_SHARPNESS", Math.max(newIdMinSharpness, 11)),
   );
   const newIdMaxGapMs = Math.max(120, envInt("WORKER_NEW_ID_MAX_GAP_MS", 1500));
+  // true (default): the first frame that clears the soft gate may enrol, as it
+  // always did — a walking person is enrolled on the pass they are seen on.
+  // false: enrolment waits for the full gate (N stable frames), which halves
+  // false enrolments but at walking pace often waits the person out of frame.
+  // A wrong enrolment is one click to block; a missed one is invisible.
+  const newIdSoftCreate = envBool("WORKER_NEW_ID_SOFT_CREATE", true);
   const phantomBankThreshold = Math.max(
     0.01,
     Math.min(2, envFloat("WORKER_PHANTOM_BANK_THRESHOLD", 0.5)),
@@ -4525,7 +4531,7 @@ async function main() {
                         descriptor,
                         camMatchThreshold,
                         cropBuffer ? cropBuffer.toString("base64") : "",
-                        { allowCreate: readyForNewId },
+                        { allowCreate: readyForNewId || newIdSoftCreate },
                       );
                       if (identified?.shortId) {
                         const identifiedShortId = normalizeFaceShortId(identified.shortId);
