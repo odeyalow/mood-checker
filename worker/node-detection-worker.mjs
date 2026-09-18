@@ -449,13 +449,38 @@ function normalizeEmotionExpressions(expressions) {
   return Object.keys(normalized).length ? normalized : undefined;
 }
 
-function parseEmotionFromExpressions(expressions, keys, strictness = 0) {
+function parseEmotionFromExpressions(expressions, keys, strictness = 0, trustModel = false) {
   if (!expressions) {
     return {
       key: "",
       confidence: 0,
       vector: {},
     };
+  }
+
+  // Report what the model said, unchanged.
+  //
+  // Everything below this point was written for face-api, whose expression
+  // outputs needed correcting. HSEmotion returns a calibrated softmax, and the
+  // corrections then work against it: neutral is discounted, the expressive
+  // classes are multiplied up, and a runner-up is promoted over neutral as soon
+  // as it reaches 60-80% of it — which on a mildly expressive face is always
+  // true. Measured consequence on this camera: neutral, happy and surprised
+  // never won a single record, while sad/angry/disgusted took every one.
+  if (trustModel) {
+    const vector = {};
+    let topKey = "";
+    let topVal = -1;
+    for (const k of keys) {
+      const raw = Number(expressions[k] ?? 0);
+      const safe = Number.isFinite(raw) ? Math.max(0, raw) : 0;
+      vector[k] = safe;
+      if (safe > topVal) {
+        topVal = safe;
+        topKey = k;
+      }
+    }
+    return { key: topVal > 0 ? topKey : "", confidence: topVal > 0 ? topVal : 0, vector };
   }
 
   // strictness 0 = lenient/expressive (legacy), 1 = strict (favours neutral, needs
@@ -840,6 +865,7 @@ function resolveSessionEmotionLabel({
   allowFallbackMood,
   fallbackMood,
   strictness = 0,
+  trustModel = false,
   peakWeight = 0,
   voteWeight = 0,
   pairMaxGap = 0,
@@ -891,7 +917,12 @@ function resolveSessionEmotionLabel({
     }
   }
 
-  const parsed = parseEmotionFromExpressions(vector, emotionKeys || Object.keys(vector), strictness);
+  const parsed = parseEmotionFromExpressions(
+    vector,
+    emotionKeys || Object.keys(vector),
+    strictness,
+    trustModel,
+  );
   // A near-tie between two emotions that really can share a face is reported as
   // both, instead of silently picking the one that happened to be 0.02 ahead.
   const pairedLabel = parsed.key
@@ -2395,6 +2426,13 @@ async function main() {
   );
   // 0 = legacy expressive bias, 1 = strict (favours neutral, fewer unrealistic emotions).
   const emotionStrictness = Math.max(0, Math.min(1, envFloat("WORKER_EMOTION_STRICTNESS", 0.5)));
+  // The heuristic below strictness was built for face-api. With the hsemotion
+  // backend the model already returns a calibrated softmax, so reshaping it
+  // only adds bias — default to reporting the model as-is there.
+  const emotionTrustModel = envBool(
+    "WORKER_EMOTION_TRUST_MODEL",
+    String(process.env.WORKER_EMOTION_BACKEND || "hsemotion").trim().toLowerCase() === "hsemotion",
+  );
   const emotionEmaAlpha = Math.max(0, Math.min(1, envFloat("WORKER_EMOTION_EMA_ALPHA", 0.9)));
   // 0 = ignore a label's best frame entirely (recommended), 1 = the old peak-driven
   // behaviour where one strong frame could decide the whole visit.
@@ -4922,7 +4960,7 @@ async function main() {
               }
             }
 
-            const parsedEmotion = parseEmotionFromExpressions(det?.expressions, emotionKeys, emotionStrictness);
+            const parsedEmotion = parseEmotionFromExpressions(det?.expressions, emotionKeys, emotionStrictness, emotionTrustModel);
             if (det?.expressions && process.env.WORKER_EMOTION_DEBUG === "1") {
               const exprStr = Object.entries(det.expressions)
                 .map(([k, v]) => `${k}=${Number(v).toFixed(3)}`).join(" ");
@@ -4951,7 +4989,7 @@ async function main() {
                   : currentVal;
               }
 
-              const parsedSmoothed = parseEmotionFromExpressions(smoothed, emotionKeys, emotionStrictness);
+              const parsedSmoothed = parseEmotionFromExpressions(smoothed, emotionKeys, emotionStrictness, emotionTrustModel);
               emotionKey = parsedSmoothed.key;
               emotionConfidence = parsedSmoothed.confidence;
               emotionVector = parsedSmoothed.vector;
@@ -5268,6 +5306,7 @@ async function main() {
                   allowFallbackMood: dbAllowMoodFallback,
                   fallbackMood: dbFallbackMood,
                   strictness: emotionStrictness,
+                  trustModel: emotionTrustModel,
                   peakWeight: emotionPeakWeight,
                   voteWeight: emotionVoteWeight,
                   pairMaxGap: emotionPairMaxGap,

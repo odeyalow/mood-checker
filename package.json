@@ -42,6 +42,7 @@
     "faces:report": "node scripts/registry-report.mjs",
     "test:enrolment": "node scripts/test-enrolment-quality.mjs",
     "test:mjpeg": "node scripts/test-mjpeg-reader.mjs",
+    "test:emotion": "node scripts/test-emotion-parse.mjs",
     "create-user": "node scripts/create-user.mjs",
     "faces:clear": "node scripts/manage-faces.mjs clear",
     "faces:delete": "node scripts/manage-faces.mjs delete",
