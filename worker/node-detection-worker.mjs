@@ -2304,6 +2304,16 @@ async function main() {
   // blindly rejects normal faces too (nothing gets matched -> pipeline log cycles).
   // Turn on only after reading real numbers via WORKER_POSE_DEBUG=1.
   const recordRequireFrontal = envBool("WORKER_RECORD_REQUIRE_FRONTAL", false);
+  // Whether a face must pass the frontal check before it may be MATCHED against
+  // known identities. Off by default, and deliberately separate from enrolment:
+  // recognising someone already on file is robust to a turned head, and the
+  // match threshold rejects a bad angle on its own by distance. Creating a NEW
+  // identity from a bad angle is what poisons the registry, and that still
+  // requires the full check below. Measured on this camera: a walking person
+  // yields yawOff 0.40-0.90, well past the 0.49 ceiling the pose gate can even
+  // express, because a downward camera squeezes the eye span the metric divides
+  // by — so the gate was rejecting faces the recogniser handles fine.
+  const matchRequireFrontal = envBool("WORKER_MATCH_REQUIRE_FRONTAL", false);
   const recordPoseMaxYaw = Math.max(0.1, Math.min(0.49, envFloat("WORKER_RECORD_POSE_MAX_YAW", 0.36)));
   const recordPoseMinMouthDrop = Math.max(
     0,
@@ -4636,7 +4646,7 @@ async function main() {
               if (
                 faceSide >= camMatchMinFaceSidePx &&
                 identityScore >= camIdentityMinScore &&
-                isFrontalFace
+                (!matchRequireFrontal || isFrontalFace)
               ) {
                 const ranked = computeMatchCandidates(knownLabeledDescriptors, descriptor);
                 const bestCandidate = ranked[0];
@@ -4689,7 +4699,27 @@ async function main() {
                   faceSide >= Math.max(10, camNewIdMinFaceSidePx - 8) &&
                   identityScore >= Math.max(0.07, camNewIdMinScore - 0.05) &&
                   faceSharpness >= Math.max(2.5, camNewIdMinSharpness * 0.35);
-                const canAttemptNewId = readyForNewId || softReadyForNewId;
+                // Enrolment keeps the full frontal check even when matching no
+                // longer needs it: a bad angle costs one missed recognition,
+                // but a bad angle turned into an identity poisons the registry
+                // for good and shows up later as a duplicate of the same person.
+                const canAttemptNewId = (readyForNewId || softReadyForNewId) && isFrontalFace;
+                if (
+                  (readyForNewId || softReadyForNewId) &&
+                  !isFrontalFace &&
+                  isUnknownIdentity(name) &&
+                  now - (cam.lastEnrolPoseLogAt || 0) >= 5000
+                ) {
+                  const pm = computeFacePoseMetrics(det);
+                  log(
+                    `[${cam.cameraId}] new_id blocked pose ` +
+                      (pm
+                        ? `eyeDist=${pm.eyeDist} yawOff=${pm.yawOff} mouthDrop=${pm.mouthDrop} ` +
+                          `eyeLineY=${pm.eyeLineYRatio}`
+                        : "no landmarks"),
+                  );
+                  cam.lastEnrolPoseLogAt = now;
+                }
                 const blockedBankMatch = canAttemptNewId
                   ? findClosestDescriptorInBank(blockedDescriptorBank, descriptor)
                   : null;
@@ -4796,7 +4826,7 @@ async function main() {
                 if (identityScore < camIdentityMinScore) {
                   blockers.push(`score=${identityScore.toFixed(3)}<${camIdentityMinScore.toFixed(3)}`);
                 }
-                if (!isFrontalFace) {
+                if (matchRequireFrontal && !isFrontalFace) {
                   const pm = computeFacePoseMetrics(det);
                   blockers.push(
                     pm
