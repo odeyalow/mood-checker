@@ -155,14 +155,20 @@ function namesFromStatus(status: WorkerStatus): string[] {
 
 function emotionSummaryFromPeople(people: WorkerPerson[]): string {
   if (!Array.isArray(people) || !people.length) return "";
-  return people
+  const named = people.filter((person) => String(person?.name ?? "").trim());
+  if (!named.length) return "";
+  // One person: the card already shows who it is on its own line, so prefixing
+  // the name here rendered as "Emotion: DFT5PE: happy 35%". Several people:
+  // the name is what tells the readings apart.
+  if (named.length === 1) {
+    return String(named[0]?.emotion ?? "").trim();
+  }
+  return named
     .map((person) => {
       const name = String(person?.name ?? "").trim();
-      if (!name) return "";
       const emotion = String(person?.emotion ?? "").trim() || "-";
       return `${name}: ${emotion}`;
     })
-    .filter(Boolean)
     .join(", ");
 }
 
