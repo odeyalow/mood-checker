@@ -379,6 +379,8 @@ class EmotionEngine:
         self._input_name = ""
         self._lock = threading.Lock()
         self._model_path = ""
+        # Replaced by the model's own input size once a session is created.
+        self._input_size = EMOTION_INPUT_SIZE
         self._margin = max(0.0, min(0.6, env_float("WORKER_EMOTION_CROP_MARGIN", 0.1)))
         self._class_bias = parse_class_bias(env_str("WORKER_EMOTION_CLASS_BIAS", ""))
         self._fail_logged = False
@@ -407,14 +409,28 @@ class EmotionEngine:
             self._session = ort.InferenceSession(
                 str(model_path), sess_options=options, providers=providers
             )
-            self._input_name = self._session.get_inputs()[0].name
+            model_input = self._session.get_inputs()[0]
+            self._input_name = model_input.name
+            # Input size comes from the model, not from its filename: the
+            # HSEmotion family does not agree on one (enet_b0_8 takes 224,
+            # enet_b2_8 takes 260). Feeding the wrong size either throws on a
+            # fixed shape or silently returns nonsense on a dynamic one.
+            self._input_size = EMOTION_INPUT_SIZE
+            shape = list(getattr(model_input, "shape", []) or [])
+            if len(shape) >= 2:
+                dims = [d for d in shape[-2:] if isinstance(d, int) and d > 0]
+                if len(dims) == 2 and dims[0] == dims[1]:
+                    self._input_size = dims[0]
             self._model_path = str(model_path)
             bias_note = (
                 " bias=" + ",".join(f"{k}={v:g}" for k, v in sorted(self._class_bias.items()))
                 if self._class_bias
                 else ""
             )
-            log(f"emotion model loaded {model_path.name} providers={','.join(providers)}{bias_note}")
+            log(
+                f"emotion model loaded {model_path.name} input={self._input_size}px "
+                f"providers={','.join(providers)}{bias_note}"
+            )
         except Exception as exc:  # noqa: BLE001 - never let emotions break detection
             self._session = None
             log(f"emotion model failed to load err={exc} — emotions fall back to face-api")
@@ -428,6 +444,7 @@ class EmotionEngine:
         return {
             "emotionModel": Path(self._model_path).name if self._model_path else None,
             "emotionEnabled": self.enabled,
+            "emotionInputSize": getattr(self, "_input_size", None) if self.enabled else None,
             "emotionClassBias": self._class_bias or None,
         }
 
@@ -445,9 +462,8 @@ class EmotionEngine:
         crop = frame_bgr[y1:y2, x1:x2]
         if crop.size == 0:
             return None
-        resized = cv2.resize(
-            crop, (EMOTION_INPUT_SIZE, EMOTION_INPUT_SIZE), interpolation=cv2.INTER_LINEAR
-        )
+        size = int(getattr(self, "_input_size", EMOTION_INPUT_SIZE) or EMOTION_INPUT_SIZE)
+        resized = cv2.resize(crop, (size, size), interpolation=cv2.INTER_LINEAR)
         rgb = cv2.cvtColor(resized, cv2.COLOR_BGR2RGB).astype(np.float32) / 255.0
         chw = np.transpose(rgb, (2, 0, 1))
         normalized = (chw - IMAGENET_MEAN) / IMAGENET_STD
