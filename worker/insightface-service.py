@@ -127,6 +127,17 @@ def env_str(name: str, default: str) -> str:
     return value or default
 
 
+def env_bool(name: str, default: bool) -> bool:
+    value = os.getenv(name, "").strip().lower()
+    if not value:
+        return default
+    if value in ("1", "true", "yes", "on"):
+        return True
+    if value in ("0", "false", "no", "off"):
+        return False
+    return default
+
+
 def decode_image_from_bytes(data: bytes) -> np.ndarray | None:
     if not data:
         return None
@@ -396,6 +407,17 @@ class EmotionEngine:
         # and turned every single smile into "disgusted"; dropping Contempt
         # matched 15 of 15 and left anger and sadness untouched. Set it to
         # "disgusted" or "neutral" to fold it back in.
+        # Level the eyes before classifying. The model expects upright faces; a
+        # camera mounted high and angled down delivers them tilted, and the tilt
+        # reaches the classifier as a smeared, low-confidence distribution.
+        self._align_enabled = env_bool("WORKER_EMOTION_ALIGN", True)
+        self._align_min_deg = max(0.0, env_float("WORKER_EMOTION_ALIGN_MIN_DEG", 3.0))
+        self._align_max_deg = max(
+            self._align_min_deg, env_float("WORKER_EMOTION_ALIGN_MAX_DEG", 45.0)
+        )
+        # Where the eye line sits in the aligned crop, as a fraction of its
+        # height: 0.8 leaves room for the mouth, which carries most of a smile.
+        self._align_eye_line = min(1.5, max(0.3, env_float("WORKER_EMOTION_ALIGN_EYE_LINE", 0.8)))
         contempt = env_str("WORKER_EMOTION_CONTEMPT_MAP", "drop").strip().lower()
         if contempt in {"drop", "none", "ignore"}:
             self._contempt_target = ""
@@ -469,19 +491,67 @@ class EmotionEngine:
             "emotionClassBias": self._class_bias or None,
         }
 
-    def _preprocess(self, frame_bgr: np.ndarray, box: dict[str, float]) -> np.ndarray | None:
-        height, width = frame_bgr.shape[:2]
-        pad_x = box["width"] * self._margin
-        pad_y = box["height"] * self._margin
-        x1 = int(max(0, math.floor(box["x"] - pad_x)))
-        y1 = int(max(0, math.floor(box["y"] - pad_y)))
-        x2 = int(min(width, math.ceil(box["x"] + box["width"] + pad_x)))
-        y2 = int(min(height, math.ceil(box["y"] + box["height"] + pad_y)))
-        if x2 - x1 < 16 or y2 - y1 < 16:
+    def _align(self, frame_bgr: np.ndarray, box: dict[str, float], kps: Any) -> np.ndarray | None:
+        """Rotates the face so the eyes sit level before it is cropped.
+
+        The model was trained on upright faces. A camera mounted high and angled
+        down delivers them tilted, and a plain rectangular crop hands that tilt
+        straight to the classifier, which shows up as a smeared, low-confidence
+        distribution rather than a clean winner. Rotating about the midpoint
+        between the eyes costs one small warpAffine.
+        """
+        if kps is None:
+            return None
+        arr = np.asarray(kps, dtype=np.float32)
+        if arr.ndim != 2 or arr.shape[0] < 2:
+            return None
+        left_eye, right_eye = arr[0][:2], arr[1][:2]
+        dx = float(right_eye[0] - left_eye[0])
+        dy = float(right_eye[1] - left_eye[1])
+        if abs(dx) < 1e-3 and abs(dy) < 1e-3:
+            return None
+        angle = math.degrees(math.atan2(dy, dx))
+        # A larger angle than this is a detection artefact, not a tilted head;
+        # rotating by it would make the crop worse, not better.
+        if abs(angle) < self._align_min_deg or abs(angle) > self._align_max_deg:
             return None
 
-        crop = frame_bgr[y1:y2, x1:x2]
-        if crop.size == 0:
+        side = max(box["width"], box["height"]) * (1.0 + 2.0 * self._margin)
+        if side < 16:
+            return None
+        centre = ((left_eye[0] + right_eye[0]) / 2.0, (left_eye[1] + right_eye[1]) / 2.0)
+        matrix = cv2.getRotationMatrix2D(centre, angle, 1.0)
+        # Put the face box centre where the crop's centre will be, so the warp
+        # and the cut are one operation instead of two resamplings.
+        matrix[0, 2] += side / 2.0 - centre[0]
+        matrix[1, 2] += side / 2.0 * self._align_eye_line - centre[1]
+        out = int(round(side))
+        return cv2.warpAffine(
+            frame_bgr, matrix, (out, out), flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_REPLICATE
+        )
+
+    def _preprocess(
+        self, frame_bgr: np.ndarray, box: dict[str, float], kps: Any = None
+    ) -> np.ndarray | None:
+        crop = None
+        if self._align_enabled:
+            try:
+                crop = self._align(frame_bgr, box, kps)
+            except Exception:  # noqa: BLE001 - alignment is an optimisation, never a requirement
+                crop = None
+
+        if crop is None:
+            height, width = frame_bgr.shape[:2]
+            pad_x = box["width"] * self._margin
+            pad_y = box["height"] * self._margin
+            x1 = int(max(0, math.floor(box["x"] - pad_x)))
+            y1 = int(max(0, math.floor(box["y"] - pad_y)))
+            x2 = int(min(width, math.ceil(box["x"] + box["width"] + pad_x)))
+            y2 = int(min(height, math.ceil(box["y"] + box["height"] + pad_y)))
+            if x2 - x1 < 16 or y2 - y1 < 16:
+                return None
+            crop = frame_bgr[y1:y2, x1:x2]
+        if crop is None or crop.size == 0:
             return None
         size = int(getattr(self, "_input_size", EMOTION_INPUT_SIZE) or EMOTION_INPUT_SIZE)
         resized = cv2.resize(crop, (size, size), interpolation=cv2.INTER_LINEAR)
@@ -490,11 +560,13 @@ class EmotionEngine:
         normalized = (chw - IMAGENET_MEAN) / IMAGENET_STD
         return normalized[np.newaxis, ...].astype(np.float32)
 
-    def predict(self, frame_bgr: np.ndarray, box: dict[str, float]) -> dict[str, float] | None:
+    def predict(
+        self, frame_bgr: np.ndarray, box: dict[str, float], kps: Any = None
+    ) -> dict[str, float] | None:
         if self._session is None:
             return None
         try:
-            tensor = self._preprocess(frame_bgr, box)
+            tensor = self._preprocess(frame_bgr, box, kps)
             if tensor is None:
                 return None
             with self._lock:
@@ -630,6 +702,9 @@ class InsightFaceEngine:
                     "box": box,
                     "landmarks": landmarks_from_face(face),
                     "descriptor": descriptor,
+                    # Raw keypoints for the emotion crop's alignment. Stripped
+                    # below: this is a numpy array, and it is not part of the API.
+                    "_kps": getattr(face, "kps", None),
                 }
             )
 
@@ -640,9 +715,12 @@ class InsightFaceEngine:
         # Classify only the faces actually being returned, after the max_faces cut.
         if include_emotions and EMOTIONS.enabled:
             for row in rows:
-                expressions = EMOTIONS.predict(frame_bgr, row["box"])
+                expressions = EMOTIONS.predict(frame_bgr, row["box"], row.get("_kps"))
                 if expressions:
                     row["expressions"] = expressions
+
+        for row in rows:
+            row.pop("_kps", None)
 
         return rows
 
