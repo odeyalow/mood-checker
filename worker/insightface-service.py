@@ -196,6 +196,11 @@ def apply_crop(frame: np.ndarray, crop: dict) -> np.ndarray | None:
 _TIMING_LOCK = threading.Lock()
 _TIMING = {"n": 0, "decode": 0.0, "decode_max": 0.0, "run": 0.0, "run_max": 0.0, "faces": 0, "last_log": time.monotonic()}
 _TIMING_LOG_EVERY_S = max(2.0, float(os.getenv("WORKER_ANALYZE_TIMING_LOG_S", "10") or 10))
+# Raw per-class probabilities, before the eight model classes are folded into
+# seven keys. Rate limited; off unless asked for.
+_EMOTION_RAW_DEBUG = os.getenv("WORKER_EMOTION_RAW_DEBUG", "0").strip().lower() in ("1", "true", "yes", "on")
+_EMOTION_RAW_LOG_EVERY_S = max(0.2, float(os.getenv("WORKER_EMOTION_RAW_LOG_S", "1") or 1))
+_EMOTION_RAW_LAST_LOG = 0.0
 
 
 def record_timing(decode_ms: float, run_ms: float, faces: int, shape) -> None:
@@ -382,6 +387,17 @@ class EmotionEngine:
         # Replaced by the model's own input size once a session is created.
         self._input_size = EMOTION_INPUT_SIZE
         self._margin = max(0.0, min(0.6, env_float("WORKER_EMOTION_CROP_MARGIN", 0.1)))
+        # Where the model's "Contempt" class goes. It shares the "disgusted" key
+        # with Disgust by default, which is the only key fed by two classes.
+        # "neutral" treats it as a composed face; "drop" ignores it entirely and
+        # lets the remaining seven compete on their own.
+        contempt = env_str("WORKER_EMOTION_CONTEMPT_MAP", "disgusted").strip().lower()
+        if contempt in {"drop", "none", "ignore"}:
+            self._contempt_target = ""
+        elif contempt in FACEAPI_EMOTION_KEYS:
+            self._contempt_target = contempt
+        else:
+            self._contempt_target = "disgusted"
         self._class_bias = parse_class_bias(env_str("WORKER_EMOTION_CLASS_BIAS", ""))
         self._fail_logged = False
 
@@ -488,9 +504,27 @@ class EmotionEngine:
                 self._fail_logged = True
             return None
 
+        # The eight model classes become seven keys, and "disgusted" is the only
+        # one fed by two of them (Contempt + Disgust). Summing is correct
+        # probability arithmetic for "either", but it hands that key a structural
+        # advantage no other key has — and Contempt is exactly the slightly
+        # pressed lips a downward camera sees on a calm face. This log shows the
+        # raw eight so the decision below rests on numbers.
+        if _EMOTION_RAW_DEBUG:
+            now_mono = time.monotonic()
+            global _EMOTION_RAW_LAST_LOG
+            if now_mono - _EMOTION_RAW_LAST_LOG >= _EMOTION_RAW_LOG_EVERY_S:
+                _EMOTION_RAW_LAST_LOG = now_mono
+                pairs = " ".join(
+                    f"{label}={float(prob):.3f}" for label, prob in zip(HSEMOTION_LABELS, probs)
+                )
+                log(f"emotion_raw8 {pairs}")
+
         scores = {key: 0.0 for key in FACEAPI_EMOTION_KEYS}
         for label, prob in zip(HSEMOTION_LABELS, probs):
-            scores[HSEMOTION_TO_FACEAPI[label]] += float(prob)
+            target = self._contempt_target if label == "Contempt" else HSEMOTION_TO_FACEAPI[label]
+            if target:
+                scores[target] += float(prob)
 
         if self._class_bias:
             for key, weight in self._class_bias.items():
