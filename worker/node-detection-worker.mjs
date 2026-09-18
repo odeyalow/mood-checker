@@ -4663,10 +4663,33 @@ async function main() {
             if (!shortId || blockedFaceIds.has(shortId)) return;
             const lastAt = Number(cam.lastFaceArchiveAtByName.get(personName) || 0);
             if (now - lastAt < camFaceArchiveCooldownMs) return;
-            if (Number(quality?.faceSide ?? 0) < camRecordMinFaceSidePx) return;
-            if (Number(quality?.faceSharpness ?? 0) < camRecordMinSharpness) return;
+            const side = Number(quality?.faceSide ?? 0);
+            const sharp = Number(quality?.faceSharpness ?? 0);
+            if (side < camRecordMinFaceSidePx || sharp < camRecordMinSharpness) {
+              // Why the gallery stays empty while records keep appearing. The
+              // record path and the picture path have different gates, so one
+              // can run for a whole visit while the other never fires.
+              if (now - (cam.lastArchiveSkipLogAt || 0) >= 5000) {
+                const blockers = [];
+                if (side < camRecordMinFaceSidePx) {
+                  blockers.push(`side=${side.toFixed(0)}<${camRecordMinFaceSidePx}`);
+                }
+                if (sharp < camRecordMinSharpness) {
+                  blockers.push(`sharp=${sharp.toFixed(1)}<${camRecordMinSharpness.toFixed(1)}`);
+                }
+                log(`[${cam.cameraId}] archive_skip name=${shortId} ${blockers.join(" ")}`);
+                cam.lastArchiveSkipLogAt = now;
+              }
+              return;
+            }
             const buffer = faceCropFor(det);
-            if (!buffer) return;
+            if (!buffer) {
+              if (now - (cam.lastArchiveSkipLogAt || 0) >= 5000) {
+                log(`[${cam.cameraId}] archive_skip name=${shortId} crop_failed`);
+                cam.lastArchiveSkipLogAt = now;
+              }
+              return;
+            }
             try {
               const url = await archiveFaceSnapshot({
                 archiveDir: faceArchiveDir,
