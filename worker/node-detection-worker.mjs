@@ -4784,6 +4784,29 @@ async function main() {
                     }
                   }
                 }
+              } else if (now - (cam.lastMatchSkipLogAt || 0) >= 2000) {
+                // Matching never ran for this face. Without this line the log
+                // shows a detected face and "who=unknown" with nothing in
+                // between: no no_match, no new_id, no record. Says which of the
+                // three pre-conditions stopped it, with the measured value.
+                const blockers = [];
+                if (faceSide < camMatchMinFaceSidePx) {
+                  blockers.push(`side=${faceSide.toFixed(0)}<${camMatchMinFaceSidePx}`);
+                }
+                if (identityScore < camIdentityMinScore) {
+                  blockers.push(`score=${identityScore.toFixed(3)}<${camIdentityMinScore.toFixed(3)}`);
+                }
+                if (!isFrontalFace) {
+                  const pm = computeFacePoseMetrics(det);
+                  blockers.push(
+                    pm
+                      ? `pose(eyeDist=${pm.eyeDist} mouthDrop=${pm.mouthDrop} yawOff=${pm.yawOff} ` +
+                          `eyeLineY=${pm.eyeLineYRatio})`
+                      : "pose(no landmarks)",
+                  );
+                }
+                log(`[${cam.cameraId}] match_skip ${blockers.join(" ") || "unknown"}`);
+                cam.lastMatchSkipLogAt = now;
               }
             }
             if (!isUnknownIdentity(name)) {
