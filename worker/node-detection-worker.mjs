@@ -81,11 +81,6 @@ function envBool(name, fallback) {
   return ["1", "true", "yes", "on"].includes(v);
 }
 
-function toBase64(buffer) {
-  if (!(buffer instanceof Buffer) || !buffer.length) return "";
-  return buffer.toString("base64");
-}
-
 function pickPythonCandidates() {
   const candidates = [];
   const explicit = String(process.env.WORKER_PYTHON_BIN ?? "").trim();
@@ -1706,6 +1701,67 @@ function validateFrameBuffer(buffer) {
   }
 }
 
+/**
+ * Frame size straight from the JPEG/PNG header, without decoding the pixels.
+ *
+ * The zoom window (and therefore the crop the service is asked for) is derived
+ * from the frame size, so knowing it early is what lets the analyze request go
+ * out while the decode is still running. Walks the JPEG marker chain to the
+ * first SOF; returns null on anything it does not recognise, and the caller
+ * then falls back to decoding first.
+ */
+/** The zoom window in source pixels: a centre crop, shifted vertically by offsetY. */
+function computeZoomWindow(sourceWidth, sourceHeight, zoom, offsetY) {
+  const workerWidth = zoom > 1 ? Math.max(64, Math.floor(sourceWidth / zoom)) : sourceWidth;
+  const workerHeight = zoom > 1 ? Math.max(64, Math.floor(sourceHeight / zoom)) : sourceHeight;
+  const cropX = Math.max(0, Math.floor((sourceWidth - workerWidth) / 2));
+  const cropYRange = Math.max(0, sourceHeight - workerHeight);
+  const cropY = Math.max(
+    0,
+    Math.min(cropYRange, Math.floor(cropYRange / 2 - offsetY * cropYRange)),
+  );
+  return { workerWidth, workerHeight, cropX, cropY };
+}
+
+function readImageDimensions(buffer) {
+  if (!(buffer instanceof Buffer) || buffer.length < 24) return null;
+
+  // PNG: IHDR is always the first chunk, at a fixed offset.
+  if (buffer[0] === 0x89 && buffer[1] === 0x50 && buffer[2] === 0x4e && buffer[3] === 0x47) {
+    const width = buffer.readUInt32BE(16);
+    const height = buffer.readUInt32BE(20);
+    return width > 0 && height > 0 ? { width, height } : null;
+  }
+
+  if (buffer[0] !== 0xff || buffer[1] !== 0xd8) return null;
+  let offset = 2;
+  while (offset + 9 < buffer.length) {
+    if (buffer[offset] !== 0xff) {
+      offset += 1; // resync over padding bytes
+      continue;
+    }
+    const marker = buffer[offset + 1];
+    // Standalone markers carry no length field.
+    if (marker === 0xd8 || marker === 0x01 || (marker >= 0xd0 && marker <= 0xd7)) {
+      offset += 2;
+      continue;
+    }
+    if (marker === 0xd9 || marker === 0xda) return null; // image data starts, no SOF seen
+    const length = buffer.readUInt16BE(offset + 2);
+    if (length < 2) return null;
+    // Every SOFn except the four that are not frame headers (C4 DHT, C8, CC DAC).
+    const isSof =
+      marker >= 0xc0 && marker <= 0xcf && marker !== 0xc4 && marker !== 0xc8 && marker !== 0xcc;
+    if (isSof) {
+      const height = buffer.readUInt16BE(offset + 5);
+      const width = buffer.readUInt16BE(offset + 7);
+      return width > 0 && height > 0 ? { width, height } : null;
+    }
+    offset += 2 + length;
+  }
+  return null;
+}
+
 async function decodeFrameImage(buffer, timeoutMs) {
   validateFrameBuffer(buffer);
 
@@ -1775,6 +1831,33 @@ async function postJsonExpectJsonWithTimeout(url, payload, timeoutMs) {
       method: "POST",
       headers: { "Content-Type": "application/json", Accept: "application/json" },
       body: JSON.stringify(payload),
+      signal: controller.signal,
+    });
+    if (!res.ok) {
+      const body = await res.text().catch(() => "");
+      throw new Error(`http_${res.status}${body ? ` body=${body.slice(0, 180)}` : ""}`);
+    }
+    return await res.json();
+  } finally {
+    clearTimeout(t);
+  }
+}
+
+/**
+ * Sends a JPEG as the raw body with the options in the query string.
+ *
+ * The JSON path base64-encodes the frame: a third more bytes on the wire, plus
+ * a string encode here and a decode there, on every pass. At ~600 KB a frame
+ * that is real time inside a 220 ms budget.
+ */
+async function postBinaryExpectJsonWithTimeout(url, buffer, timeoutMs) {
+  const controller = new AbortController();
+  const t = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const res = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/octet-stream", Accept: "application/json" },
+      body: buffer,
       signal: controller.signal,
     });
     if (!res.ok) {
@@ -2692,32 +2775,54 @@ async function main() {
     { includeDescriptor = false, includeEmotions = false, maxFaces = 10, minScore = 0 } = {},
   ) => {
     if (inferenceBackend !== "insightface") return null;
-    if (!(rgb instanceof Uint8Array) || !rgb.length || !width || !height) return [];
+    if (!width || !height) return [];
+    const hasJpg = jpgBuffer instanceof Buffer && jpgBuffer.length > 0;
+    // Only the raw-RGB fallback needs the pixel buffer; with a JPEG in hand the
+    // caller may pass none, which is what lets this start before the decode.
+    if (!hasJpg && (!(rgb instanceof Uint8Array) || !rgb.length)) return [];
+    const svcStartedAt = Date.now();
     try {
       // Send the JPEG when we have one and skip the raw RGB entirely: at 960px the
       // raw buffer is ~1.5 MB (~2 MB base64) against ~150 KB for the JPEG, and both
       // used to go out on every single request while the service read only the RGB.
-      const hasJpg = jpgBuffer instanceof Buffer && jpgBuffer.length > 0;
-      const payload = await postJsonExpectJsonWithTimeout(
-        insightFaceAnalyzeEndpoint,
-        {
-          imageBase64: hasJpg ? toBase64(jpgBuffer) : "",
-          rgbBase64: hasJpg ? "" : Buffer.from(rgb).toString("base64"),
-          width,
-          height,
-          // The JPEG is the untouched source frame while `rgb` is the zoomed
-          // window: the service cuts that same window so boxes and landmarks
-          // come back in worker pixels. Raw RGB already is the window.
-          crop: hasJpg && crop ? crop : undefined,
-          includeDescriptor,
-          includeEmotions,
-          maxFaces,
-          minScore,
-        },
-        insightFaceTimeoutMs,
-      );
+      let payload;
+      if (hasJpg) {
+        // The JPEG is the untouched source frame while `rgb` is the zoomed
+        // window: the service cuts that same window so boxes and landmarks come
+        // back in worker pixels. Raw RGB already is the window.
+        const params = new URLSearchParams({
+          descriptor: includeDescriptor ? "1" : "0",
+          emotions: includeEmotions ? "1" : "0",
+          maxFaces: String(maxFaces),
+          minScore: String(minScore),
+        });
+        if (crop) {
+          params.set("crop", `${crop.x},${crop.y},${crop.width},${crop.height}`);
+        }
+        payload = await postBinaryExpectJsonWithTimeout(
+          `${insightFaceAnalyzeEndpoint}?${params.toString()}`,
+          jpgBuffer,
+          insightFaceTimeoutMs,
+        );
+      } else {
+        payload = await postJsonExpectJsonWithTimeout(
+          insightFaceAnalyzeEndpoint,
+          {
+            imageBase64: "",
+            rgbBase64: Buffer.from(rgb).toString("base64"),
+            width,
+            height,
+            includeDescriptor,
+            includeEmotions,
+            maxFaces,
+            minScore,
+          },
+          insightFaceTimeoutMs,
+        );
+      }
       consecutiveInsightFaceFailures = 0;
       lastInsightFaceFailureAt = 0;
+      passStats.svcMs += Date.now() - svcStartedAt;
       return normalizeInsightFaceResult(payload);
     } catch (err) {
       const current = Date.now();
@@ -3109,7 +3214,10 @@ async function main() {
   let lastHeartbeatAt = 0;
   // Per-pass wall time, reported in the heartbeat. "It cannot keep up" is a
   // number here: passes per second against the ~2 s a walking person is in view.
-  const passStats = { count: 0, totalMs: 0, maxMs: 0, since: Date.now() };
+  // prepMs: pulling the frame, decoding it and building the RGB buffer.
+  // svcMs: waiting on the Python service. They overlap by design now, so their
+  // sum exceeds pass_ms; each still names which side to attack.
+  const passStats = { count: 0, totalMs: 0, maxMs: 0, prepMs: 0, svcMs: 0, since: Date.now() };
   let lastStatusAt = 0;
   let lastZoomReloadAt = 0;
   let workerZoomMap = {};
@@ -3963,6 +4071,7 @@ async function main() {
       });
 
     try {
+      const prepStartedAt = Date.now();
       let jpg = mjpegReader?.take() ?? null;
       try {
         // Falls through to a one-shot request whenever the stream is down or its
@@ -3979,29 +4088,65 @@ async function main() {
         );
         jpg = await fetchFrame(retryUrl, frameAbortRetryTimeoutMs);
       }
+      // Node decodes the frame and then waits on Python, which decodes it again:
+      // two sequential decodes of the same 2560x1440 JPEG per pass. The frame
+      // size comes from the header in microseconds, and the zoom window follows
+      // from it, so the analyze request can go out first and its wait covers our
+      // decode. The result is claimed below only if the decoded size matches
+      // what the header promised.
+      const headerDims = readImageDimensions(jpg);
+      let earlyAnalyze = null;
+      let earlyWindow = null;
+      if (headerDims && inferenceBackend === "insightface") {
+        earlyWindow = computeZoomWindow(
+          headerDims.width,
+          headerDims.height,
+          cam.workerZoom,
+          cam.workerOffsetY,
+        );
+        earlyAnalyze = analyzeWithInsightFace(
+          {
+            jpgBuffer: jpg,
+            rgb: null,
+            width: earlyWindow.workerWidth,
+            height: earlyWindow.workerHeight,
+            crop: {
+              x: earlyWindow.cropX,
+              y: earlyWindow.cropY,
+              width: earlyWindow.workerWidth,
+              height: earlyWindow.workerHeight,
+            },
+          },
+          {
+            includeDescriptor: enableMatching,
+            includeEmotions: enableEmotions,
+            maxFaces: 12,
+            minScore: 0.05,
+          },
+        ).catch(() => null);
+      }
+
       const image = await decodeFrameImage(jpg, imageDecodeTimeoutMs);
       const sourceWidth = Number(image.width ?? 0);
       const sourceHeight = Number(image.height ?? 0);
       if (!sourceWidth || !sourceHeight) {
         throw new Error("invalid_image");
       }
-      const workerWidth =
-        cam.workerZoom > 1
-          ? Math.max(64, Math.floor(sourceWidth / cam.workerZoom))
-          : sourceWidth;
-      const workerHeight =
-        cam.workerZoom > 1
-          ? Math.max(64, Math.floor(sourceHeight / cam.workerZoom))
-          : sourceHeight;
-      const cropX = Math.max(0, Math.floor((sourceWidth - workerWidth) / 2));
-      const cropYRange = Math.max(0, sourceHeight - workerHeight);
-      const cropY = Math.max(
-        0,
-        Math.min(
-          cropYRange,
-          Math.floor(cropYRange / 2 - cam.workerOffsetY * cropYRange),
-        ),
+      const { workerWidth, workerHeight, cropX, cropY } = computeZoomWindow(
+        sourceWidth,
+        sourceHeight,
+        cam.workerZoom,
+        cam.workerOffsetY,
       );
+      // A header that disagreed with the decoder would put the boxes in the
+      // wrong place, so that result is dropped and the frame analysed normally.
+      if (
+        earlyAnalyze &&
+        (!headerDims || headerDims.width !== sourceWidth || headerDims.height !== sourceHeight)
+      ) {
+        earlyAnalyze = null;
+        earlyWindow = null;
+      }
 
       cam.frameOk = true;
       cam.lastFrameAt = now;
@@ -4064,6 +4209,7 @@ async function main() {
       // directly from the RGB buffer, so no full-frame tensor is allocated unless
       // face-api detection is actually going to run.
       const nextLuma = downsampleRgbToLuma(rgb, workerWidth, workerHeight, 96, 54);
+      passStats.prepMs += Date.now() - prepStartedAt;
 
       let detections = [];
       // Raw InsightFace result for THIS frame, reused by the snapshot pass below
@@ -4082,18 +4228,22 @@ async function main() {
         if (inferenceBackend === "insightface") {
           // Descriptors cost almost nothing next to detection (measured: 278 ms
           // with embeddings vs 335 ms detect-only), so request everything once.
-          const insightResults = await analyzeWithInsightFace({
-            jpgBuffer: jpg,
-            rgb,
-            width: workerWidth,
-            height: workerHeight,
-            crop: { x: cropX, y: cropY, width: workerWidth, height: workerHeight },
-          }, {
-            includeDescriptor: enableMatching,
-            includeEmotions: enableEmotions,
-            maxFaces: 12,
-            minScore: 0.05,
-          });
+          // Started before the decode when the header gave us the frame size, in
+          // which case it has been running all along and is likely already done.
+          const insightResults = earlyAnalyze
+            ? await earlyAnalyze
+            : await analyzeWithInsightFace({
+                jpgBuffer: jpg,
+                rgb,
+                width: workerWidth,
+                height: workerHeight,
+                crop: { x: cropX, y: cropY, width: workerWidth, height: workerHeight },
+              }, {
+                includeDescriptor: enableMatching,
+                includeEmotions: enableEmotions,
+                maxFaces: 12,
+                minScore: 0.05,
+              });
           reusableInsightResults = insightResults;
           if (insightResults === null && faceApiFallbackEnabled) {
             detections = await faceapi.detectAllFaces(ensureFrameTensor(), tinyOptions);
@@ -5367,11 +5517,15 @@ async function main() {
         log(
           `heartbeat: cameras_ready=${states.length}/${states.length} faces_detected=${confirmedTotal} ` +
             `passes=${passStats.count} pass_ms avg=${passAvg.toFixed(0)} max=${passStats.maxMs} ` +
-            `passes_per_s=${passRate.toFixed(1)}`,
+            `passes_per_s=${passRate.toFixed(1)} ` +
+            `prep_ms=${(passStats.prepMs / Math.max(1, passStats.count)).toFixed(0)} ` +
+            `svc_ms=${(passStats.svcMs / Math.max(1, passStats.count)).toFixed(0)}`,
         );
         passStats.count = 0;
         passStats.totalMs = 0;
         passStats.maxMs = 0;
+        passStats.prepMs = 0;
+        passStats.svcMs = 0;
         passStats.since = Date.now();
         lastHeartbeatAt = now;
       }

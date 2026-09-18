@@ -11,6 +11,7 @@ from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
+from urllib.parse import parse_qs, urlparse
 
 # Must be set BEFORE onnxruntime is imported: it reads these when it builds its
 # thread pools. Without an explicit count ORT tries to pin each thread to a core
@@ -124,6 +125,16 @@ def env_float(name: str, default: float) -> float:
 def env_str(name: str, default: str) -> str:
     value = os.getenv(name, "").strip()
     return value or default
+
+
+def decode_image_from_bytes(data: bytes) -> np.ndarray | None:
+    if not data:
+        return None
+    arr = np.frombuffer(data, dtype=np.uint8)
+    frame = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+    if frame is None or frame.size == 0:
+        return None
+    return frame
 
 
 def decode_image_from_base64(raw: str) -> np.ndarray | None:
@@ -611,11 +622,47 @@ class Handler(BaseHTTPRequestHandler):
             content_length = 0
         raw_body = self.rfile.read(max(0, content_length))
 
-        try:
-            payload = json.loads(raw_body.decode("utf-8") or "{}")
-        except Exception:
-            self._json(400, {"error": "invalid_json"})
-            return
+        # Binary path: the JPEG arrives as the raw body and the options come in
+        # the query string. base64 inside JSON costs a third more bytes on the
+        # wire plus a string encode on one side and a decode on the other, on
+        # every frame — measurable when frames are ~600 KB and a pass is 220 ms.
+        content_type = str(self.headers.get("Content-Type", "")).split(";")[0].strip().lower()
+        if content_type == "application/octet-stream":
+            query = parse_qs(urlparse(self.path).query)
+
+            def q(name: str, default: str = "") -> str:
+                values = query.get(name)
+                return values[0] if values else default
+
+            crop_arg = q("crop")
+            crop_payload: Any = None
+            if crop_arg:
+                parts = crop_arg.split(",")
+                if len(parts) == 4:
+                    try:
+                        crop_payload = {
+                            "x": int(parts[0]),
+                            "y": int(parts[1]),
+                            "width": int(parts[2]),
+                            "height": int(parts[3]),
+                        }
+                    except ValueError:
+                        crop_payload = None
+            payload = {
+                "crop": crop_payload,
+                "includeDescriptor": q("descriptor") == "1",
+                "includeEmotions": q("emotions") == "1",
+                "maxFaces": q("maxFaces", "10"),
+                "minScore": q("minScore", "0"),
+            }
+            raw_image: bytes | None = raw_body
+        else:
+            raw_image = None
+            try:
+                payload = json.loads(raw_body.decode("utf-8") or "{}")
+            except Exception:
+                self._json(400, {"error": "invalid_json"})
+                return
 
         image_base64 = str(payload.get("imageBase64") or "").strip()
         rgb_base64 = str(payload.get("rgbBase64") or "").strip()
@@ -624,7 +671,9 @@ class Handler(BaseHTTPRequestHandler):
         # stays supported so an older worker keeps working against this service.
         decode_started = time.perf_counter()
         frame_bgr = None
-        if image_base64:
+        if raw_image:
+            frame_bgr = decode_image_from_bytes(raw_image)
+        elif image_base64:
             frame_bgr = decode_image_from_base64(image_base64)
         elif rgb_base64:
             width = int(payload.get("width") or 0)
