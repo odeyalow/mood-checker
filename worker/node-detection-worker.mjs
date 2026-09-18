@@ -5009,6 +5009,16 @@ async function main() {
                 : 1;
               cam.snapshotUrl = `${snapshotPublicBase}/${cam.cameraId}.jpg?v=${now}`;
               cam.lastSnapshotSavedAt = now;
+              // Label the picture with whoever is in it, here where the picture
+              // is taken. These used to be set only when a row was written, so a
+              // visit whose row was deduplicated or still on cooldown left the
+              // dashboard showing a fresh snapshot captioned "unknown / none".
+              const namedPerson = people.find((person) => !isUnknownIdentity(person?.name));
+              if (namedPerson) {
+                cam.lastRecognitionName = String(namedPerson.name || "").trim();
+                const label = String(namedPerson.emotion || namedPerson.emotionKey || "").trim();
+                if (label) cam.lastRecognitionEmotion = label;
+              }
               const snapshotFaces = people
                 .map((person) => `${person.name}:${person.emotion || person.emotionKey || "-"}`)
                 .join(", ");
@@ -5652,7 +5662,11 @@ async function main() {
             : `err(${cam.lastFrameError || "unknown"})`;
           log(
             `[${cam.cameraId}] status person=${hasPerson ? 1 : 0} face=${hasFace ? 1 : 0} ` +
-              `who=${who} emotion=${emotion} frame=${frameState}`,
+              `who=${who} emotion=${emotion} ` +
+              // What the dashboard card falls back to once the person has left.
+              // Empty here and filled on the page means a stale browser bundle.
+              `last=${cam.lastRecognitionName || "-"}/${cam.lastRecognitionEmotion || "-"} ` +
+              `frame=${frameState}`,
           );
           payload.cameras[cam.cameraId] = {
             candidate: cam.candidate,
