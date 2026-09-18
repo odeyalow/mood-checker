@@ -1558,7 +1558,7 @@ async function readWorkerZoomState(filePath) {
  * queue would only build a backlog of stale images; freshness matters more than
  * completeness here.
  */
-function createMjpegReader({ url, staleMs, log: logLine }) {
+function createMjpegReader({ url, staleMs, silenceMs = 4000, log: logLine }) {
   const state = {
     latest: null,
     latestAt: 0,
@@ -1580,6 +1580,19 @@ function createMjpegReader({ url, staleMs, log: logLine }) {
     state.connected = true;
     logLine(`[mjpeg] connected ${url}`);
 
+    // go2rtc starts the transcoder on demand and keeps this HTTP response open
+    // even when it dies, so the stream can go silent without ever closing. The
+    // loop below would then wait forever on a connection it still considers
+    // healthy, while every pass fell back to a one-shot frame — observed as a
+    // pipeline stuck at 0.2 passes a second for minutes. Abort on silence so the
+    // reconnect below can start a fresh request, which makes go2rtc respawn it.
+    let lastDataAt = Date.now();
+    const watchdog = setInterval(() => {
+      if (Date.now() - lastDataAt < silenceMs) return;
+      logLine(`[mjpeg] no data for ${Math.round((Date.now() - lastDataAt) / 1000)}s — reconnecting`);
+      controller.abort();
+    }, Math.max(500, Math.floor(silenceMs / 2)));
+
     // Chunks since the last frame boundary. They are joined only when a chunk
     // brings an EOI marker: joining and re-scanning on every chunk made this
     // loop quadratic in frame size, and with ~600 KB frames arriving in ~16 KB
@@ -1591,6 +1604,7 @@ function createMjpegReader({ url, staleMs, log: logLine }) {
     try {
       for await (const chunk of res.body) {
         if (state.stopped) break;
+        lastDataAt = Date.now();
         const piece = Buffer.isBuffer(chunk)
           ? chunk
           : Buffer.from(chunk.buffer, chunk.byteOffset, chunk.byteLength);
@@ -1646,6 +1660,7 @@ function createMjpegReader({ url, staleMs, log: logLine }) {
         }
       }
     } finally {
+      clearInterval(watchdog);
       controller.abort();
       state.connected = false;
     }
@@ -2225,6 +2240,10 @@ async function main() {
   // walking past.
   const frameMode = String(process.env.WORKER_FRAME_MODE || "snapshot").trim().toLowerCase();
   const mjpegStaleMs = Math.max(200, envInt("WORKER_MJPEG_STALE_MS", 2000));
+  // Silence on an open connection that still looks healthy: reconnect after
+  // this long without a single byte. At 12 fps a real stream never pauses for
+  // seconds, so this only fires when the transcoder behind it has died.
+  const mjpegSilenceMs = Math.max(1000, envInt("WORKER_MJPEG_SILENCE_MS", 4000));
   let mjpegReader = null;
   let mjpegFallbackSrc = "";
   const frameTimeoutMs = Math.max(500, envInt("WORKER_FRAME_TIMEOUT_MS", 3000));
@@ -3200,7 +3219,12 @@ async function main() {
     const mjpegUrl =
       String(process.env.WORKER_MJPEG_URL || "").trim() ||
       `${go2rtcBase}/api/stream.mjpeg?src=${encodeURIComponent(states[0]?.src ?? "")}`;
-    mjpegReader = createMjpegReader({ url: mjpegUrl, staleMs: mjpegStaleMs, log });
+    mjpegReader = createMjpegReader({
+      url: mjpegUrl,
+      staleMs: mjpegStaleMs,
+      silenceMs: mjpegSilenceMs,
+      log,
+    });
     // The source behind the stream, so a fallback frame comes from the same
     // (already transcoded) place rather than from the H.265 main stream.
     try {
