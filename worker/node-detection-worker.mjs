@@ -2226,6 +2226,7 @@ async function main() {
   const frameMode = String(process.env.WORKER_FRAME_MODE || "snapshot").trim().toLowerCase();
   const mjpegStaleMs = Math.max(200, envInt("WORKER_MJPEG_STALE_MS", 2000));
   let mjpegReader = null;
+  let mjpegFallbackSrc = "";
   const frameTimeoutMs = Math.max(500, envInt("WORKER_FRAME_TIMEOUT_MS", 3000));
   const frameAbortRetryEnabled = envBool("WORKER_FRAME_ABORT_RETRY_ENABLED", true);
   const frameAbortRetryTimeoutMs = Math.max(500, envInt("WORKER_FRAME_ABORT_RETRY_TIMEOUT_MS", 5200));
@@ -3200,7 +3201,17 @@ async function main() {
       String(process.env.WORKER_MJPEG_URL || "").trim() ||
       `${go2rtcBase}/api/stream.mjpeg?src=${encodeURIComponent(states[0]?.src ?? "")}`;
     mjpegReader = createMjpegReader({ url: mjpegUrl, staleMs: mjpegStaleMs, log });
-    log(`[mjpeg] frame_mode=mjpeg url=${mjpegUrl} stale_ms=${mjpegStaleMs}`);
+    // The source behind the stream, so a fallback frame comes from the same
+    // (already transcoded) place rather than from the H.265 main stream.
+    try {
+      mjpegFallbackSrc = new URL(mjpegUrl).searchParams.get("src") || "";
+    } catch {
+      mjpegFallbackSrc = "";
+    }
+    log(
+      `[mjpeg] frame_mode=mjpeg url=${mjpegUrl} stale_ms=${mjpegStaleMs} ` +
+        `fallback_src=${mjpegFallbackSrc || cameras[0]?.src || "-"}`,
+    );
   }
 
   log(`started cameras=${states.length} frame_api=${frameApiBase} frame_mode=${frameMode}`);
@@ -4064,7 +4075,13 @@ async function main() {
       return true;
     };
 
-    const frameUrl = buildFrameUrl(frameApiBase, cam.src, frameApiTimeoutMs);
+    // When the stream is down, fall back to a one-shot frame from the SAME
+    // source the stream uses. Asking the H.265 main stream instead means every
+    // fallback frame waits for the next keyframe — measured at ~3.9 s here,
+    // which drops the loop from 5 passes a second to 0.2 and silently turns a
+    // brief stream hiccup into a dead pipeline. Every MJPEG frame is a keyframe,
+    // so the same request against the transcoded source returns immediately.
+    const frameUrl = buildFrameUrl(frameApiBase, mjpegFallbackSrc || cam.src, frameApiTimeoutMs);
     const zoomOverride = Number(workerZoomMap?.[cam.cameraId]);
     if (Number.isFinite(zoomOverride)) {
       cam.workerZoom = clampWorkerZoom(zoomOverride, cam.workerZoom);
@@ -4116,7 +4133,20 @@ async function main() {
       try {
         // Falls through to a one-shot request whenever the stream is down or its
         // newest frame is already stale, so a reconnect never stops detection.
-        if (!jpg) jpg = await fetchFrame(frameUrl, frameTimeoutMs);
+        if (!jpg) {
+          // Say so: the fallback is far slower than the stream, and without this
+          // line a dead stream looks like a mysteriously slow detector.
+          if (mjpegReader && now - (cam.lastMjpegGapLogAt || 0) >= 5000) {
+            const stats = mjpegReader.stats();
+            log(
+              `[${cam.cameraId}] mjpeg_gap connected=${stats.connected ? 1 : 0} ` +
+                `age_ms=${Number.isFinite(stats.ageMs) ? stats.ageMs : -1} frames=${stats.frames} ` +
+                `-> one-shot frame from ${mjpegFallbackSrc || cam.src}`,
+            );
+            cam.lastMjpegGapLogAt = now;
+          }
+          jpg = await fetchFrame(frameUrl, frameTimeoutMs);
+        }
       } catch (err) {
         if (!frameAbortRetryEnabled || !isRetriableFrameError(err)) throw err;
         const retryUrl = buildAbortFallbackFrameUrl(
