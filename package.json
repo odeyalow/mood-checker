@@ -40,6 +40,7 @@
     "db:repair": "node scripts/db-repair.mjs",
     "faces:rebuild": "node scripts/rebuild-face-identities.mjs",
     "faces:report": "node scripts/registry-report.mjs",
+    "test:enrolment": "node scripts/test-enrolment-quality.mjs",
     "create-user": "node scripts/create-user.mjs",
     "faces:clear": "node scripts/manage-faces.mjs clear",
     "faces:delete": "node scripts/manage-faces.mjs delete",

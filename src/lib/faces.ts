@@ -150,6 +150,59 @@ export function addToTemplate(
   return next;
 }
 
+/** Quality a reference frame must beat the stored one by before it replaces it. */
+export const FACE_PRIMARY_PROMOTE_MIN_GAIN = envNumber(
+  process.env.FACE_PRIMARY_PROMOTE_MIN_GAIN,
+  0.08,
+  0,
+  1,
+);
+/** Match distance above which a frame is too uncertain to become a reference. */
+export const FACE_PRIMARY_PROMOTE_MAX_DISTANCE = envNumber(
+  process.env.FACE_PRIMARY_PROMOTE_MAX_DISTANCE,
+  0.5,
+  0,
+  1,
+);
+
+/**
+ * Whether an incoming reference frame should replace an identity's primary one.
+ *
+ * An identity is enrolled from the first frame that clears the gate, which on a
+ * walk-past is usually the worst of the visit. Left alone, that anchor keeps
+ * pulling later matches toward a bad reference and eventually lets the same
+ * person enrol twice. Replacing it requires all three:
+ *  - a confident match, so a wrong match cannot rewrite someone's reference
+ *    (distance 0 means "no match distance given", i.e. a fresh identity);
+ *  - a clear quality gain, so ordinary jitter does not rewrite it every frame;
+ *  - a quality that was actually measured.
+ */
+export function shouldPromotePrimary({
+  storedQuality,
+  incomingQuality,
+  matchDistance,
+  minGain = FACE_PRIMARY_PROMOTE_MIN_GAIN,
+  maxDistance = FACE_PRIMARY_PROMOTE_MAX_DISTANCE,
+}: {
+  storedQuality: number | null | undefined;
+  incomingQuality: number | null | undefined;
+  matchDistance: number | null | undefined;
+  minGain?: number;
+  maxDistance?: number;
+}) {
+  const incoming = Number(incomingQuality);
+  if (!Number.isFinite(incoming) || incoming <= 0) return false;
+
+  const distance = Number(matchDistance);
+  if (Number.isFinite(distance) && distance > 0 && distance > maxDistance) return false;
+
+  // Null/absent means the identity predates quality tracking: treat it as worse
+  // than anything measured, so its first good sighting upgrades it.
+  const stored = Number(storedQuality);
+  const safeStored = Number.isFinite(stored) && stored > 0 ? stored : 0;
+  return incoming >= safeStored + minGain;
+}
+
 export function mergeDescriptor(base: number[], incoming: number[], alpha = 0.2) {
   if (!Array.isArray(base) || !Array.isArray(incoming) || base.length !== incoming.length) {
     return incoming;

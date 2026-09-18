@@ -708,6 +708,25 @@ async function archiveFaceSnapshot({
   return `${archivePublicBase.replace(/\/+$/, "")}/${safeFaceId}/${fileName}`;
 }
 
+/**
+ * How good a frame is as an identity reference, 0..1.
+ *
+ * An identity is enrolled from the first frame that clears the gate, which on a
+ * walk-past is usually the worst one: the person entering the zone at an angle,
+ * far away and half-blurred. Scoring every frame of the visit lets the best one
+ * become the reference instead. Multiplicative on purpose — a frame has to be
+ * good on all three counts, not average out a bad one.
+ */
+function computeFaceQuality({ score, sidePx, sharpness, frontal = true }, targets) {
+  const s = Math.max(0, Math.min(1, Number(score) || 0));
+  const side = Math.max(0, Math.min(1, (Number(sidePx) || 0) / Math.max(1, targets.sidePx)));
+  const sharp = Math.max(0, Math.min(1, (Number(sharpness) || 0) / Math.max(0.001, targets.sharpness)));
+  // A profile or strongly top-down face can still be sharp and large, and it
+  // makes a poor reference, so it is halved rather than scored on its own.
+  const pose = frontal ? 1 : 0.5;
+  return Number((s * side * sharp * pose).toFixed(4));
+}
+
 function createPresenceSession(now) {
   return {
     startedAt: now,
@@ -726,6 +745,10 @@ function createPresenceSession(now) {
     // The emitted row carries the placeholder mood, so the first real reading
     // of this visit should replace it rather than be treated as a mood change.
     emittedWithFallbackMood: false,
+    // Best reference frame seen during this visit, sent with the DB record so
+    // the identity can adopt it if it beats the frame it was enrolled from.
+    bestQuality: 0,
+    bestDescriptor: null,
     pendingMoodLabel: "",
     pendingMoodSince: 0,
     lastMoodLabel: "",
@@ -2374,6 +2397,13 @@ async function main() {
   // Keep it below RECOGNITION_DEDUP_MS (1800 by default) on the API side, or
   // the upgrade lands as a second row instead of replacing the first.
   const emotionUpgradeMaxMs = Math.max(0, envInt("WORKER_EMOTION_UPGRADE_MAX_MS", 1500));
+  // What a face has to reach to count as a full-quality reference frame. A face
+  // at these numbers scores 1.0; half the size or half the sharpness halves the
+  // score. They are goals, not gates — nothing is rejected for missing them.
+  const enrollQualityTargets = {
+    sidePx: Math.max(16, envInt("WORKER_ENROLL_TARGET_SIDE_PX", 110)),
+    sharpness: Math.max(1, envFloat("WORKER_ENROLL_TARGET_SHARPNESS", 16)),
+  };
   const emotionChangeMinConfidence = Math.max(
     0,
     Math.min(1, envFloat("WORKER_EMOTION_CHANGE_MIN_CONFIDENCE", 0.35)),
@@ -4558,6 +4588,10 @@ async function main() {
           };
           const people = [];
           const descriptorByName = new Map();
+          // Best reference frame per person in THIS frame pass, folded into the
+          // visit's best below. Kept out of `people` because that object goes
+          // into the status file, and a 512-number vector does not belong there.
+          const bestFrameByName = new Map();
           let bestDistance = 0;
           for (const det of results) {
             let name = "unknown";
@@ -4566,6 +4600,7 @@ async function main() {
             let faceSide = 0;
             let faceScore = 0;
             let faceSharpness = 0;
+            let frameFrontal = true;
             let lockOverridden = false;
             const descriptor = descriptorToArray(det?.descriptor);
             if (enableMatching && descriptor) {
@@ -4586,6 +4621,7 @@ async function main() {
                   maxEyeLineRatio: camRecordPoseMaxEyeline,
                 });
               const isFrontalFace = isIdentityVisibleDetection(det) && recordPoseOk;
+              frameFrontal = isFrontalFace;
               if (process.env.WORKER_POSE_DEBUG === "1" && now - Number(cam.lastPoseDebugAt || 0) >= 600) {
                 const pm = computeFacePoseMetrics(det);
                 if (pm) {
@@ -4760,6 +4796,19 @@ async function main() {
               distance = Number(lock.distance) || 0;
               if (descriptor && !lock.overridden) {
                 descriptorByName.set(name, descriptor);
+                const quality = computeFaceQuality(
+                  {
+                    score: faceScore,
+                    sidePx: faceSide,
+                    sharpness: faceSharpness,
+                    frontal: frameFrontal,
+                  },
+                  enrollQualityTargets,
+                );
+                const previous = bestFrameByName.get(name);
+                if (!previous || quality > previous.quality) {
+                  bestFrameByName.set(name, { quality, descriptor });
+                }
               }
               if (distance > 0 && (!bestDistance || distance < bestDistance)) {
                 bestDistance = distance;
@@ -4986,6 +5035,14 @@ async function main() {
               }
 
               session.lastSeenAt = now;
+
+              // Carry the best reference frame of the visit forward. The record
+              // below sends this one, not whichever frame happened to be last.
+              const frameBest = bestFrameByName.get(person.name);
+              if (frameBest && frameBest.quality > Number(session.bestQuality || 0)) {
+                session.bestQuality = frameBest.quality;
+                session.bestDescriptor = frameBest.descriptor;
+              }
 
               const shouldTakeSessionSample =
                 session.sampleCount === 0 ||
@@ -5233,7 +5290,14 @@ async function main() {
                 faceScore: Number(person.faceScore ?? 0),
                 faceSide: Number(person.faceSide ?? 0),
                 faceSharpness: Number(person.faceSharpness ?? 0),
-                descriptor: descriptorByName.get(person.name) || undefined,
+                // The best frame of this visit rather than the latest one, with
+                // what it scored: the API promotes it to the identity's primary
+                // vector when it beats the frame that identity was enrolled from.
+                descriptor:
+                  session.bestDescriptor || descriptorByName.get(person.name) || undefined,
+                descriptorQuality: session.bestDescriptor
+                  ? Number(session.bestQuality || 0)
+                  : undefined,
                 snapshotUrl:
                   cam.lastFaceArchiveUrlByName.get(person.name) ||
                   cam.snapshotUrl ||

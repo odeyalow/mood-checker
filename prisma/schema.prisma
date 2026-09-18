@@ -44,6 +44,13 @@ model FaceIdentity {
   // identity can cover several poses. Null on rows created before this existed;
   // readers fall back to [descriptor].
   descriptors Json?
+  // Quality (0..1) of the frame the primary vector came from: detector score,
+  // face size and sharpness combined by the worker. An identity is enrolled
+  // from the first frame that clears the gate, which is usually the worst of
+  // the visit; storing what that frame was worth lets a later, better frame
+  // take its place instead of only nudging it. Null for rows created before
+  // this existed, which counts as "worse than anything measured".
+  primaryQuality Float?
   createdAt  DateTime      @default(now())
   updatedAt  DateTime      @updatedAt
   recognitions Recognition[]

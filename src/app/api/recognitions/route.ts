@@ -2,7 +2,12 @@ import { NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import fs from "node:fs/promises";
 import path from "node:path";
-import { normalizeDescriptor } from "@/lib/faces";
+import {
+  addToTemplate,
+  normalizeDescriptor,
+  normalizeDescriptorList,
+  shouldPromotePrimary,
+} from "@/lib/faces";
 
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
@@ -205,6 +210,52 @@ export async function GET(request: Request) {
   }
 }
 
+/**
+ * Replaces an identity's primary vector when a clearly better frame arrives.
+ *
+ * Only for a confident match (or an identity with no quality on file yet), and
+ * only past a margin, so normal frame-to-frame jitter does not keep rewriting
+ * the reference. The vector being replaced is kept as a template pose: it was a
+ * real sighting and may still be the closest match for that angle.
+ */
+async function promotePrimaryDescriptor(
+  identityId: string,
+  descriptor: number[],
+  quality: number,
+  matchDistance: number,
+) {
+  const current = await prisma.faceIdentity.findUnique({
+    where: { id: identityId },
+    select: { descriptor: true, descriptors: true, primaryQuality: true },
+  });
+  if (!current) return false;
+
+  if (
+    !shouldPromotePrimary({
+      storedQuality: current.primaryQuality,
+      incomingQuality: quality,
+      matchDistance,
+    })
+  ) {
+    return false;
+  }
+
+  const previous = normalizeDescriptor(current.descriptor);
+  const template = normalizeDescriptorList(current.descriptors);
+  const base = template.length ? template : previous ? [previous] : [];
+  const nextTemplate = addToTemplate(base, descriptor);
+
+  await prisma.faceIdentity.update({
+    where: { id: identityId },
+    data: {
+      descriptor,
+      primaryQuality: quality,
+      ...(nextTemplate ? { descriptors: nextTemplate } : {}),
+    },
+  });
+  return true;
+}
+
 export async function POST(request: Request) {
   try {
     const body = await request.json().catch(() => ({}));
@@ -222,6 +273,13 @@ export async function POST(request: Request) {
     const snapshotBuffer = parseSnapshotBuffer(body?.snapshotBase64);
     const snapshotPublicUrl = parseSnapshotPublicUrl(body?.snapshotUrl);
     const descriptor = normalizeDescriptor(body?.descriptor);
+    // How good the frame this descriptor came from was, 0..1 (worker's
+    // computeFaceQuality). Absent from older workers, which then behave as before.
+    const descriptorQualityRaw = Number(body?.descriptorQuality);
+    const descriptorQuality =
+      Number.isFinite(descriptorQualityRaw) && descriptorQualityRaw > 0
+        ? Math.min(1, descriptorQualityRaw)
+        : null;
     const detectedAtRaw = body?.detectedAt ? new Date(body.detectedAt) : new Date();
 
     if (!name || !mood) {
@@ -352,6 +410,9 @@ export async function POST(request: Request) {
             data: {
               shortId: name,
               descriptor: descriptor ?? [],
+              ...(descriptor && descriptorQuality !== null
+                ? { primaryQuality: descriptorQuality }
+                : {}),
             },
             select: { id: true, descriptor: true },
           });
@@ -376,6 +437,25 @@ export async function POST(request: Request) {
           });
         } catch {
           // Best effort: keep recognition write path alive.
+        }
+      }
+
+      // Promote a better reference frame to be the identity's primary vector.
+      //
+      // An identity is enrolled from the first frame that clears the gate — on a
+      // walk-past, usually the worst one of the visit. The ordinary match path
+      // only nudges that vector (EMA) and adds poses to the template, so a bad
+      // anchor stays the anchor and later visits risk falling outside the match
+      // threshold, creating duplicates of the same person. When the worker sends
+      // a frame that scored clearly better than the one on file, it replaces the
+      // primary vector outright and the old one stays available as a template
+      // pose. Guarded by the match distance so a wrong match cannot rewrite
+      // someone's reference.
+      if (identity && descriptor && descriptorQuality !== null) {
+        try {
+          await promotePrimaryDescriptor(identity.id, descriptor, descriptorQuality, distanceRaw);
+        } catch {
+          // Missing migration or a concurrent write: recognition still records.
         }
       }
 
