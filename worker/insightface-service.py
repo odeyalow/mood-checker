@@ -387,11 +387,16 @@ class EmotionEngine:
         # Replaced by the model's own input size once a session is created.
         self._input_size = EMOTION_INPUT_SIZE
         self._margin = max(0.0, min(0.6, env_float("WORKER_EMOTION_CROP_MARGIN", 0.1)))
-        # Where the model's "Contempt" class goes. It shares the "disgusted" key
-        # with Disgust by default, which is the only key fed by two classes.
-        # "neutral" treats it as a composed face; "drop" ignores it entirely and
-        # lets the remaining seven compete on their own.
-        contempt = env_str("WORKER_EMOTION_CONTEMPT_MAP", "disgusted").strip().lower()
+        # Where the model's "Contempt" class goes. The UI has seven keys and the
+        # model eight, so sharing "disgusted" with Disgust made it the only key
+        # fed by two classes — a structural advantage, and Contempt is what a
+        # downward camera reads off pressed lips. Measured on this camera while
+        # holding known expressions (scripts/test-emotion-mapping.mjs replays
+        # those readings): sharing matched the held expression in 7 of 15 frames
+        # and turned every single smile into "disgusted"; dropping Contempt
+        # matched 15 of 15 and left anger and sadness untouched. Set it to
+        # "disgusted" or "neutral" to fold it back in.
+        contempt = env_str("WORKER_EMOTION_CONTEMPT_MAP", "drop").strip().lower()
         if contempt in {"drop", "none", "ignore"}:
             self._contempt_target = ""
         elif contempt in FACEAPI_EMOTION_KEYS:
@@ -521,10 +526,20 @@ class EmotionEngine:
                 log(f"emotion_raw8 {pairs}")
 
         scores = {key: 0.0 for key in FACEAPI_EMOTION_KEYS}
+        dropped = 0.0
         for label, prob in zip(HSEMOTION_LABELS, probs):
             target = self._contempt_target if label == "Contempt" else HSEMOTION_TO_FACEAPI[label]
             if target:
                 scores[target] += float(prob)
+            else:
+                dropped += float(prob)
+        # Renormalise what is left so the reported percentage still means "share
+        # of this face", rather than silently shrinking by whatever was dropped.
+        if dropped > 0:
+            total = sum(scores.values())
+            if total > 0:
+                for key in scores:
+                    scores[key] /= total
 
         if self._class_bias:
             for key, weight in self._class_bias.items():
