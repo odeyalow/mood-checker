@@ -2554,6 +2554,11 @@ async function main() {
     envFloat("WORKER_NEW_ID_EMPTY_MIN_SHARPNESS", Math.max(newIdMinSharpness, 11)),
   );
   const newIdMaxGapMs = Math.max(120, envInt("WORKER_NEW_ID_MAX_GAP_MS", 1500));
+  // Minimum frame quality before a face may become an identity, on the same
+  // score x size x sharpness scale the reference frame is picked by. This is
+  // what keeps distant smears out of the registry; the per-metric gates above
+  // let one bad factor through as long as the other two pass.
+  const newIdMinQuality = Math.max(0, Math.min(1, envFloat("WORKER_NEW_ID_MIN_QUALITY", 0.15)));
   // true (default): the first frame that clears the soft gate may enrol, as it
   // always did — a walking person is enrolled on the pass they are seen on.
   // false: enrolment waits for the full gate (N stable frames), which halves
@@ -3768,6 +3773,16 @@ async function main() {
         newIdMaxGapMs,
       ),
     );
+    const camNewIdMinQuality = Math.max(
+      0,
+      Math.min(
+        1,
+        parseFiniteFloat(
+          getCameraSetting(cameraSettings, cam.cameraId, "newIdMinQuality", newIdMinQuality),
+          newIdMinQuality,
+        ),
+      ),
+    );
     const camNewIdMinSharpness = Math.max(
       0,
       parseFiniteFloat(
@@ -4168,6 +4183,7 @@ async function main() {
           `new_id_frames=${camNewIdConfirmFrames} new_id_min=${camNewIdMinScore.toFixed(3)} ` +
           `new_id_side=${camNewIdMinFaceSidePx} new_id_empty_min=${camNewIdEmptyMinScore.toFixed(3)} ` +
           `new_id_empty_side=${camNewIdEmptyMinFaceSidePx} new_id_sharp=${camNewIdMinSharpness.toFixed(2)} ` +
+            `new_id_quality=${camNewIdMinQuality.toFixed(2)} ` +
           `new_id_empty_sharp=${camNewIdEmptyMinSharpness.toFixed(2)} new_id_stability=${camNewIdStabilityMaxDistance.toFixed(3)} ` +
           `identify_cd=${camIdentifyMinIntervalMs} auto_create_cd=${camAutoCreateCooldownMs} ` +
           `lock_ms=${camIdentityLockMs} lock_margin=${camIdentityLockSwitchMargin.toFixed(3)} ` +
@@ -4814,11 +4830,43 @@ async function main() {
                   faceSide >= Math.max(10, camNewIdMinFaceSidePx - 8) &&
                   identityScore >= Math.max(0.07, camNewIdMinScore - 0.05) &&
                   faceSharpness >= Math.max(2.5, camNewIdMinSharpness * 0.35);
+                // One number instead of three thresholds, and the same one the
+                // reference frame is chosen by: score x size x sharpness, halved
+                // for a non-frontal face. The soft path alone accepts a face of
+                // 40 px at sharpness 2.5 — a smear from across the room, which
+                // is what filled the registry with barely-visible heads. Such a
+                // frame scores about 0.04 here; a face at the camera scores 0.5
+                // and up.
+                const enrolQuality = computeFaceQuality(
+                  {
+                    score: identityScore,
+                    sidePx: faceSide,
+                    sharpness: faceSharpness,
+                    frontal: isFrontalFace,
+                  },
+                  enrollQualityTargets,
+                );
+                const qualityOkForNewId = enrolQuality >= camNewIdMinQuality;
                 // Enrolment keeps the full frontal check even when matching no
                 // longer needs it: a bad angle costs one missed recognition,
                 // but a bad angle turned into an identity poisons the registry
                 // for good and shows up later as a duplicate of the same person.
-                const canAttemptNewId = (readyForNewId || softReadyForNewId) && isFrontalFace;
+                const canAttemptNewId =
+                  (readyForNewId || softReadyForNewId) && isFrontalFace && qualityOkForNewId;
+                if (
+                  (readyForNewId || softReadyForNewId) &&
+                  isFrontalFace &&
+                  !qualityOkForNewId &&
+                  isUnknownIdentity(name) &&
+                  now - (cam.lastEnrolQualityLogAt || 0) >= 5000
+                ) {
+                  log(
+                    `[${cam.cameraId}] new_id blocked quality=${enrolQuality.toFixed(3)}<` +
+                      `${camNewIdMinQuality.toFixed(3)} side=${faceSide.toFixed(0)} ` +
+                      `score=${identityScore.toFixed(3)} sharp=${faceSharpness.toFixed(1)}`,
+                  );
+                  cam.lastEnrolQualityLogAt = now;
+                }
                 if (
                   (readyForNewId || softReadyForNewId) &&
                   !isFrontalFace &&
@@ -4920,6 +4968,7 @@ async function main() {
                             // measured values instead of guesses.
                             log(
                               `[${cam.cameraId}] new_id created shortId=${name} ` +
+                                `quality=${enrolQuality.toFixed(3)} ` +
                                 `score=${Number(identityScore).toFixed(3)} side=${Number(faceSide).toFixed(0)} ` +
                                 `sharp=${Number(faceSharpness).toFixed(1)}`,
                             );
