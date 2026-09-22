@@ -37,8 +37,21 @@ function parseMatchMinMargin(raw: unknown) {
   return Math.max(0, Math.min(0.6, value));
 }
 
+/**
+ * How close a match must be before its vector is allowed to JOIN the identity's
+ * template.
+ *
+ * This used to sit at threshold - 0.04, i.e. almost anything that matched at
+ * all. Each addition widens the region of face-space the identity covers, so a
+ * row that starts on something marginal keeps swallowing more: one such
+ * identity ended up holding three vectors and matching sightings from 0.30 all
+ * the way out to 0.70, collecting other people's ears and the backs of their
+ * heads along the way. A genuine repeat sighting of the same person lands at
+ * 0.18-0.50 on this camera, so learning from matches closer than
+ * threshold - 0.20 keeps the multi-pose benefit without the drift.
+ */
 function parseDescriptorUpdateStrictDistance(raw: unknown, threshold: number) {
-  const fallback = Math.max(0.2, threshold - 0.04);
+  const fallback = Math.max(0.2, threshold - 0.2);
   const value = Number(raw ?? process.env.FACE_IDENTITY_UPDATE_MAX_DISTANCE ?? fallback);
   if (!Number.isFinite(value)) return fallback;
   return Math.max(0.2, Math.min(1, value));

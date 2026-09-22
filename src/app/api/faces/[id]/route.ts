@@ -4,6 +4,19 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { addMoodCount, bucketStartUtc, buildAdaptiveBuckets, computeRiskStats } from "@/lib/stats";
 
+// Pictures shown in the gallery. The worker keeps up to
+// WORKER_FACE_ARCHIVE_MAX_PER_FACE crops on disk, so showing five of them hid
+// most of what exists.
+const GALLERY_LIMIT = Math.max(
+  1,
+  Math.min(60, Number.parseInt(process.env.FACE_GALLERY_LIMIT || "12", 10) || 12),
+);
+// History rows whose picture is checked against the disk. Retention deletes old
+// crops while their rows remain, and an unchecked row renders as a broken
+// image; beyond this many the check costs more than it is worth, and those
+// rows simply show "no image".
+const HISTORY_CHECK_LIMIT = 120;
+
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
 
@@ -311,7 +324,7 @@ export async function GET(
       .map((entry) => entry.item);
 
     const diskFallback = enrichDiskSnapshotsWithRecognitionMeta(
-      await listDiskSnapshots(face.shortId, 5),
+      await listDiskSnapshots(face.shortId, GALLERY_LIMIT),
       recognitionItems,
     );
     const dbImages: FaceRecognitionMeta[] = [];
@@ -339,10 +352,23 @@ export async function GET(
       (a, b) =>
         new Date(b.detectedAt).getTime() - new Date(a.detectedAt).getTime(),
     );
-    const imagesOut = mergedImages.slice(0, 5);
-    const historyOut = historyItems
+    const imagesOut = mergedImages.slice(0, GALLERY_LIMIT);
+    const historySorted = historyItems
       .slice()
       .sort((a, b) => new Date(b.detectedAt).getTime() - new Date(a.detectedAt).getTime());
+    // A row keeps the path of the crop it was written with, but retention
+    // deletes the oldest crops while the rows stay. Blank the path when the file
+    // is gone so the card says "no image" instead of showing a broken one.
+    const historyChecked = await Promise.all(
+      historySorted.slice(0, HISTORY_CHECK_LIMIT).map(async (item) => ({
+        ...item,
+        snapshotUrl: (await snapshotExists(item.snapshotUrl)) ? item.snapshotUrl : "",
+      })),
+    );
+    const historyOut = [
+      ...historyChecked,
+      ...historySorted.slice(HISTORY_CHECK_LIMIT).map((item) => ({ ...item, snapshotUrl: "" })),
+    ];
     const recognitionCount = recognitions.length;
 
     return NextResponse.json({

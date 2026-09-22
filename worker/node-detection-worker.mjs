@@ -2192,6 +2192,8 @@ function createState(cameraId, src) {
     lastSeenMatchedAt: new Map(),
     lastFaceArchiveAtByName: new Map(),
     lastFaceArchiveUrlByName: new Map(),
+    // Best picture quality archived for each person during the current visit.
+    bestArchivedQualityByName: new Map(),
     presenceSessions: new Map(),
     identityLockName: "",
     identityLockDistance: 0,
@@ -2601,6 +2603,12 @@ async function main() {
   );
   const faceArchiveEnabled = envBool("WORKER_FACE_ARCHIVE_ENABLED", true);
   const faceArchiveCooldownMs = Math.max(500, envInt("WORKER_FACE_ARCHIVE_COOLDOWN_MS", 2500));
+  // How much better a later frame of the same visit must be before it earns
+  // another picture. 0 keeps every frame that clears the cooldown.
+  const archiveQualityGain = Math.max(
+    0,
+    Math.min(1, envFloat("WORKER_FACE_ARCHIVE_MIN_QUALITY_GAIN", 0.05)),
+  );
   const faceArchiveMaxPerFace = Math.max(5, envInt("WORKER_FACE_ARCHIVE_MAX_PER_FACE", 50));
   const faceArchiveDir = process.env.WORKER_FACE_ARCHIVE_DIR || path.join(rootDir, "public", "_faces");
   const faceArchivePublicBase = (process.env.WORKER_FACE_ARCHIVE_PUBLIC_BASE || "/_faces").replace(
@@ -3178,6 +3186,7 @@ async function main() {
       state.lastDbSentAt.delete(`${state.cameraId}:${shortId}`);
       state.lastFaceArchiveAtByName.delete(shortId);
       state.lastFaceArchiveUrlByName.delete(shortId);
+      state.bestArchivedQualityByName.delete(shortId);
       state.emotionSeenAtByName.delete(shortId);
       state.emotionEmaByName.delete(shortId);
       if (Array.isArray(state.people) && state.people.length) {
@@ -4696,6 +4705,24 @@ async function main() {
             if (!shortId || blockedFaceIds.has(shortId)) return;
             const lastAt = Number(cam.lastFaceArchiveAtByName.get(personName) || 0);
             if (now - lastAt < camFaceArchiveCooldownMs) return;
+            // Keep the best frames, not every frame. Someone standing in view
+            // produced a picture every few seconds, filling the gallery with
+            // near-identical crops while the good one was buried among them.
+            // After the first picture of a visit, a new one has to be visibly
+            // better than the best so far — so a gallery reads as "this person
+            // at their clearest", and the poorer frames still do their job by
+            // feeding the reference vector.
+            const frameQuality = computeFaceQuality(
+              {
+                score: Number(quality?.faceScore ?? 0),
+                sidePx: Number(quality?.faceSide ?? 0),
+                sharpness: Number(quality?.faceSharpness ?? 0),
+                frontal: quality?.frontal !== false,
+              },
+              enrollQualityTargets,
+            );
+            const bestSoFar = Number(cam.bestArchivedQualityByName.get(personName) ?? 0);
+            if (bestSoFar > 0 && frameQuality < bestSoFar + archiveQualityGain) return;
             const side = Number(quality?.faceSide ?? 0);
             const sharp = Number(quality?.faceSharpness ?? 0);
             if (side < camRecordMinFaceSidePx || sharp < camRecordMinSharpness) {
@@ -4736,6 +4763,7 @@ async function main() {
               if (url) {
                 cam.lastFaceArchiveAtByName.set(personName, now);
                 cam.lastFaceArchiveUrlByName.set(personName, url);
+                cam.bestArchivedQualityByName.set(personName, frameQuality);
               }
             } catch (err) {
               if (now - cam.lastErrLogAt >= 2000) {
@@ -5111,7 +5139,12 @@ async function main() {
             const displayEmotionLabel = emotionLabel || fallbackEmotionLabel || recentRawEmotionLabel;
 
             if (!isUnknownIdentity(name)) {
-              await archiveFaceCropForPerson(det, name, { faceSide, faceSharpness });
+              await archiveFaceCropForPerson(det, name, {
+                faceSide,
+                faceSharpness,
+                faceScore,
+                frontal: frameFrontal,
+              });
               people.push({
                 name,
                 emotion: displayEmotionLabel,
@@ -5186,6 +5219,7 @@ async function main() {
                 cam.emotionEmaByName.delete(savedName);
                 cam.lastFaceArchiveAtByName.delete(savedName);
                 cam.lastFaceArchiveUrlByName.delete(savedName);
+                cam.bestArchivedQualityByName.delete(savedName);
               }
             }
           }
@@ -5202,6 +5236,7 @@ async function main() {
               cam.lastSeenMatchedAt.delete(savedName);
               cam.lastDbSentAt.delete(`${cam.cameraId}:${savedName}`);
               cam.lastFaceArchiveUrlByName.delete(savedName);
+              cam.bestArchivedQualityByName.delete(savedName);
             }
           }
           evictPresenceSessions(cam, now, camSessionAbsenceMs, matchedNamesNow);
