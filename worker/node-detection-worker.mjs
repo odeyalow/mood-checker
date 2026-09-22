@@ -2534,7 +2534,13 @@ async function main() {
     envInt("WORKER_BLOCKED_FACE_IDS_RELOAD_MS", 5000),
   );
   const newIdConfirmFrames = Math.max(1, envInt("WORKER_NEW_ID_CONFIRM_FRAMES", 1));
-  const newIdMinScore = Math.max(0, Math.min(1, envFloat("WORKER_NEW_ID_MIN_SCORE", 0.14)));
+  // Detector confidence required to ENROL. Measured on this camera: a real
+  // frontal face at conversational distance scores 0.78-0.88, while the
+  // detections that turn out to be ears, the back of a head or a face far
+  // across the room sit at 0.51-0.70. A threshold below that band lets those
+  // become identities — one such row collected mostly ears from several
+  // different people. Recognition is unaffected; this gates enrolment only.
+  const newIdMinScore = Math.max(0, Math.min(1, envFloat("WORKER_NEW_ID_MIN_SCORE", 0.72)));
   const newIdMinFaceSidePx = Math.max(8, envInt("WORKER_NEW_ID_MIN_FACE_SIDE_PX", 20));
   const newIdEmptyMinScore = Math.max(
     0,
@@ -2607,9 +2613,16 @@ async function main() {
   );
   const recordMinFaceSidePx = Math.max(8, envInt("WORKER_RECORD_MIN_FACE_SIDE_PX", 24));
   const recordMinSharpness = Math.max(0, envFloat("WORKER_RECORD_MIN_SHARPNESS", 9));
+  // Writing a row must be STRICTER than recognising, not looser. This used to
+  // default to matchThreshold + 0.03, and the relaxed path below added another
+  // 0.12 on top — so a row could be written at distance 0.85 while measured
+  // distances between DIFFERENT people on this camera start at 0.80. That is
+  // how a handful of someone else's frames end up filed under a face that is
+  // otherwise correct. A missed row costs one sighting; a wrong row puts a
+  // stranger's picture and mood in someone's history.
   const recordMaxDistance = Math.max(
     0.01,
-    Math.min(2, envFloat("WORKER_RECORD_MAX_DISTANCE", matchThreshold + 0.03)),
+    Math.min(2, envFloat("WORKER_RECORD_MAX_DISTANCE", Math.max(0.2, matchThreshold - 0.06))),
   );
   const phantomLogEndpoint =
     (process.env.WORKER_PHANTOM_LOG_ENDPOINT || "http://127.0.0.1:3000/api/faces/dedup-logs").trim();
@@ -4134,7 +4147,11 @@ async function main() {
     const relaxedRecordMinScore = Math.max(0.05, camRecordMinFaceScore - 0.06);
     const relaxedRecordMinSide = Math.max(10, camRecordMinFaceSidePx - 8);
     const relaxedRecordMinSharpness = Math.max(2.5, camRecordMinSharpness * 0.35);
-    const relaxedRecordMaxDistance = Math.min(1, camRecordMaxDistance + 0.12);
+    // The relaxed path exists for a face that is clearly the right person but
+    // caught in a poor frame — never for a more distant match. Capped by the
+    // match threshold itself, so no row is ever written at a distance the
+    // matcher would not have accepted in the first place.
+    const relaxedRecordMaxDistance = Math.min(1, camMatchThreshold, camRecordMaxDistance + 0.12);
     const strongDistanceMatchThreshold = Math.max(0.26, camMatchThreshold - 0.12);
     const isRecordablePersonRelaxed = (person) => {
       if (!person || isUnknownIdentity(person.name)) return false;
