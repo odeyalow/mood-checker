@@ -383,7 +383,7 @@ export async function POST(request: Request) {
       // would teach the identity someone else's face. addToTemplate returns null
       // when this vector is too close to one we already hold.
       const nextTemplate = shouldUpdateDescriptor
-        ? addToTemplate(best.template, descriptor)
+        ? addToTemplate(best.template, descriptor, { primary: best.descriptor })
         : null;
       await prisma.faceIdentity.update({
         where: { id: best.id },
@@ -513,7 +513,9 @@ export async function POST(request: Request) {
       const mergedDescriptor = mergeDescriptor(duplicateCandidate.descriptor, descriptor, updateAlpha);
       // The duplicate was a real sighting of this person, so its vector is worth
       // keeping as another pose on the surviving identity.
-      const mergedTemplate = addToTemplate(duplicateCandidate.template, descriptor);
+      const mergedTemplate = addToTemplate(duplicateCandidate.template, descriptor, {
+        primary: duplicateCandidate.descriptor,
+      });
       const usedThreshold = mergeByStrict ? postCheckThreshold : postCheckRelaxedThreshold;
       const mergeRule = mergeByStrict ? "strict" : "relaxed";
 

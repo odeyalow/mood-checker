@@ -85,6 +85,22 @@ export const FACE_TEMPLATE_MIN_SPREAD = envNumber(
   0,
   0.8,
 );
+/**
+ * How far a pose may sit from the identity's own primary vector.
+ *
+ * Only a lower bound existed, so a template could stretch without limit: one
+ * real identity ended up holding vectors 0.70 apart — the match threshold
+ * itself — and matching is min-over-members, so its reach grew with every
+ * addition until a stranger passing "between" two of its poses fell inside the
+ * threshold of both. Genuine angles of one face stay within ~0.55 of the
+ * primary here, so anything beyond that widens reach without adding coverage.
+ */
+export const FACE_TEMPLATE_MAX_SPREAD = envNumber(
+  process.env.FACE_TEMPLATE_MAX_SPREAD,
+  0.55,
+  0.2,
+  1,
+);
 
 export function normalizeDescriptorList(input: unknown): number[][] {
   if (!Array.isArray(input)) return [];
@@ -133,7 +149,12 @@ function mostRedundantIndex(template: number[][]) {
 export function addToTemplate(
   template: number[][],
   incoming: number[],
-  { max = FACE_TEMPLATE_MAX, minSpread = FACE_TEMPLATE_MIN_SPREAD } = {},
+  {
+    max = FACE_TEMPLATE_MAX,
+    minSpread = FACE_TEMPLATE_MIN_SPREAD,
+    maxSpread = FACE_TEMPLATE_MAX_SPREAD,
+    primary,
+  }: { max?: number; minSpread?: number; maxSpread?: number; primary?: number[] } = {},
 ): number[][] | null {
   const safe = normalizeDescriptor(incoming);
   if (!safe) return null;
@@ -141,6 +162,12 @@ export function addToTemplate(
   if (!current.length) return [safe];
 
   if (templateDistance(current, safe) < minSpread) return null;
+  // The identity's primary vector is the anchor: a pose belongs to THIS face
+  // only if it stays near it. Without this the template drifts outward one
+  // addition at a time, each one legitimate against its predecessor. Falls back
+  // to the first member when no primary is supplied.
+  const anchor = normalizeDescriptor(primary) ?? current[0];
+  if (maxSpread > 0 && descriptorDistance(anchor, safe) > maxSpread) return null;
 
   const limit = Math.max(1, Math.floor(max));
   if (current.length < limit) return [...current, safe];

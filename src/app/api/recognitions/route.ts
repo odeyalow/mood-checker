@@ -243,7 +243,8 @@ async function promotePrimaryDescriptor(
   const previous = normalizeDescriptor(current.descriptor);
   const template = normalizeDescriptorList(current.descriptors);
   const base = template.length ? template : previous ? [previous] : [];
-  const nextTemplate = addToTemplate(base, descriptor);
+  // The frame being promoted becomes the new primary, so it anchors itself.
+  const nextTemplate = addToTemplate(base, descriptor, { primary: descriptor });
 
   await prisma.faceIdentity.update({
     where: { id: identityId },
