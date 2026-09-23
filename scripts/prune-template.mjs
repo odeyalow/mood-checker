@@ -23,12 +23,15 @@ const prisma = new PrismaClient();
 const args = process.argv.slice(2);
 const shortId = (args.find((a) => !a.startsWith("--")) || "").trim().toUpperCase();
 const apply = args.includes("--apply");
+// Drop exactly the vectors flagged as risky rather than everything past --max:
+// a far pose with a healthy margin is worth keeping, a near one without is not.
+const riskyOnly = args.includes("--risky");
 const maxArg = Number(args[args.indexOf("--max") + 1]);
 const MAX_SPREAD = Number.isFinite(maxArg) && maxArg > 0 ? maxArg : 0.6;
 
 if (!shortId) {
   process.stderr.write(
-    "usage: node scripts/prune-template.mjs <SHORT_ID> [--max 0.6] [--apply]\n",
+    "usage: node scripts/prune-template.mjs <SHORT_ID> [--risky] [--max 0.6] [--apply]\n",
   );
   process.exit(1);
 }
@@ -121,6 +124,9 @@ async function main() {
     }
   }
 
+  // Vectors that reach into somebody else's space: either outright theirs, or
+  // so close to them that keeping them invites a look-alike match.
+  const riskyIndexes = new Set();
   if (otherVectors.length) {
     process.stdout.write("--- who each vector is closest to ---\n");
     for (let i = 0; i < vectors.length; i += 1) {
@@ -131,17 +137,39 @@ async function main() {
       }
       const toPrimary = primary ? cosine(vectors[i].unit, primary) : Number.POSITIVE_INFINITY;
       const foreign = best && best.distance < toPrimary;
+      // How much closer this vector is to its own face than to the nearest
+      // other person. Distance to the primary alone does not decide: a far
+      // but distinctive pose is useful, while one that is equally close to
+      // somebody else is a loaded gun, because matching takes the minimum
+      // over template members.
+      const margin = best ? best.distance - toPrimary : Number.POSITIVE_INFINITY;
+      const verdict = foreign
+        ? "   <-- belongs to them, not here"
+        : margin < 0.1
+        ? "   <-- DANGER: as close to them as to itself"
+        : margin < 0.25
+        ? "   <-- thin margin"
+        : "";
+      if (foreign || margin < 0.1) riskyIndexes.add(i);
       process.stdout.write(
         `  v${i}  own ${Number.isFinite(toPrimary) ? toPrimary.toFixed(3) : "-"}` +
           `   nearest other: ${best.shortId} ${best.distance.toFixed(3)}` +
-          `${foreign ? "   <-- belongs to them, not here" : ""}\n`,
+          `   margin ${Number.isFinite(margin) ? margin.toFixed(3) : "inf"}${verdict}\n`,
       );
     }
     process.stdout.write(
-      "\n  A vector closer to another identity than to its own primary was left\n" +
-        "  behind by a merge. One that is merely far from everything is an unusual\n" +
-        "  angle of this same face — keep it, it is what multi-pose matching is for.\n\n",
+      "\n  margin = how much closer this vector is to its own face than to the\n" +
+        "  nearest other person. Matching takes the minimum over template members,\n" +
+        "  so a thin margin is what lets a look-alike in: that vector reaches into\n" +
+        "  someone else's space. Above ~0.25 it is a useful extra angle even when\n" +
+        "  it sits far from the primary.\n\n",
     );
+    if (riskyIndexes.size) {
+      process.stdout.write(
+        `  ${riskyIndexes.size} vector(s) flagged: v${[...riskyIndexes].join(", v")}\n` +
+          "  Remove exactly those with:  --risky --apply\n\n",
+      );
+    }
   }
 
   // Keep the largest group of vectors that are all within MAX_SPREAD of each
@@ -151,10 +179,15 @@ async function main() {
   const drop = [];
   for (let i = 0; i < vectors.length; i += 1) {
     const d = cosine(vectors[i].unit, anchor);
-    (d <= MAX_SPREAD ? keep : drop).push({ index: i, distance: d });
+    const doomed = riskyOnly ? riskyIndexes.has(i) : d > MAX_SPREAD;
+    (doomed ? drop : keep).push({ index: i, distance: d });
   }
 
-  process.stdout.write(`--- at --max ${MAX_SPREAD} ---\n`);
+  process.stdout.write(
+    riskyOnly
+      ? "--- dropping only the flagged vectors ---\n"
+      : `--- at --max ${MAX_SPREAD} ---\n`,
+  );
   for (const item of keep) {
     process.stdout.write(`  keep  v${item.index}  ${item.distance.toFixed(3)} from primary\n`);
   }
