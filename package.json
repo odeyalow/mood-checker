@@ -41,6 +41,7 @@
     "faces:rebuild": "node scripts/rebuild-face-identities.mjs",
     "faces:report": "node scripts/registry-report.mjs",
     "faces:inspect": "node scripts/inspect-face.mjs",
+    "faces:prune": "node scripts/prune-template.mjs",
     "test:enrolment": "node scripts/test-enrolment-quality.mjs",
     "test:mjpeg": "node scripts/test-mjpeg-reader.mjs",
     "test:emotion": "node scripts/test-emotion-parse.mjs",

@@ -25,6 +25,11 @@ const BLOCKED_IDS_RELOAD_MS = Math.max(
 let blockedIdsCacheAt = 0;
 let blockedIdsCache = new Set<string>();
 
+function parseEnvFloat(name: string, fallback: number) {
+  const value = Number(process.env[name]);
+  return Number.isFinite(value) ? value : fallback;
+}
+
 function parseThreshold(raw: unknown) {
   const value = Number(raw ?? process.env.FACE_IDENTITY_MATCH_THRESHOLD ?? 0.56);
   if (!Number.isFinite(value)) return 0.56;
@@ -57,8 +62,21 @@ function parseDescriptorUpdateStrictDistance(raw: unknown, threshold: number) {
   return Math.max(0.2, Math.min(1, value));
 }
 
+/**
+ * Distance at which a freshly created identity is folded into an existing one.
+ *
+ * This is the most destructive decision in the pipeline: two identities become
+ * one and the merged-away vector joins the survivor's template for good. It
+ * used to sit at baseThreshold + 0.02 — LOOSER than matching — and the dedup
+ * log shows what that cost: merges at 0.703, 0.708 and 0.716, one of them
+ * folding a stranger into a known person's identity, after which that person's
+ * template happily matched the stranger again. Repeat sightings of the same
+ * person land at 0.18-0.50 on this camera, so a merge past threshold - 0.15 is
+ * a guess, and the cheap alternative to guessing is leaving two identities for
+ * one person, which the dedup journal makes visible.
+ */
 function parsePostCheckThreshold(raw: unknown, baseThreshold: number) {
-  const fallback = Math.min(1, Math.max(0.58, baseThreshold + 0.02));
+  const fallback = Math.min(1, Math.max(0.45, baseThreshold - 0.15));
   const value = Number(raw ?? process.env.FACE_IDENTITY_POSTCHECK_THRESHOLD ?? fallback);
   if (!Number.isFinite(value)) return fallback;
   return Math.max(0.2, Math.min(1, value));
@@ -464,10 +482,15 @@ export async function POST(request: Request) {
       duplicateCandidate && duplicateCandidate.createdAt
         ? Math.abs(created.createdAt.getTime() - duplicateCandidate.createdAt.getTime())
         : Number.POSITIVE_INFINITY;
+    // A merge also needs the winner to stand clearly apart from the runner-up.
+    // With only the ordinary match margin (0.04) a candidate that sits near two
+    // identities at once could still be merged into whichever was a hair
+    // closer — on an irreversible operation that is a coin toss.
+    const mergeMinMargin = Math.max(matchMinMargin, parseEnvFloat("FACE_IDENTITY_MERGE_MIN_MARGIN", 0.1));
     const mergeByStrict = Boolean(
       duplicateCandidate &&
         duplicateCandidate.distance <= postCheckThreshold &&
-        duplicateCandidate.margin >= matchMinMargin,
+        duplicateCandidate.margin >= mergeMinMargin,
     );
     const mergeByRelaxed = postCheckRelaxedEnabled && Boolean(
       duplicateCandidate &&
