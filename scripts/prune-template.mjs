@@ -101,6 +101,49 @@ async function main() {
       "  far from every other one came from somebody else.\n\n",
   );
 
+  // The decisive test. Distance alone cannot separate "an unusual angle of this
+  // person" from "a stranger a merge left behind" — both land in 0.55-0.75. But
+  // a vector that came from someone else is, by definition, closer to that
+  // someone else than to the face it is filed under. If the nearest OTHER
+  // identity beats the primary vector, it does not belong here.
+  const others = await prisma.faceIdentity.findMany({
+    where: { id: { not: face.id } },
+    select: { shortId: true, descriptor: true, descriptors: true },
+  });
+  const otherVectors = [];
+  for (const other of others) {
+    const list = Array.isArray(other.descriptors) && other.descriptors.length
+      ? other.descriptors
+      : [other.descriptor];
+    for (const raw of list) {
+      const unit = toUnit(raw);
+      if (unit) otherVectors.push({ shortId: other.shortId, unit });
+    }
+  }
+
+  if (otherVectors.length) {
+    process.stdout.write("--- who each vector is closest to ---\n");
+    for (let i = 0; i < vectors.length; i += 1) {
+      let best = null;
+      for (const candidate of otherVectors) {
+        const d = cosine(vectors[i].unit, candidate.unit);
+        if (!best || d < best.distance) best = { shortId: candidate.shortId, distance: d };
+      }
+      const toPrimary = primary ? cosine(vectors[i].unit, primary) : Number.POSITIVE_INFINITY;
+      const foreign = best && best.distance < toPrimary;
+      process.stdout.write(
+        `  v${i}  own ${Number.isFinite(toPrimary) ? toPrimary.toFixed(3) : "-"}` +
+          `   nearest other: ${best.shortId} ${best.distance.toFixed(3)}` +
+          `${foreign ? "   <-- belongs to them, not here" : ""}\n`,
+      );
+    }
+    process.stdout.write(
+      "\n  A vector closer to another identity than to its own primary was left\n" +
+        "  behind by a merge. One that is merely far from everything is an unusual\n" +
+        "  angle of this same face — keep it, it is what multi-pose matching is for.\n\n",
+    );
+  }
+
   // Keep the largest group of vectors that are all within MAX_SPREAD of each
   // other, measured from the primary vector outward — that is the real face.
   const anchor = primary ?? vectors[0].unit;
