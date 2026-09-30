@@ -87,7 +87,7 @@ function bar(count, max, width = 30) {
  * pictures on the detail page also include crops the worker archives on disk
  * without any row. When the three disagree, this is where it shows.
  */
-async function printConsistency(identities) {
+async function printConsistency(identities, recCounts) {
   const shortIdByPk = new Map(identities.map((it) => [it.id, it.shortId]));
   const knownShortIds = new Set(identities.map((it) => it.shortId));
 
@@ -195,6 +195,71 @@ async function printConsistency(identities) {
   }
   process.stdout.write("\n");
 
+  // Identity health, so a junk row is caught the day it appears rather than
+  // after a week of it collecting other people's ears. Two numbers decide it:
+  // how far the template stretches from its own primary, and how much closer
+  // its widest vector is to its own face than to the nearest other person.
+  // Matching takes the minimum over template members, so a vector with a thin
+  // margin is the one that reaches into a stranger's space.
+  const withTemplates = [];
+  for (const it of identities) {
+    const primary = toUnitVector(it.descriptor);
+    if (!primary) continue;
+    const stored = Array.isArray(it.descriptors) ? it.descriptors : [];
+    const members = stored.map(toUnitVector).filter(Boolean);
+    withTemplates.push({ shortId: it.shortId, id: it.id, primary, members });
+  }
+  if (withTemplates.length) {
+    process.stdout.write("--- identity health ---\n");
+    process.stdout.write("  (spread = furthest pose from its own primary; margin = how much\n");
+    process.stdout.write("   closer that pose is to this face than to the nearest other person)\n");
+    const rows = [];
+    for (const item of withTemplates) {
+      let spread = 0;
+      let worstMargin = Number.POSITIVE_INFINITY;
+      for (const member of item.members) {
+        const own = cosineDistance(member, item.primary);
+        spread = Math.max(spread, own);
+        let nearestOther = Number.POSITIVE_INFINITY;
+        for (const other of withTemplates) {
+          if (other.id === item.id) continue;
+          for (const otherMember of [other.primary, ...other.members]) {
+            const d = cosineDistance(member, otherMember);
+            if (d < nearestOther) nearestOther = d;
+          }
+        }
+        if (Number.isFinite(nearestOther)) {
+          worstMargin = Math.min(worstMargin, nearestOther - own);
+        }
+      }
+      rows.push({
+        shortId: item.shortId,
+        vectors: item.members.length || 1,
+        spread,
+        margin: Number.isFinite(worstMargin) ? worstMargin : Number.NaN,
+        rec: recCounts.get(item.id) || 0,
+      });
+    }
+    rows.sort((a, b) => (a.margin || 0) - (b.margin || 0));
+    for (const row of rows) {
+      const flag =
+        row.margin < 0.1 ? "  <-- reaches into someone else" : row.margin < 0.25 ? "  <-- thin" : "";
+      process.stdout.write(
+        `  ${row.shortId.padEnd(8)} vectors=${row.vectors} spread=${row.spread.toFixed(2)} ` +
+          `margin=${Number.isFinite(row.margin) ? row.margin.toFixed(2) : " n/a"} ` +
+          `rows=${String(row.rec).padStart(3)}${flag}\n`,
+      );
+    }
+    const risky = rows.filter((r) => r.margin < 0.1).length;
+    process.stdout.write(
+      risky
+        ? `\n  ${risky} identit${risky === 1 ? "y" : "ies"} flagged. Inspect with:\n` +
+            "    npm run faces:inspect <ID>     (is it a real person at all?)\n" +
+            "    npm run faces:prune <ID>       (which vector is the problem)\n\n"
+        : "\n  No identity reaches into another. \n\n",
+    );
+  }
+
   process.stdout.write("--- last 12 rows ---\n");
   for (const r of recs.slice(0, 12)) {
     process.stdout.write(
@@ -209,7 +274,10 @@ async function main() {
   const args = parseArgs(process.argv.slice(2));
 
   const identities = await prisma.faceIdentity.findMany({
-    select: { id: true, shortId: true, descriptor: true, createdAt: true },
+    // descriptors carries the multi-pose template, which the health section
+    // below needs: a junk identity shows up in the shape of its template long
+    // before anyone notices the pictures.
+    select: { id: true, shortId: true, descriptor: true, descriptors: true, createdAt: true },
     orderBy: { createdAt: "asc" },
   });
   const totalRecognitions = await prisma.recognition.count();
@@ -250,7 +318,7 @@ async function main() {
   process.stdout.write(`  exactly 1 (likely junk): ${seenOnce}\n`);
   process.stdout.write(`  2+ (established):        ${n - seenOnce - seenNever}\n\n`);
 
-  await printConsistency(identities);
+  await printConsistency(identities, recCounts);
 
   if (n < 2) {
     process.stdout.write("Not enough vectors to analyse duplicates.\n");

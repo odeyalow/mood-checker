@@ -2567,6 +2567,15 @@ async function main() {
   // what keeps distant smears out of the registry; the per-metric gates above
   // let one bad factor through as long as the other two pass.
   const newIdMinQuality = Math.max(0, Math.min(1, envFloat("WORKER_NEW_ID_MIN_QUALITY", 0.15)));
+  // Quality demanded when a face is enrolled from a SINGLE frame (the soft
+  // path). Measured on this camera: a frame taken at the camera scores 0.5+,
+  // mid-approach 0.27, entering the zone 0.09. Asking 0.35 of a one-frame
+  // enrolment means the person was near and sharp, which ears and backs of
+  // heads photographed across the room never are.
+  const newIdSoftMinQuality = Math.max(
+    0,
+    Math.min(1, envFloat("WORKER_NEW_ID_SOFT_MIN_QUALITY", 0.35)),
+  );
   // true (default): the first frame that clears the soft gate may enrol, as it
   // always did — a walking person is enrolled on the pass they are seen on.
   // false: enrolment waits for the full gate (N stable frames), which halves
@@ -3795,6 +3804,16 @@ async function main() {
         newIdMaxGapMs,
       ),
     );
+    const camNewIdSoftMinQuality = Math.max(
+      0,
+      Math.min(
+        1,
+        parseFiniteFloat(
+          getCameraSetting(cameraSettings, cam.cameraId, "newIdSoftMinQuality", newIdSoftMinQuality),
+          newIdSoftMinQuality,
+        ),
+      ),
+    );
     const camNewIdMinQuality = Math.max(
       0,
       Math.min(
@@ -4209,7 +4228,7 @@ async function main() {
           `new_id_frames=${camNewIdConfirmFrames} new_id_min=${camNewIdMinScore.toFixed(3)} ` +
           `new_id_side=${camNewIdMinFaceSidePx} new_id_empty_min=${camNewIdEmptyMinScore.toFixed(3)} ` +
           `new_id_empty_side=${camNewIdEmptyMinFaceSidePx} new_id_sharp=${camNewIdMinSharpness.toFixed(2)} ` +
-            `new_id_quality=${camNewIdMinQuality.toFixed(2)} ` +
+            `new_id_quality=${camNewIdMinQuality.toFixed(2)}/${camNewIdSoftMinQuality.toFixed(2)} ` +
           `new_id_empty_sharp=${camNewIdEmptyMinSharpness.toFixed(2)} new_id_stability=${camNewIdStabilityMaxDistance.toFixed(3)} ` +
           `identify_cd=${camIdentifyMinIntervalMs} auto_create_cd=${camAutoCreateCooldownMs} ` +
           `lock_ms=${camIdentityLockMs} lock_margin=${camIdentityLockSwitchMargin.toFixed(3)} ` +
@@ -4891,7 +4910,16 @@ async function main() {
                   },
                   enrollQualityTargets,
                 );
-                const qualityOkForNewId = enrolQuality >= camNewIdMinQuality;
+                // A face that cleared the full gate has been seen across several
+                // stable frames, so an ordinary-quality frame from it is
+                // trustworthy. A face riding the soft path has been seen ONCE,
+                // and a single frame is exactly how ears, the backs of heads and
+                // half-turned strangers become identities — so it has to be a
+                // genuinely good frame, not merely an adequate one.
+                const requiredQuality = readyForNewId
+                  ? camNewIdMinQuality
+                  : Math.max(camNewIdMinQuality, camNewIdSoftMinQuality);
+                const qualityOkForNewId = enrolQuality >= requiredQuality;
                 // Enrolment keeps the full frontal check even when matching no
                 // longer needs it: a bad angle costs one missed recognition,
                 // but a bad angle turned into an identity poisons the registry
@@ -4907,7 +4935,7 @@ async function main() {
                 ) {
                   log(
                     `[${cam.cameraId}] new_id blocked quality=${enrolQuality.toFixed(3)}<` +
-                      `${camNewIdMinQuality.toFixed(3)} side=${faceSide.toFixed(0)} ` +
+                      `${requiredQuality.toFixed(3)} side=${faceSide.toFixed(0)} ` +
                       `score=${identityScore.toFixed(3)} sharp=${faceSharpness.toFixed(1)}`,
                   );
                   cam.lastEnrolQualityLogAt = now;
