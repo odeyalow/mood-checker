@@ -1470,6 +1470,36 @@ function getFaceSide(det) {
   return Math.max(Number(box.width) || 0, Number(box.height) || 0);
 }
 
+/**
+ * Whether the best candidate is this person.
+ *
+ * Two failures seen on the live camera pull in opposite directions: a known
+ * face in a poor frame lands just past the threshold and is NOT matched, while
+ * a stranger with a similar head lands just inside it and IS. One distance
+ * cannot separate those, so the runner-up margin carries the second half of the
+ * decision — a true match normally leaves every other identity far behind.
+ * Only a distance well clear of the threshold may skip that check.
+ */
+function decideMatch({ distance, margin, threshold, minMargin, veryCloseDelta }) {
+  if (!Number.isFinite(distance) || distance > threshold) return false;
+  if (distance <= Math.max(0.2, threshold - veryCloseDelta)) return true;
+  return margin >= minMargin;
+}
+
+/**
+ * Whether a face that did NOT match may become a new identity.
+ *
+ * `nearKnown` means the best candidate sits just past the match threshold: the
+ * likeliest explanation is the known person seen badly, not a new one. Enrolling
+ * from a single frame there is what gave a face with 70+ sightings two extra
+ * identities, so inside that band only the full gate (several stable frames)
+ * may create one.
+ */
+function decideEnrolment({ bestDistance, threshold, greyBand, fullGate, softGate }) {
+  const nearKnown = Number.isFinite(bestDistance) && bestDistance <= threshold + greyBand;
+  return { nearKnown, allowed: nearKnown ? fullGate : fullGate || softGate };
+}
+
 function computeMatchCandidates(labeledDescriptors, descriptor) {
   if (!Array.isArray(labeledDescriptors) || !labeledDescriptors.length || !descriptor) return [];
   const ranked = [];
@@ -2572,6 +2602,18 @@ async function main() {
   // mid-approach 0.27, entering the zone 0.09. Asking 0.35 of a one-frame
   // enrolment means the person was near and sharp, which ears and backs of
   // heads photographed across the room never are.
+  // Distance below which a match may skip the runner-up margin check.
+  // Expressed as a gap under the match threshold.
+  const veryCloseDelta = Math.max(
+    0.02,
+    Math.min(0.5, envFloat("WORKER_MATCH_VERY_CLOSE_DELTA", 0.25)),
+  );
+  // Band ABOVE the match threshold in which a near-miss is treated as
+  // "probably them, badly seen" rather than a new person.
+  const newIdGreyBand = Math.max(
+    0,
+    Math.min(0.5, envFloat("WORKER_NEW_ID_GREY_BAND", 0.15)),
+  );
   const newIdSoftMinQuality = Math.max(
     0,
     Math.min(1, envFloat("WORKER_NEW_ID_SOFT_MIN_QUALITY", 0.35)),
@@ -3804,6 +3846,26 @@ async function main() {
         newIdMaxGapMs,
       ),
     );
+    const camVeryCloseDelta = Math.max(
+      0.02,
+      Math.min(
+        0.5,
+        parseFiniteFloat(
+          getCameraSetting(cameraSettings, cam.cameraId, "matchVeryCloseDelta", veryCloseDelta),
+          veryCloseDelta,
+        ),
+      ),
+    );
+    const camNewIdGreyBand = Math.max(
+      0,
+      Math.min(
+        0.5,
+        parseFiniteFloat(
+          getCameraSetting(cameraSettings, cam.cameraId, "newIdGreyBand", newIdGreyBand),
+          newIdGreyBand,
+        ),
+      ),
+    );
     const camNewIdSoftMinQuality = Math.max(
       0,
       Math.min(
@@ -4229,6 +4291,7 @@ async function main() {
           `new_id_side=${camNewIdMinFaceSidePx} new_id_empty_min=${camNewIdEmptyMinScore.toFixed(3)} ` +
           `new_id_empty_side=${camNewIdEmptyMinFaceSidePx} new_id_sharp=${camNewIdMinSharpness.toFixed(2)} ` +
             `new_id_quality=${camNewIdMinQuality.toFixed(2)}/${camNewIdSoftMinQuality.toFixed(2)} ` +
+            `very_close=${camVeryCloseDelta.toFixed(2)} grey_band=${camNewIdGreyBand.toFixed(2)} ` +
           `new_id_empty_sharp=${camNewIdEmptyMinSharpness.toFixed(2)} new_id_stability=${camNewIdStabilityMaxDistance.toFixed(3)} ` +
           `identify_cd=${camIdentifyMinIntervalMs} auto_create_cd=${camAutoCreateCooldownMs} ` +
           `lock_ms=${camIdentityLockMs} lock_margin=${camIdentityLockSwitchMargin.toFixed(3)} ` +
@@ -4849,12 +4912,22 @@ async function main() {
                 const margin = second
                   ? second.distance - bestCandidate.distance
                   : Number.POSITIVE_INFINITY;
-                const veryCloseBest = Boolean(bestCandidate) &&
-                  bestCandidate.distance <= Math.max(0.2, camMatchThreshold - 0.06);
+                // A match this close may skip the margin check. It used to mean
+                // threshold - 0.06 (0.64 at 0.70), which is well inside the band
+                // where a look-alike lands — and skipping the margin there is
+                // exactly how someone "similar in head shape" was filed under a
+                // known person. Only a genuinely unambiguous distance earns the
+                // exemption; everything else must still out-distance the
+                // runner-up.
                 const accepted =
                   Boolean(bestCandidate) &&
-                  bestCandidate.distance <= camMatchThreshold &&
-                  (margin >= camMatchMinMargin || veryCloseBest);
+                  decideMatch({
+                    distance: bestCandidate.distance,
+                    margin,
+                    threshold: camMatchThreshold,
+                    minMargin: camMatchMinMargin,
+                    veryCloseDelta: camVeryCloseDelta,
+                  });
                 const ambiguousNearMatch =
                   Boolean(bestCandidate) &&
                   bestCandidate.distance <= camMatchThreshold + 0.03 &&
@@ -4924,8 +4997,36 @@ async function main() {
                 // longer needs it: a bad angle costs one missed recognition,
                 // but a bad angle turned into an identity poisons the registry
                 // for good and shows up later as a duplicate of the same person.
-                const canAttemptNewId =
-                  (readyForNewId || softReadyForNewId) && isFrontalFace && qualityOkForNewId;
+                // Someone already on file, caught in a poor frame, lands just
+                // past the match threshold — and the old rule then enrolled them
+                // as a NEW person, which is how a face with 70+ sightings
+                // acquired two extra identities. Inside this grey band the
+                // likeliest explanation is "it is them, badly seen", so a single
+                // frame is not enough: only the full gate (several stable
+                // frames) may create an identity here, and the next decent frame
+                // usually matches instead.
+                const enrolment = decideEnrolment({
+                  bestDistance: bestCandidate ? bestCandidate.distance : Number.POSITIVE_INFINITY,
+                  threshold: camMatchThreshold,
+                  greyBand: camNewIdGreyBand,
+                  fullGate: readyForNewId,
+                  softGate: softReadyForNewId,
+                });
+                const nearKnownIdentity = enrolment.nearKnown;
+                const canAttemptNewId = enrolment.allowed && isFrontalFace && qualityOkForNewId;
+                if (
+                  nearKnownIdentity &&
+                  !readyForNewId &&
+                  softReadyForNewId &&
+                  now - (cam.lastGreyBandLogAt || 0) >= 5000
+                ) {
+                  log(
+                    `[${cam.cameraId}] new_id held best=${bestCandidate.distance.toFixed(3)} ` +
+                      `near=${bestCandidate.label} th=${camMatchThreshold.toFixed(2)} ` +
+                      `band=${camNewIdGreyBand.toFixed(2)} — waiting for a confirming frame`,
+                  );
+                  cam.lastGreyBandLogAt = now;
+                }
                 if (
                   (readyForNewId || softReadyForNewId) &&
                   isFrontalFace &&

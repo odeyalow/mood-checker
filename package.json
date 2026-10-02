@@ -46,6 +46,7 @@
     "test:mjpeg": "node scripts/test-mjpeg-reader.mjs",
     "test:emotion": "node scripts/test-emotion-parse.mjs",
     "test:emotion:mapping": "node scripts/test-emotion-mapping.mjs",
+    "test:match": "node scripts/test-match-decisions.mjs",
     "create-user": "node scripts/create-user.mjs",
     "faces:clear": "node scripts/manage-faces.mjs clear",
     "faces:delete": "node scripts/manage-faces.mjs delete",
