@@ -56,7 +56,15 @@ function parseMatchMinMargin(raw: unknown) {
  * threshold - 0.20 keeps the multi-pose benefit without the drift.
  */
 function parseDescriptorUpdateStrictDistance(raw: unknown, threshold: number) {
-  const fallback = Math.max(0.2, threshold - 0.2);
+  // Tied to the measured range of genuine repeat sightings (0.18-0.50 on this
+  // camera), not to the match threshold. Deriving it as "threshold - 0.20" made
+  // it collapse to 0.42 when the threshold was lowered to 0.62, so every repeat
+  // sighting between 0.42 and 0.50 stopped teaching the identity anything. The
+  // template then froze while the person kept being seen, drifted out of range,
+  // and was enrolled again as somebody new — which is exactly what happened to
+  // a face with 70+ sightings. The threshold still caps it, so learning can
+  // never reach as far as matching.
+  const fallback = Math.min(0.5, Math.max(0.3, threshold - 0.08));
   const value = Number(raw ?? process.env.FACE_IDENTITY_UPDATE_MAX_DISTANCE ?? fallback);
   if (!Number.isFinite(value)) return fallback;
   return Math.max(0.2, Math.min(1, value));

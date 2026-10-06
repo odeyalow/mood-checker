@@ -14,6 +14,7 @@ const L10N = {
     title: "Карточка лица",
     photos: "Последние 5 снимков",
     history: "История эмоций за все время",
+    historyNoImage: "Распознавания без снимка",
     chart: "График эмоций за все время",
     notFound: "Лицо не найдено",
     loadError: "Ошибка загрузки",
@@ -31,6 +32,7 @@ const L10N = {
     title: "Тұлға картасы",
     photos: "Соңғы 5 сурет",
     history: "Барлық уақыттағы эмоция тарихы",
+    historyNoImage: "Суретсіз танулар",
     chart: "Барлық уақыттағы эмоция графигі",
     notFound: "Тұлға табылмады",
     loadError: "Жүктеу қатесі",
@@ -48,6 +50,7 @@ const L10N = {
     title: "Face Card",
     photos: "Last 5 images",
     history: "All-time emotion history",
+    historyNoImage: "Sightings without a picture",
     chart: "All-time emotion chart",
     notFound: "Face not found",
     loadError: "Load error",
@@ -120,6 +123,12 @@ export default function FaceDetailPage({
 
   const [data, setData] = useState<FacePayload | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
+
+  // Retention deletes the oldest crops while their rows remain, so the
+  // gallery used to fill with grey placeholder tiles. The sightings are
+  // still history and still count, they just have nothing to show.
+  const historyWithImages = (data?.history ?? []).filter((item) => item.snapshotUrl);
+  const historyWithoutImages = (data?.history ?? []).filter((item) => !item.snapshotUrl);
 
   const loadFace = useCallback(async () => {
     try {
@@ -261,31 +270,16 @@ export default function FaceDetailPage({
               <Empty description={t.notFound} />
             ) : (
               <Row gutter={[16, 16]}>
-                {data.history.map((image) => (
+                {historyWithImages.map((image) => (
                   <Col xs={24} sm={12} md={8} lg={6} key={`history-${image.id}`}>
                     <Card
                       size="small"
                       cover={
-                        image.snapshotUrl ? (
-                          <img
-                            src={image.snapshotUrl}
-                            alt={data.face.shortId}
-                            style={{ width: "100%", height: 180, objectFit: "cover" }}
-                          />
-                        ) : (
-                          <div
-                            style={{
-                              width: "100%",
-                              height: 180,
-                              display: "flex",
-                              alignItems: "center",
-                              justifyContent: "center",
-                              background: "#f5f5f5",
-                            }}
-                          >
-                            <Text type="secondary">{t.noImage}</Text>
-                          </div>
-                        )
+                        <img
+                          src={image.snapshotUrl}
+                          alt={data.face.shortId}
+                          style={{ width: "100%", height: 180, objectFit: "cover" }}
+                        />
                       }
                     >
                       <Space direction="vertical" size={4}>
@@ -300,6 +294,32 @@ export default function FaceDetailPage({
                 ))}
               </Row>
             )}
+
+            {/* Sightings whose picture retention has already deleted. They are
+                still part of the person's history, but mixing them into the
+                gallery above filled it with grey "no image" tiles. */}
+            {historyWithoutImages.length ? (
+              <>
+                <Title level={5} style={{ margin: 0 }}>
+                  {`${t.historyNoImage} (${historyWithoutImages.length})`}
+                </Title>
+                <Row gutter={[12, 12]}>
+                  {historyWithoutImages.map((image) => (
+                    <Col xs={24} sm={12} md={8} lg={6} key={`noimg-${image.id}`}>
+                      <Card size="small">
+                        <Space direction="vertical" size={4}>
+                          <Text type="secondary">{`${t.camera}: ${image.cameraId || "-"}`}</Text>
+                          <Text type="secondary">{`${t.mood}: ${image.mood || "-"}`}</Text>
+                          <Text type="secondary">
+                            {`${t.recognizedAt}: ${formatDateTime(image.detectedAt, safeLocale)}`}
+                          </Text>
+                        </Space>
+                      </Card>
+                    </Col>
+                  ))}
+                </Row>
+              </>
+            ) : null}
           </Space>
         </Card>
       )}
